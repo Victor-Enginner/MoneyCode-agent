@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=1440, height=900, initial-scale=1.0" />
+  <title>MONSTER · FUI Operação (Live 4 Hz)</title>
+  <style>
+    :root {
+      --bg: #07080c; --panel: #0d1018; --line: #1d2433; --fg: #cfd6e4;
+      --muted: #5f6b80; --dim: #3a4459; --ok: #22c55e; --warn: #f59e0b;
+      --bad: #ef4444; --accent: #22d3ee; --loss: #f472b6;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100vw; height: 100vh; overflow: hidden;
+      background: var(--bg); color: var(--fg);
+      font-family: Inter, system-ui, sans-serif; font-size: 11px; font-weight: 400;
+    }
+    .num { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+    .fui-shell {
+      display: grid; grid-template-columns: repeat(12, minmax(0, 1fr));
+      grid-template-rows: 36px auto 1fr 220px; gap: 8px; padding: 8px;
+      width: 100%; height: 100%;
+    }
+    .panel-a {
+      grid-column: 1 / -1; height: 36px; display: grid;
+      grid-template-columns: 156px 110px 132px 132px 92px 1fr 220px 92px;
+      align-items: center; gap: 8px; padding: 0 8px;
+      background: var(--panel); border: 1px solid var(--line);
+    }
+    .state-badge {
+      display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px;
+      font-weight: 600; font-size: 11px; border: 1px solid var(--line);
+    }
+    .state-OBSERVANDO { color: var(--ok); border-color: var(--ok); }
+    .state-ENTRADA { color: var(--warn); border-color: var(--warn); }
+    .state-PAUSADO { color: var(--muted); border-color: var(--dim); }
+    .state-DEGRADED { color: var(--warn); border-color: var(--warn); }
+    .state-ERRO { color: var(--bad); border-color: var(--bad); }
+    .state-KILLED { color: #fff; background: var(--bad); border-color: var(--bad); }
+    .metric-cell { display: flex; align-items: baseline; justify-content: space-between; padding: 0 6px; border-left: 1px solid var(--line); }
+    .metric-label { font-size: 9px; color: var(--muted); text-transform: uppercase; }
+    .metric-val { font-size: 12px; font-weight: 600; }
+    .led-group { display: flex; align-items: center; gap: 10px; justify-content: flex-end; }
+    .led-item { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; }
+    .led-dot { width: 8px; height: 8px; display: inline-block; }
+    .led-ok { background: var(--ok); } .led-warn { background: var(--warn); }
+    .led-bad { background: var(--bad); } .led-off { background: var(--dim); }
+    .btn-kill {
+      width: 84px; height: 24px; justify-self: end; background: var(--bad); color: #fff;
+      border: 1px solid var(--bad); font-weight: 600; cursor: pointer;
+    }
+    .status-banner {
+      grid-column: 1 / -1; height: 28px; display: none; align-items: center;
+      justify-content: space-between; padding: 0 10px; font-weight: 600;
+      background: #220b0e; color: var(--bad); border: 1px solid var(--bad);
+    }
+    .panel-b { grid-column: 1 / 3; background: var(--panel); border: 1px solid var(--line); padding: 8px; display: flex; flex-direction: column; gap: 4px; }
+    .panel-c { grid-column: 3 / 9; background: var(--panel); border: 1px solid var(--line); padding: 8px; display: flex; flex-direction: column; justify-content: space-between; }
+    .panel-d { grid-column: 9 / 13; background: var(--panel); border: 1px solid var(--line); padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+    .panel-e { grid-column: 1 / -1; background: var(--panel); border: 1px solid var(--line); padding: 8px; display: flex; flex-direction: column; gap: 6px; overflow: hidden; }
+    .panel-header { display: flex; justify-content: space-between; font-size: 10px; font-weight: 600; color: var(--muted); border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+    .timeline-list { display: grid; grid-template-rows: repeat(20, 1fr); gap: 2px; flex: 1; }
+    .spin-pill { display: grid; grid-template-columns: 28px 1fr 44px; align-items: center; padding: 0 6px; background: #111622; border: 1px solid transparent; }
+    .spin-pill.col-0 { background: #0d2818; color: var(--ok); }
+    .spin-pill.latest { border-color: var(--accent); }
+    .spin-pill.triggered { border-left: 2px solid var(--accent); }
+    table { width: 100%; border-collapse: collapse; text-align: left; }
+    th, td { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: left; }
+    th { font-size: 9px; color: var(--muted); font-weight: 600; }
+    .ladder-row-active { color: var(--warn); font-weight: 600; background: #1b160a; }
+    .tab-bar { display: flex; gap: 4px; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+    .tab-btn { padding: 4px 10px; background: var(--bg); color: var(--muted); border: 1px solid var(--line); font-size: 10px; font-weight: 600; cursor: pointer; }
+    .tab-btn.active { color: var(--accent); border-color: var(--accent); }
+  </style>
+</head>
+<body>
+  <main class="fui-shell">
+    <header class="panel-a" role="status">
+      <div id="state-badge" class="state-badge state-OBSERVANDO num">● OBSERVANDO</div>
+      <div class="metric-cell"><span class="metric-label">SESSÃO</span><span id="m-uptime" class="metric-val num">—</span></div>
+      <div class="metric-cell"><span class="metric-label">BANCA</span><span id="m-bank" class="metric-val num">—</span></div>
+      <div class="metric-cell"><span class="metric-label">P&amp;L</span><span id="m-pnl" class="metric-val num">—</span></div>
+      <div class="metric-cell"><span class="metric-label">DEGRAU</span><span id="m-step" class="metric-val num">—</span></div>
+      <div></div>
+      <div class="led-group num">
+        <span class="led-item"><span id="led-ws" class="led-dot led-ok"></span>WS</span>
+        <span class="led-item"><span id="led-mo" class="led-dot led-ok"></span>MO</span>
+        <span class="led-item"><span id="led-exec" class="led-dot led-ok"></span>EXEC</span>
+        <span class="led-item"><span id="led-db" class="led-dot led-ok"></span>DB</span>
+      </div>
+      <button type="button" class="btn-kill num" onclick="postCmd('kill')">■ KILL</button>
+    </header>
+    <div id="banner" class="status-banner num"><span id="banner-txt">—</span><span>Ctrl+Alt+K · [P] Pause · [R] Resume</span></div>
+    <section class="panel-b">
+      <div class="panel-header"><span>TIMELINE (20)</span><span class="num">FONTE: SPINS</span></div>
+      <div id="timeline" class="timeline-list num"></div>
+    </section>
+    <section class="panel-c">
+      <div class="panel-header"><span>MESA &amp; COBERTURA</span><span class="num">FONTE: INTENT.ACTIVE</span></div>
+      <div style="display:flex;align-items:center;justify-content:space-around;flex:1;">
+        <svg width="220" height="220" viewBox="-110 -110 220 220">
+          <circle cx="0" cy="0" r="92" fill="none" stroke="#1d2433" stroke-width="28" />
+          <circle cx="0" cy="0" r="56" fill="#07080c" stroke="#22d3ee" stroke-width="1.5" />
+          <text id="wheel-last" x="0" y="6" text-anchor="middle" fill="#cfd6e4" font-size="22" font-weight="600" class="num">—</text>
+        </svg>
+        <div style="min-width:220px;padding:12px;border:1px solid var(--line);background:var(--bg);display:flex;flex-direction:column;gap:10px;">
+          <div><div class="metric-label">COBERTURA ATIVA</div><div id="c-cover" class="metric-val num" style="color:var(--accent);font-size:14px;">—</div></div>
+          <div><div class="metric-label">EXPOSIÇÃO TOTAL</div><div id="c-exp" class="metric-val num">—</div></div>
+          <div><div class="metric-label">CONTROLES RÁPIDOS</div><div class="num" style="color:var(--muted);">[P] Pausar · [R] Retomar · [Ctrl+Alt+K] Kill</div></div>
+        </div>
+      </div>
+    </section>
+    <section class="panel-d">
+      <div class="panel-header"><span>ESCADA ×3 (4 DEGRAUS)</span><span class="num">FONTE: LADDER_STATE</span></div>
+      <table class="num">
+        <thead><tr><th>#</th><th>FICHA/COL</th><th>EXPOSIÇÃO</th><th>PERDA ACUM.</th></tr></thead>
+        <tbody id="ladder-body"></tbody>
+      </table>
+      <div style="margin-top:auto;display:flex;justify-content:space-between;padding-top:6px;border-top:1px solid var(--line);" class="num">
+        <span id="d-blow">ESTOURO: —</span>
+        <span id="d-seq">TICK: —</span>
+      </div>
+    </section>
+    <section class="panel-e">
+      <div class="tab-bar num">
+        <button class="tab-btn active" onclick="setTab('DECISOES', this)">[1] DECISOES</button>
+        <button class="tab-btn" onclick="setTab('FILLS', this)">[2] FILLS</button>
+        <button class="tab-btn" onclick="setTab('ORFAOS', this)">[3] ORFAOS</button>
+        <button class="tab-btn" onclick="setTab('ERROS', this)">[4] ERROS</button>
+      </div>
+      <div style="overflow-y:auto;flex:1;">
+        <table class="num"><thead id="tab-head"></thead><tbody id="tab-body"></tbody></table>
+      </div>
+    </section>
+  </main>
+  <script>
+    let currentTab = 'DECISOES';
+    let lastTick = null;
+    const fmtCents = (c) => (c === null || c === undefined) ? '—' : (c < 0 ? '-R$ ' : 'R$ ') + Math.floor(Math.abs(c)/100) + ',' + String(Math.abs(c)%100).padStart(2,'0');
+    const fmtVal = (v) => (v === null || v === undefined || v === '') ? '—' : String(v);
+    const glyphs = { OBSERVANDO:'●', ENTRADA:'◈', PAUSADO:'⏸', DEGRADED:'⚠', ERRO:'✖', KILLED:'■' };
+    async function postCmd(cmd) { await fetch('/api/' + cmd, { method: 'POST' }); }
+    function setTab(t, btn) {
+      currentTab = t;
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      if (lastTick) render(lastTick);
+    }
+    window.addEventListener('keydown', (e) => {
+      if (e.ctrlKey && e.altKey && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); postCmd('kill'); }
+      else if (e.key === 'p' || e.key === 'P') postCmd('pause');
+      else if (e.key === 'r' || e.key === 'R') postCmd('resume');
+    });
+    function render(t) {
+      lastTick = t;
+      const st = t.session?.state || 'OBSERVANDO';
+      const badge = document.getElementById('state-badge');
+      badge.className = 'state-badge num state-' + st;
+      badge.textContent = (glyphs[st] || '●') + ' ' + st;
+      document.getElementById('m-bank').textContent = fmtCents(t.session?.bankroll_cents);
+      document.getElementById('m-pnl').textContent = fmtCents(t.session?.pnl_cents);
+      document.getElementById('m-step').textContent = (t.ladder?.current_step !== null && t.ladder?.max_steps !== null) ? `${t.ladder.current_step}/${t.ladder.max_steps}` : '—';
+      document.getElementById('c-cover').textContent = fmtVal(t.session?.active_cover_label);
+      document.getElementById('c-exp').textContent = fmtCents(t.session?.exposure_cents);
+      document.getElementById('d-blow').textContent = 'ESTOURO: ' + fmtCents(t.ladder?.blow_cost_cents);
+      document.getElementById('d-seq').textContent = 'TICK #' + fmtVal(t.seq);
+      const banner = document.getElementById('banner');
+      if (st === 'DEGRADED' || st === 'ERRO' || st === 'KILLED') {
+        banner.style.display = 'flex';
+        document.getElementById('banner-txt').textContent = fmtVal(t.session?.banner_detail);
+      } else {
+        banner.style.display = 'none';
+      }
+      const spins = t.spins || [];
+      document.getElementById('wheel-last').textContent = spins[0] ? String(spins[0].number) : '—';
+      const tl = document.getElementById('timeline');
+      tl.innerHTML = '';
+      for (let i = 0; i < 20; i++) {
+        const s = spins[i];
+        const d = document.createElement('div');
+        d.className = 'spin-pill' + (s ? (' col-' + s.column + (i===0?' latest':'') + (s.triggered_matcher?' triggered':'')) : '');
+        d.innerHTML = s ? `<strong>${s.number}</strong><span>${s.column===0?'ZERO':'COL '+s.column}</span><span>${s.source.toUpperCase()}</span>` : '<span>—</span><span>—</span><span>—</span>';
+        tl.appendChild(d);
+      }
+      const lb = document.getElementById('ladder-body');
+      lb.innerHTML = (t.ladder?.rows || []).map(r => `<tr class="${r.active?'ladder-row-active':''}"><td>${r.active?'▸ '+r.step:r.step}</td><td>${fmtCents(r.stake_per_cover_cents)}</td><td>${fmtCents(r.exposure_cents)}</td><td>${fmtCents(r.cum_loss_cents)}</td></tr>`).join('');
+      const th = document.getElementById('tab-head');
+      const tb = document.getElementById('tab-body');
+      if (currentTab === 'DECISOES') {
+        th.innerHTML = '<tr><th>SPIN_ID</th><th>CARTÃO</th><th>CONF</th><th>DECISÃO</th><th>MOTIVO</th></tr>';
+        const rows = t.decisions || [];
+        tb.innerHTML = rows.length ? rows.map(d => `<tr><td>${fmtVal(d.spin_id)}</td><td>${fmtVal(d.strategy_id)}</td><td>${d.confidence!==null?d.confidence.toFixed(2):'—'}</td><td>${fmtVal(d.decision).toUpperCase()}</td><td>${fmtVal(d.reason)}</td></tr>`).join('') : '<tr><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>';
+      } else if (currentTab === 'FILLS') {
+        th.innerHTML = '<tr><th>INTENT</th><th>COBERTURA</th><th>VALOR</th><th>ACKED</th><th>LATÊNCIA</th></tr>';
+        const rows = t.fills || [];
+        tb.innerHTML = rows.length ? rows.map(f => `<tr><td>${f.intent_id}</td><td>${fmtVal(f.cover)}</td><td>${fmtCents(f.stake_cents)}</td><td>${f.acked?'● SIM':'✖ NÃO'}</td><td>${f.latency_ms!==null?f.latency_ms+' ms':'—'}</td></tr>`).join('') : '<tr><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>';
+      } else if (currentTab === 'ORFAOS') {
+        th.innerHTML = '<tr><th>INTENT</th><th>SPIN_ID</th><th>ESTRATÉGIA</th><th>VALOR</th><th>STATUS</th></tr>';
+        const rows = t.orphans || [];
+        tb.innerHTML = rows.length ? rows.map(o => `<tr><td>${o.intent_id}</td><td>${fmtVal(o.spin_id)}</td><td>${fmtVal(o.strategy_id)}</td><td>${fmtCents(o.stake_cents)}</td><td>${fmtVal(o.reconcile_status)}</td></tr>`).join('') : '<tr><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>';
+      } else {
+        th.innerHTML = '<tr><th>ID</th><th>KIND</th><th>DETALHE</th><th>TS</th></tr>';
+        const rows = t.errors || [];
+        tb.innerHTML = rows.length ? rows.map(e => `<tr><td>${e.id}</td><td>${fmtVal(e.kind)}</td><td>${fmtVal(e.detail)}</td><td>${fmtVal(e.ts)}</td></tr>`).join('') : '<tr><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>';
+      }
+    }
+    setInterval(async () => {
+      try { const r = await fetch('/api/tick'); if (r.ok) render(await r.json()); } catch (_) {}
+    }, 250);
+  </script>
+</body>
+</html>

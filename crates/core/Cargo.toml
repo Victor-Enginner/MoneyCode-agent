@@ -10,6 +10,7 @@ monster-capture = { path = "../capture" }
 monster-risk = { path = "../risk" }
 monster-store = { path = "../store" }
 monster-strategy-native = { path = "../strategy-native" }
+monster-ui = { path = "../ui" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

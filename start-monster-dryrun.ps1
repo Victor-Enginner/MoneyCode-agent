@@ -75,7 +75,7 @@ if (-not $HealthAlive) {
     Start-Sleep -Seconds 3
 }
 
-Write-Host "[MONSTER] Rodando testes e iniciando monster-core (--dry-run)..." -ForegroundColor Yellow
+Write-Host "[MONSTER] Abrindo painel FUI vivo em http://127.0.0.1:8791 e iniciando monster-core (--dry-run)..." -ForegroundColor Yellow
+Start-Process "http://127.0.0.1:8791"
 Set-Location $RootDir
-cargo test --offline
 cargo run --offline -p monster-core -- --dry-run

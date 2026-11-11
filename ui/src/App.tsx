@@ -83,6 +83,11 @@ export const App: React.FC = () => {
     if (w.__TAURI__?.core?.invoke) {
       return w.__TAURI__.core.invoke(cmd, args);
     }
+    try {
+      await fetch(`http://127.0.0.1:8791/api/${cmd}`, { method: 'POST' });
+    } catch {
+      // fallback offline
+    }
     return null;
   };
 
@@ -97,7 +102,17 @@ export const App: React.FC = () => {
 
   // Lote a 4 Hz (250 ms) para aplicar deltas de bus://tick sem re-render por evento individual (§7).
   useEffect(() => {
-    const timer = window.setInterval(() => {
+    const timer = window.setInterval(async () => {
+      if (!pendingBatchRef.current) {
+        try {
+          const res = await fetch('http://127.0.0.1:8791/api/tick');
+          if (res.ok) {
+            pendingBatchRef.current = (await res.json()) as BusTickDelta;
+          }
+        } catch {
+          // aguardando monster-core na porta 8791
+        }
+      }
       const batch = pendingBatchRef.current;
       if (!batch) return;
       pendingBatchRef.current = null;

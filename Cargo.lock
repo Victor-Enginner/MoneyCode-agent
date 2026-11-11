@@ -154,6 +154,7 @@ dependencies = [
  "monster-risk",
  "monster-store",
  "monster-strategy-native",
+ "monster-ui",
  "serde",
  "serde_json",
  "thiserror",

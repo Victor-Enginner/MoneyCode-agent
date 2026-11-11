@@ -13,7 +13,7 @@ pub use dag::{
 };
 pub use executor::{
     place, Calibration, CdpActuator, CoverAck, DryRunActuator, ExecError, ExecutionMode, Fills,
-    KillSwitch,
+    KillSwitch, LiveHttpActuator,
 };
 pub use reconciler::{boot_reconcile, reconcile_spin, BootReconcileReport, ReconcileReport};
 

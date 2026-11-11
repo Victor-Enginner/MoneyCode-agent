@@ -1,20 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Binário principal do orquestrador `monster-core` (DAG + Risco + Executor + Reconciliador).
-//! Opera em `--dry-run` por padrão (§1.5), valida Monte Carlo no boot (§13) e consome o sidecar em `127.0.0.1:8787`.
-//! Nunca para a captura por erro de execução (§1.7).
+//! Binário principal do orquestrador `monster-core` (DAG + Risco + Executor + Reconciliador + FUI Server).
+//! Opera em `--dry-run` por padrão (§1.5), valida Monte Carlo no boot (§13), consome o sidecar em `127.0.0.1:8787`
+//! e serve o painel FUI em tempo real (`4 Hz`) em `http://127.0.0.1:8791`.
 
 use monster_capture::{CaptureSource, SpinBus, StreamClient, DEFAULT_STREAM_ADDR};
 use monster_core::{
-    boot_reconcile, evaluate_dag, place, reconcile_spin, Calibration, CoverAck, DryRunActuator,
-    ExecutionMode, KillSwitch, Plan, Window30,
+    boot_reconcile, evaluate_dag, place, reconcile_spin, Calibration, CdpActuator, CoverAck,
+    DryRunActuator, ExecutionMode, KillSwitch, LiveHttpActuator, Plan, Window30,
 };
 use monster_risk::{run_monte_carlo, Cfg, McParams, State, Verdict};
-use monster_store::{init_pool, insert_spin, NewSpin, SpinSource};
+use monster_store::{init_pool, insert_spin, NewSpin, SpinSource, SqlitePool};
 use monster_strategy_native::default_matchers;
+use monster_ui::FuiController;
 use std::env;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const LIVE_FUI_HTML: &str = include_str!("../../../ui/live.html");
 
 fn now_unix_ms() -> i64 {
     SystemTime::now()
@@ -23,13 +28,83 @@ fn now_unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn spawn_fui_http_server(pool: SqlitePool, fui: FuiController, kill_switch: KillSwitch) {
+    thread::spawn(move || {
+        let Ok(listener) = TcpListener::bind("127.0.0.1:8791") else {
+            eprintln!("[FUI-HTTP] porta 127.0.0.1:8791 já em uso");
+            return;
+        };
+        println!("[FUI-HTTP] Painel de Operação vivo em http://127.0.0.1:8791");
+
+        for stream_res in listener.incoming() {
+            let Ok(mut stream) = stream_res else {
+                continue;
+            };
+            let mut buf = [0u8; 2048];
+            let Ok(n) = stream.read(&mut buf) else {
+                continue;
+            };
+            if n == 0 {
+                continue;
+            }
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let first_line = req.lines().next().unwrap_or("");
+
+            if first_line.starts_with("GET /api/tick") {
+                if let Ok(tick) = fui.build_bus_tick(&pool, "quebra_permanencia_coluna") {
+                    if let Ok(body) = serde_json::to_string(&tick) {
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes());
+                        continue;
+                    }
+                }
+                let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n");
+            } else if first_line.starts_with("POST /api/kill") {
+                kill_switch.trip();
+                let _ = fui.kill();
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}");
+            } else if first_line.starts_with("POST /api/pause") {
+                let _ = fui.pause();
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}");
+            } else if first_line.starts_with("POST /api/resume") {
+                kill_switch.reset();
+                let _ = fui.resume();
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}");
+            } else {
+                let body = LIVE_FUI_HTML.as_bytes();
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(hdr.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        }
+    });
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let mut mode = ExecutionMode::DryRun;
     let mut stream_addr = DEFAULT_STREAM_ADDR.to_string();
     let mut db_uri = "O:/Archives/Eistein/FUI AGENT ROULLET/monster.db".to_string();
-    let mut bankroll_cents: i64 = 45_000;
-    let mut cfg = Cfg::default();
+    let mut bankroll_cents: i64 = 7_058;
+    let mut cfg = Cfg {
+        base_cents: 10,
+        max_steps: 4,
+        max_bet_per_cover_cents: 100_000,
+        max_exposure_pct: 0.10,
+        stop_loss_cents: 1600,
+        stop_win_pct: 0.08,
+        min_window_ms: 2000,
+        cooldown_spins: 2,
+        max_entries_per_hour: 40,
+        chip_denoms_cents: vec![2500, 1000, 500, 100, 50, 10],
+    };
 
     let mut i = 1;
     while i < args.len() {
@@ -96,8 +171,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let matchers = default_matchers();
     let cal = Calibration::default();
-    let actuator = DryRunActuator::new();
+    let dry_actuator = DryRunActuator::new();
+    let live_actuator = LiveHttpActuator::new(stream_addr.clone());
     let kill_switch = KillSwitch::new();
+    let fui = FuiController::new(cfg.clone());
+
+    spawn_fui_http_server(pool.clone(), fui, kill_switch.clone());
+
     let mut window = Window30::new();
     let mut session_pnl_cents = 0i64;
     let mut spins_since_blow = cfg.cooldown_spins;
@@ -201,7 +281,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         if let (Some(Verdict::Place), Some(plan)) = (dag_out.verdict, dag_out.plan) {
-            match place(&pool, &actuator, &plan, &cal, &kill_switch, now_ms) {
+            let actuator: &dyn CdpActuator = match mode {
+                ExecutionMode::DryRun => &dry_actuator,
+                ExecutionMode::Live => &live_actuator,
+            };
+            match place(&pool, actuator, &plan, &cal, &kill_switch, now_ms) {
                 Ok(fills) => {
                     println!(
                         "[EXECUTOR {:?}] ENTRADA CONFIRMADA | strategy={} | degrau={} | total={}¢ | preview={}¢ | covers={:?}",

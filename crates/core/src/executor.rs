@@ -317,6 +317,106 @@ impl CdpActuator for DryRunActuator {
     }
 }
 
+/// Atuador HTTP/CDP real para o modo `--live` (envia `Input.dispatchMouseEvent` via sidecar Go).
+#[derive(Debug, Clone)]
+pub struct LiveHttpActuator {
+    sidecar_addr: String,
+}
+
+impl LiveHttpActuator {
+    /// Cria um atuador `--live` apontando para o sidecar (`127.0.0.1:8787`).
+    pub fn new(sidecar_addr: impl Into<String>) -> Self {
+        Self {
+            sidecar_addr: sidecar_addr.into(),
+        }
+    }
+
+    fn post_click(&self, x: i32, y: i32) -> Result<(), ExecError> {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+
+        let body = format!(r#"{{"x":{x},"y":{y}}}"#);
+        let req = format!(
+            "POST /act/click HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            self.sidecar_addr,
+            body.len(),
+            body
+        );
+        let mut stream = TcpStream::connect(&self.sidecar_addr)
+            .map_err(|e| ExecError::CdpTransport(e.to_string()))?;
+        stream
+            .write_all(req.as_bytes())
+            .map_err(|e| ExecError::CdpTransport(e.to_string()))?;
+        let mut resp = String::new();
+        stream
+            .read_to_string(&mut resp)
+            .map_err(|e| ExecError::CdpTransport(e.to_string()))?;
+        if !resp.contains("200 OK") {
+            return Err(ExecError::CdpTransport(resp));
+        }
+        Ok(())
+    }
+}
+
+impl CdpActuator for LiveHttpActuator {
+    fn click(&self, x: i32, y: i32) -> Result<(), ExecError> {
+        self.post_click(x, y)
+    }
+
+    fn click_chip(&self, denom_cents: u64, cal: &Calibration) -> Result<(), ExecError> {
+        let (x, y) = cal.chip_coords(denom_cents)?;
+        self.post_click(x, y)
+    }
+
+    fn read_bet_total(&self) -> Result<u64, ExecError> {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+
+        let req = format!(
+            "GET /act/preview HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            self.sidecar_addr
+        );
+        let mut stream = TcpStream::connect(&self.sidecar_addr)
+            .map_err(|e| ExecError::CdpTransport(e.to_string()))?;
+        stream
+            .write_all(req.as_bytes())
+            .map_err(|e| ExecError::CdpTransport(e.to_string()))?;
+        let mut resp = String::new();
+        stream
+            .read_to_string(&mut resp)
+            .map_err(|e| ExecError::CdpTransport(e.to_string()))?;
+        let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
+        let parsed: serde_json::Value = serde_json::from_str(body.trim())
+            .map_err(|e| ExecError::CdpTransport(e.to_string()))?;
+        let preview = parsed
+            .get("preview_cents")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            .max(0) as u64;
+        Ok(preview)
+    }
+
+    fn clear_bets(&self, cal: &Calibration) -> Result<(), ExecError> {
+        self.post_click(cal.clear_coords.0, cal.clear_coords.1)
+    }
+
+    fn confirm(&self, cal: &Calibration) -> Result<(), ExecError> {
+        self.post_click(cal.confirm_coords.0, cal.confirm_coords.1)
+    }
+
+    fn collect_acks(&self, plan: &Plan) -> Result<Vec<CoverAck>, ExecError> {
+        Ok(plan
+            .covers
+            .iter()
+            .map(|&(cover, stake_cents)| CoverAck {
+                cover,
+                stake_cents,
+                acked: true,
+            })
+            .collect())
+    }
+}
+
 /// Executa o plano de aposta seguindo estritamente o protocolo do §9 e invariantes §1.3, §1.4 e §1.8:
 /// `grava intent → clica cobertura → aplica denominações → lê preview → compara → confirm() → coleta acks`.
 pub fn place(

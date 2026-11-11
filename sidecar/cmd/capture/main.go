@@ -59,15 +59,19 @@ func (e SpinEvent) Validate() error {
 	return nil
 }
 
-// Hub gerencia deduplicação canônica e fanout NDJSON para assinantes de GET /stream.
+// Hub gerencia deduplicação canônica, estado de atuação CDP e fanout NDJSON para assinantes de GET /stream.
 type Hub struct {
-	mu          sync.Mutex
-	seenSpinID  map[string]struct{}
-	seenBucket  map[string]struct{}
-	subs        map[chan []byte]struct{}
-	totalSpins  atomic.Uint64
-	lastEventAt atomic.Int64
-	degraded    atomic.Bool
+	mu             sync.Mutex
+	seenSpinID     map[string]struct{}
+	seenBucket     map[string]struct{}
+	subs           map[chan []byte]struct{}
+	totalSpins     atomic.Uint64
+	lastEventAt    atomic.Int64
+	degraded       atomic.Bool
+	cdpClient      *cdp.Client
+	playtechSid    string
+	lastBetCents   atomic.Int64
+	lastBalCents   atomic.Int64
 }
 
 // NewHub inicializa o hub de eventos de spin.
@@ -193,6 +197,62 @@ func (h *Hub) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	)
 }
 
+type clickRequest struct {
+	X int `json:"x"`
+	Y int `json:"y"`
+}
+
+func (h *Hub) handleActClick(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	var req clickRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	h.mu.Lock()
+	client := h.cdpClient
+	sid := h.playtechSid
+	h.mu.Unlock()
+
+	if client == nil || sid == "" {
+		http.Error(w, "playtech cdp session not ready", http.StatusServiceUnavailable)
+		return
+	}
+	if err := client.DispatchClick(sid, req.X, req.Y); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"ok":true}` + "\n"))
+}
+
+func (h *Hub) handleActPreview(w http.ResponseWriter, _ *http.Request) {
+	h.mu.Lock()
+	client := h.cdpClient
+	sid := h.playtechSid
+	h.mu.Unlock()
+
+	if client != nil && sid != "" {
+		_ = client.RequestSlipRead(sid)
+		time.Sleep(35 * time.Millisecond)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = fmt.Fprintf(
+		w,
+		`{"preview_cents":%d,"balance_cents":%d}`+"\n",
+		h.lastBetCents.Load(),
+		h.lastBalCents.Load(),
+	)
+}
+
 // classifyPlaytechSocket decodifica a URL (incluindo túnel ?u=wss%3A%2F%2F...) e aplica a whitelist estrita.
 // Retorna apenas "eurolive-frontend.playtechgaming.com" (primário) ou "ielive-gateway.ptielive.com" (standby).
 func classifyPlaytechSocket(rawURL string) (string, bool) {
@@ -284,13 +344,15 @@ func dumpHandshakeMeta(logsDir, reqID, host string, params map[string]any) {
 }
 
 type moBindingPayload struct {
-	T   string `json:"t"`
-	N   int    `json:"n"`
-	Rid string `json:"rid"`
-	Src string `json:"src"`
-	At  int64  `json:"at"`
-	B64 string `json:"b64"`
-	URL string `json:"url"`
+	T            string `json:"t"`
+	N            int    `json:"n"`
+	Rid          string `json:"rid"`
+	Src          string `json:"src"`
+	At           int64  `json:"at"`
+	B64          string `json:"b64"`
+	URL          string `json:"url"`
+	BetCents     *int64 `json:"bet_cents"`
+	BalanceCents *int64 `json:"balance_cents"`
 }
 
 type captureOptions struct {
@@ -318,6 +380,10 @@ func runCaptureLoop(ctx context.Context, opts captureOptions, corr *wsdecap.Corr
 		return
 	}
 	defer client.Close()
+
+	hub.mu.Lock()
+	hub.cdpClient = client
+	hub.mu.Unlock()
 
 	for {
 		select {
@@ -451,6 +517,20 @@ func runCaptureLoop(ctx context.Context, opts captureOptions, corr *wsdecap.Corr
 					}
 					continue
 				}
+				if mo.T == "slip" {
+					if mo.BetCents != nil {
+						hub.lastBetCents.Store(*mo.BetCents)
+					}
+					if mo.BalanceCents != nil {
+						hub.lastBalCents.Store(*mo.BalanceCents)
+					}
+					continue
+				}
+				if ev.SessionID != "" {
+					hub.mu.Lock()
+					hub.playtechSid = ev.SessionID
+					hub.mu.Unlock()
+				}
 				if mo.N < 0 || mo.N > 36 {
 					continue
 				}
@@ -544,6 +624,8 @@ func main() {
 	streamMux.HandleFunc("/spin", hub.handlePostSpin)
 	streamMux.HandleFunc("/stream", hub.handleStream)
 	streamMux.HandleFunc("/health", hub.handleHealth)
+	streamMux.HandleFunc("/act/click", hub.handleActClick)
+	streamMux.HandleFunc("/act/preview", hub.handleActPreview)
 
 	streamServer := &http.Server{
 		Addr:              fmt.Sprintf("127.0.0.1:%d", *portFlag),
