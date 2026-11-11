@@ -10,7 +10,10 @@ use monster_core::{
     HistoryBuffer, KillSwitch, LiveHttpActuator, Plan, Window30, REAL_TABLE_479_RECENT_FIRST,
 };
 use monster_risk::{run_monte_carlo, Cfg, McParams, State, Verdict};
-use monster_store::{init_pool, insert_spin, NewSpin, SpinSource, SqlitePool};
+use monster_store::{
+    init_pool, insert_intent, insert_spin, IntentDecision, NewIntent, NewSpin, SpinSource,
+    SqlitePool,
+};
 use monster_strategy_native::default_matchers;
 use monster_ui::FuiController;
 use std::env;
@@ -397,6 +400,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         } else {
+            // Verifica se algum padrão entrou em pré-alerta de observação (3x em Coluna/Dúzia ou 5x em Cor/Alto-Baixo/Par-Ímpar)
+            if let Some(pre) = dag_out
+                .aggregates
+                .iter()
+                .find(|a| a.confidence >= 0.40 && a.confidence < 0.55)
+            {
+                let covers_str = pre
+                    .cover
+                    .iter()
+                    .map(|c| c.canonical_key().to_uppercase())
+                    .collect::<Vec<_>>()
+                    .join(" + ");
+                let pre_reason = format!(
+                    "OBSERVANDO (pré-gatilho armado p/ {}) — entra na próxima repetição",
+                    covers_str
+                );
+                println!(
+                    "[OBSERVANDO] spin={} | padrao={} | alvo={} (aguardando confirmacao no proximo giro)",
+                    ev.spin_id, pre.strategy_id, covers_str
+                );
+                let _ = insert_intent(
+                    &pool,
+                    &NewIntent {
+                        spin_id: ev.spin_id.clone(),
+                        strategy_id: pre.strategy_id.clone(),
+                        confidence: pre.confidence,
+                        ev_cents: 0,
+                        decision: IntentDecision::Skip,
+                        reason: Some(pre_reason),
+                        ladder_step: current_step,
+                        stake_cents: 0,
+                        created_at: now_ms,
+                    },
+                );
+            }
             fui.sync_live_metrics(
                 boot_instant.elapsed().as_secs(),
                 bankroll_cents,

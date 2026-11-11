@@ -65,6 +65,7 @@ pub fn boot_reconcile(
 const fn payout_multiplier(cover: Cover) -> i64 {
     match cover {
         Cover::Col(_) | Cover::Col2To1(_) | Cover::Dozen(_) => 2,
+        Cover::Red | Cover::Black | Cover::Low | Cover::High | Cover::Even | Cover::Odd => 1,
         Cover::Straight(_) => 35,
         Cover::Terminal(_) => 8,
     }

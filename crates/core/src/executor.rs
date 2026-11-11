@@ -119,6 +119,12 @@ impl Default for Calibration {
         covers.insert("dozen:1".to_string(), (520, 815));
         covers.insert("dozen:2".to_string(), (670, 815));
         covers.insert("dozen:3".to_string(), (815, 815));
+        covers.insert("low".to_string(), (480, 855));
+        covers.insert("even".to_string(), (555, 855));
+        covers.insert("red".to_string(), (630, 855));
+        covers.insert("black".to_string(), (705, 855));
+        covers.insert("odd".to_string(), (780, 855));
+        covers.insert("high".to_string(), (845, 855));
 
         let mut chips = HashMap::new();
         chips.insert(10, (955, 945));

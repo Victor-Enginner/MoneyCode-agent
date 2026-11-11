@@ -16,10 +16,31 @@ pub enum Cover {
     Col2To1(u8),
     /// Dúzia 1 (1–12), 2 (13–24) ou 3 (25–36).
     Dozen(u8),
+    /// Cor Vermelha (18 casas).
+    Red,
+    /// Cor Preta (18 casas).
+    Black,
+    /// Baixos `1-18` (18 casas).
+    Low,
+    /// Altos `19-36` (18 casas).
+    High,
+    /// Pares `EVEN` (18 casas).
+    Even,
+    /// Ímpares `ODD` (18 casas).
+    Odd,
     /// Número pleno (`0..=36`).
     Straight(u8),
     /// Terminal (`0..=9`).
     Terminal(u8),
+}
+
+/// Verifica se o número `n` (`1..=36`) pertence às 18 casas vermelhas da roleta europeia/brasileira.
+#[inline]
+pub const fn is_red_number(n: u8) -> bool {
+    matches!(
+        n,
+        1 | 3 | 5 | 7 | 9 | 12 | 14 | 16 | 18 | 19 | 21 | 23 | 25 | 27 | 30 | 32 | 34 | 36
+    )
 }
 
 impl Cover {
@@ -29,6 +50,12 @@ impl Cover {
             Self::Col(c) => format!("col:{c}"),
             Self::Col2To1(c) => format!("col2to1:{c}"),
             Self::Dozen(d) => format!("dozen:{d}"),
+            Self::Red => "red".to_string(),
+            Self::Black => "black".to_string(),
+            Self::Low => "low".to_string(),
+            Self::High => "high".to_string(),
+            Self::Even => "even".to_string(),
+            Self::Odd => "odd".to_string(),
             Self::Straight(n) => format!("straight:{n}"),
             Self::Terminal(t) => format!("terminal:{t}"),
         }
@@ -54,6 +81,12 @@ impl Cover {
                     ((number - 1) % 3 + 1) == c
                 }
             }
+            Self::Red => number != 0 && is_red_number(number),
+            Self::Black => number != 0 && !is_red_number(number),
+            Self::Low => number >= 1 && number <= 18,
+            Self::High => number >= 19 && number <= 36,
+            Self::Even => number != 0 && number.is_multiple_of(2),
+            Self::Odd => number != 0 && !number.is_multiple_of(2),
             Self::Straight(n) => number == n,
             Self::Terminal(t) => number != 0 && (number % 10) == t,
         }
@@ -186,10 +219,19 @@ impl Matcher for QuebraDuzia {
             .map(bucket_12)
             .take_while(|&d| d == alvo)
             .count();
+        if streak == 3 && self.min == 4 {
+            // 3 repetições: pré-alerta de observação (conf 0.50 < 0.55)
+            return Some(BetIntent {
+                v: 1,
+                strategy_id: self.id().to_string(),
+                cover: other_two_dozens(alvo),
+                confidence: 0.50,
+            });
+        }
         if !(self.min..=self.max).contains(&streak) {
             return None;
         }
-        let confidence = (0.55 + 0.08 * ((streak - self.min) as f64)).min(0.95);
+        let confidence = (0.66 + 0.07 * ((streak - self.min) as f64)).min(0.95);
         Some(BetIntent {
             v: 1,
             strategy_id: self.id().to_string(),
@@ -344,7 +386,7 @@ pub struct QuebraColunaReal {
 
 impl Default for QuebraColunaReal {
     fn default() -> Self {
-        Self { min: 4, max: 6 }
+        Self { min: 4, max: 8 }
     }
 }
 
@@ -364,14 +406,23 @@ impl Matcher for QuebraColunaReal {
             .copied()
             .take_while(|&n| n != 0 && n <= 36 && ((n - 1) % 3 + 1) == alvo)
             .count();
-        if !(self.min..=self.max).contains(&streak) {
-            return None;
-        }
-        let confidence = (0.58 + 0.08 * ((streak - self.min) as f64)).min(0.95);
         let cover = (1..=3u8)
             .filter(|&c| c != alvo)
             .map(Cover::Col2To1)
             .collect();
+        if streak == 3 && self.min == 4 {
+            // 3 repetições: pré-alerta de observação (conf 0.50 < 0.55)
+            return Some(BetIntent {
+                v: 1,
+                strategy_id: self.id().to_string(),
+                cover,
+                confidence: 0.50,
+            });
+        }
+        if !(self.min..=self.max).contains(&streak) {
+            return None;
+        }
+        let confidence = (0.68 + 0.07 * ((streak - self.min) as f64)).min(0.95);
         Some(BetIntent {
             v: 1,
             strategy_id: self.id().to_string(),
@@ -381,15 +432,183 @@ impl Matcher for QuebraColunaReal {
     }
 }
 
-/// Constrói o conjunto padrão dos matchers nativos do §8 do `AGENTS.md` + `QuebraColunaReal`.
+/// `matcher.quebra_cor_6x`: observa em 5 repetições (`conf=0.50`) e entra a partir de 6 repetições
+/// seguidas de Vermelho ou Preto (`conf>=0.68`), apostando na cor oposta.
+#[derive(Debug, Clone, Copy)]
+pub struct QuebraCor {
+    /// Streak mínimo para entrada (`6`).
+    pub min: usize,
+    /// Streak máximo para entrada (`12`).
+    pub max: usize,
+}
+
+impl Default for QuebraCor {
+    fn default() -> Self {
+        Self { min: 6, max: 12 }
+    }
+}
+
+impl Matcher for QuebraCor {
+    fn id(&self) -> &'static str {
+        "quebra_cor_6x"
+    }
+
+    fn evaluate(&self, w: &[u8]) -> Option<BetIntent> {
+        let first = *w.first()?;
+        if first == 0 || first > 36 {
+            return None;
+        }
+        let first_red = is_red_number(first);
+        let streak = w
+            .iter()
+            .copied()
+            .take_while(|&n| n != 0 && n <= 36 && is_red_number(n) == first_red)
+            .count();
+        let target_cover = if first_red { Cover::Black } else { Cover::Red };
+        if streak + 1 == self.min {
+            return Some(BetIntent {
+                v: 1,
+                strategy_id: self.id().to_string(),
+                cover: vec![target_cover],
+                confidence: 0.50,
+            });
+        }
+        if !(self.min..=self.max).contains(&streak) {
+            return None;
+        }
+        let confidence = (0.68 + 0.06 * ((streak - self.min) as f64)).min(0.95);
+        Some(BetIntent {
+            v: 1,
+            strategy_id: self.id().to_string(),
+            cover: vec![target_cover],
+            confidence,
+        })
+    }
+}
+
+/// `matcher.quebra_alto_baixo_6x`: observa em 5 repetições (`conf=0.50`) e entra a partir de 6 repetições
+/// seguidas de Baixos (`1-18`) ou Altos (`19-36`), apostando na metade oposta.
+#[derive(Debug, Clone, Copy)]
+pub struct QuebraAltoBaixo {
+    /// Streak mínimo para entrada (`6`).
+    pub min: usize,
+    /// Streak máximo para entrada (`12`).
+    pub max: usize,
+}
+
+impl Default for QuebraAltoBaixo {
+    fn default() -> Self {
+        Self { min: 6, max: 12 }
+    }
+}
+
+impl Matcher for QuebraAltoBaixo {
+    fn id(&self) -> &'static str {
+        "quebra_alto_baixo_6x"
+    }
+
+    fn evaluate(&self, w: &[u8]) -> Option<BetIntent> {
+        let first = *w.first()?;
+        if first == 0 || first > 36 {
+            return None;
+        }
+        let first_low = first <= 18;
+        let streak = w
+            .iter()
+            .copied()
+            .take_while(|&n| n != 0 && n <= 36 && (n <= 18) == first_low)
+            .count();
+        let target_cover = if first_low { Cover::High } else { Cover::Low };
+        if streak + 1 == self.min {
+            return Some(BetIntent {
+                v: 1,
+                strategy_id: self.id().to_string(),
+                cover: vec![target_cover],
+                confidence: 0.50,
+            });
+        }
+        if !(self.min..=self.max).contains(&streak) {
+            return None;
+        }
+        let confidence = (0.68 + 0.06 * ((streak - self.min) as f64)).min(0.95);
+        Some(BetIntent {
+            v: 1,
+            strategy_id: self.id().to_string(),
+            cover: vec![target_cover],
+            confidence,
+        })
+    }
+}
+
+/// `matcher.quebra_par_impar_6x`: observa em 5 repetições (`conf=0.50`) e entra a partir de 6 repetições
+/// seguidas de Par (`EVEN`) ou Ímpar (`ODD`), apostando na paridade oposta.
+#[derive(Debug, Clone, Copy)]
+pub struct QuebraParImpar {
+    /// Streak mínimo para entrada (`6`).
+    pub min: usize,
+    /// Streak máximo para entrada (`12`).
+    pub max: usize,
+}
+
+impl Default for QuebraParImpar {
+    fn default() -> Self {
+        Self { min: 6, max: 12 }
+    }
+}
+
+impl Matcher for QuebraParImpar {
+    fn id(&self) -> &'static str {
+        "quebra_par_impar_6x"
+    }
+
+    fn evaluate(&self, w: &[u8]) -> Option<BetIntent> {
+        let first = *w.first()?;
+        if first == 0 || first > 36 {
+            return None;
+        }
+        let first_even = first.is_multiple_of(2);
+        let streak = w
+            .iter()
+            .copied()
+            .take_while(|&n| n != 0 && n <= 36 && n.is_multiple_of(2) == first_even)
+            .count();
+        let target_cover = if first_even { Cover::Odd } else { Cover::Even };
+        if streak + 1 == self.min {
+            return Some(BetIntent {
+                v: 1,
+                strategy_id: self.id().to_string(),
+                cover: vec![target_cover],
+                confidence: 0.50,
+            });
+        }
+        if !(self.min..=self.max).contains(&streak) {
+            return None;
+        }
+        let confidence = (0.68 + 0.06 * ((streak - self.min) as f64)).min(0.95);
+        Some(BetIntent {
+            v: 1,
+            strategy_id: self.id().to_string(),
+            cover: vec![target_cover],
+            confidence,
+        })
+    }
+}
+
+/// Constrói o conjunto padrão completo de matchers nativos do projeto MONSTER:
+/// - Colunas e Dúzias: pré-alerta em 3x (`0.50`) e entrada imediata a partir de 4x (`>= 0.66`)
+/// - Vermelho/Preto, Baixo/Alto e Par/Ímpar: pré-alerta em 5x (`0.50`) e entrada imediata a partir de 6x (`>= 0.68`)
+/// - Viés de Setor (`setor_vies`), Fibonacci Lag e Cluster Terminal.
 pub fn default_matchers() -> Vec<Arc<dyn Matcher>> {
     vec![
         Arc::new(QuebraColunaReal::default()),
-        Arc::new(SetorVies::default()),
-        Arc::new(QuebraColuna::default()),
         Arc::new(QuebraDuzia::default()),
-        Arc::new(ClusterTerminal::default()),
+        Arc::new(QuebraColuna::default()),
+        Arc::new(QuebraCor::default()),
+        Arc::new(QuebraAltoBaixo::default()),
+        Arc::new(QuebraParImpar::default()),
+        Arc::new(SetorVies::default()),
         Arc::new(FibonacciLag),
+        Arc::new(ClusterTerminal::default()),
     ]
 }
 

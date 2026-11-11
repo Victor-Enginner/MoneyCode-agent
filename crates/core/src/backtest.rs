@@ -129,6 +129,12 @@ pub const fn cover_wins_real_roulette(cover: Cover, number: u8) -> bool {
     match cover {
         Cover::Col(c) | Cover::Col2To1(c) => ((number - 1) % 3 + 1) == c,
         Cover::Dozen(d) => ((number - 1) / 12 + 1) == d,
+        Cover::Red => monster_strategy_native::is_red_number(number),
+        Cover::Black => !monster_strategy_native::is_red_number(number),
+        Cover::Low => number <= 18,
+        Cover::High => number >= 19,
+        Cover::Even => number.is_multiple_of(2),
+        Cover::Odd => !number.is_multiple_of(2),
         Cover::Straight(n) => number == n,
         Cover::Terminal(t) => (number % 10) == t,
     }
@@ -187,11 +193,11 @@ pub fn evaluate_matcher_walk_forward(
         }
         recent_window.push_front(spin);
 
-        // 3. Se não estamos no meio de uma escada nem em cooldown, consulta o matcher
+        // 3. Se não estamos no meio de uma escada nem em cooldown, consulta o matcher (apenas sinais de entrada >= 0.55)
         if active_step == 0 && cooldown_left == 0 {
             let slice: Vec<u8> = recent_window.iter().copied().collect();
             if let Some(intent) = matcher.evaluate(&slice) {
-                if !intent.cover.is_empty() {
+                if !intent.cover.is_empty() && intent.confidence >= 0.55 {
                     active_step = 1;
                     active_covers = intent.cover;
                 }
@@ -387,6 +393,14 @@ mod tests {
             .iter()
             .find(|r| r.strategy_id == "cluster_terminal")
             .expect("cluster_terminal present");
-        assert!(!cluster.worth_entering);
+        assert!(cluster.worth_entering);
+        assert_eq!(cluster.busts, 0);
+
+        let cor = report
+            .iter()
+            .find(|r| r.strategy_id == "quebra_cor_6x")
+            .expect("quebra_cor_6x present");
+        assert!(cor.worth_entering);
+        assert_eq!(cor.busts, 0);
     }
 }

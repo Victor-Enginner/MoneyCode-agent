@@ -222,9 +222,19 @@ pub fn evaluate_dag_with_history(
         if chronological_history.len() >= 25 {
             if let Some(m) = matchers.iter().find(|m| m.id() == agg.strategy_id) {
                 let stats = evaluate_matcher_walk_forward(m.as_ref(), chronological_history, cfg);
-                agg.confidence = (agg.confidence * stats.confidence_multiplier).min(0.99);
-                if best_history.is_none() && stats.worth_entering && agg.confidence >= min_confidence
-                {
+                // Para os gatilhos de repetição (quebra de coluna/dúzia 4x e cor/alto-baixo/par-ímpar 6x),
+                // aplica bônus quando positivo no histórico mas nunca bloqueia o gatilho de repetição!
+                let is_core_streak = agg.strategy_id.starts_with("quebra_")
+                    || agg.strategy_id == "setor_vies";
+                let effective_mult = if is_core_streak {
+                    stats.confidence_multiplier.max(1.0)
+                } else {
+                    stats.confidence_multiplier
+                };
+                if agg.confidence >= min_confidence {
+                    agg.confidence = (agg.confidence * effective_mult).min(0.99);
+                }
+                if best_history.is_none() && agg.confidence >= min_confidence {
                     best_history = Some(stats);
                 }
             }
