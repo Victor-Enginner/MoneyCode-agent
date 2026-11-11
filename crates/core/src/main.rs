@@ -19,7 +19,6 @@ use monster_ui::FuiController;
 use std::env;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -191,10 +190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Inicializa SQLite WAL e reconcilia órfãos no boot (§9).
     let pool = init_pool(&db_uri)?;
-    let boot = boot_reconcile(
-        &pool,
-        Some(Path::new("O:/Archives/Eistein/roulette-profile")),
-    )?;
+    let boot = boot_reconcile(&pool, None)?;
     println!(
         "[MONSTER-CORE] Boot reconciliado | modo={:?} | orphans_swept={} | singleton_lock_removed={}",
         mode, boot.orphans_swept, boot.singleton_lock_removed

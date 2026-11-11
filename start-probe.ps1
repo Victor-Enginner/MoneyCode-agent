@@ -4,7 +4,7 @@
 
 $ErrorActionPreference = "Stop"
 $TargetUrl = "https://www.jogatudo.com/pt-BR/game/playtech-brasileira.roleta-brasileira"
-$ProfileDir = "O:\Archives\Eistein\roulette-profile"
+$ProfileDir = "O:\Archives\Eistein\chromium-profile"
 $GoCacheDir = "O:\Archives\Eistein\FUI AGENT ROULLET\target\go-cache"
 $GoTmpDir   = "O:\Archives\Eistein\FUI AGENT ROULLET\target\go-tmp"
 
@@ -55,6 +55,8 @@ if ($CdpAlive) {
     Start-Process -FilePath $ChromeExe -ArgumentList @(
         "--remote-debugging-port=9222",
         "--user-data-dir=$ProfileDir",
+        "--no-sandbox",
+        "--disable-features=RendererCodeIntegrity",
         "--disable-blink-features=AutomationControlled",
         "--test-type",
         "--no-first-run",

@@ -4,7 +4,7 @@
 
 $ErrorActionPreference = "Stop"
 $TargetUrl  = "https://www.jogatudo.com/pt-BR/game/playtech-brasileira.roleta-brasileira"
-$ProfileDir = "O:\Archives\Eistein\roulette-profile"
+$ProfileDir = "O:\Archives\Eistein\chromium-profile"
 $RootDir    = "O:\Archives\Eistein\FUI AGENT ROULLET"
 $GoCacheDir = "$RootDir\target\go-cache"
 $GoTmpDir   = "$RootDir\target\go-tmp"
@@ -32,22 +32,20 @@ if (-not (Test-Path $ChromeExe)) {
     Write-Error "Chromium dedicado nao encontrado em $ChromeExe"
 }
 
-$RunningChromium = Get-Process chrome -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $ChromeExe }
-if (-not $RunningChromium) {
-    # Se havia um Chrome comum segurando a porta 9222, libera para subir a Roleta no Chromium dedicado
-    $Port9222 = Get-NetTCPConnection -LocalPort 9222 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($Port9222) {
-        Stop-Process -Id $Port9222.OwningProcess -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 1
-    }
-    $CdpAlive = $false
-} else {
-    try {
-        $null = Invoke-RestMethod -Uri "http://127.0.0.1:9222/json/version" -TimeoutSec 1
+$CdpAlive = $false
+try {
+    $ver = Invoke-RestMethod -Uri "http://127.0.0.1:9222/json/version" -TimeoutSec 1
+    if ($ver.Browser -match "131\.") {
         $CdpAlive = $true
-    } catch {
-        $CdpAlive = $false
+    } else {
+        $Port9222 = Get-NetTCPConnection -LocalPort 9222 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($Port9222) {
+            Stop-Process -Id $Port9222.OwningProcess -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 1
+        }
     }
+} catch {
+    $CdpAlive = $false
 }
 
 if (-not $CdpAlive) {
@@ -60,6 +58,8 @@ if (-not $CdpAlive) {
     Start-Process -FilePath $ChromeExe -ArgumentList @(
         "--remote-debugging-port=9222",
         "--user-data-dir=$ProfileDir",
+        "--no-sandbox",
+        "--disable-features=RendererCodeIntegrity",
         "--disable-blink-features=AutomationControlled",
         "--test-type",
         "--no-first-run",
