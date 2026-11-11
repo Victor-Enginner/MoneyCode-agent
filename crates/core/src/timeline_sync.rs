@@ -220,6 +220,38 @@ mod tests {
     }
 
     #[test]
+    fn fita_com_numero_repetido_preserva_todos_os_giros() {
+        let pool = init_pool(":memory:").expect("pool");
+        // Fita real da mesa (mais recente primeiro): `20` e `4` repetem dentro da MESMA fita.
+        // Uma coluna só fica "repetindo" porque esses giros existem: descartar repetição
+        // encurta o streak e o matcher nunca chega ao gatilho.
+        let strip = [20u8, 11, 20, 5, 13, 9, 11, 6, 23, 4, 24, 4];
+        let report = sync_strip_to_db(&pool, &strip, "gc-rep", 1_730_000_000_000).expect("sync");
+        assert_eq!(
+            report.inserted,
+            strip.len(),
+            "nenhum giro da fita pode ser descartado por repetir número"
+        );
+        let newest = read_newest_numbers(&pool, MAX_STRIP).expect("read");
+        assert_eq!(newest, strip.to_vec());
+    }
+
+    #[test]
+    fn fita_com_repeticao_preserva_o_streak_de_coluna_para_o_matcher() {
+        let pool = init_pool(":memory:").expect("pool");
+        let strip = [20u8, 11, 20, 5, 13, 9, 11, 6, 23, 4, 24, 4];
+        sync_strip_to_db(&pool, &strip, "gc-strk", 1_730_000_000_000).expect("sync");
+        let recent = read_newest_numbers(&pool, MAX_STRIP).expect("read");
+        // Coluna real (`(n-1)%3+1`): 20 e 11 e 5 são coluna 2. A coluna 2 repete 4x no topo.
+        let streak = recent
+            .iter()
+            .map(|&n| (n - 1) % 3 + 1)
+            .take_while(|&c| c == 2)
+            .count();
+        assert_eq!(streak, 4, "streak da coluna 2 chega ao gatilho de 4 repetições");
+    }
+
+    #[test]
     fn fita_sem_correlacao_e_regravada_como_baseline() {
         let newest = [1u8, 2, 3, 4, 5, 6];
         let strip = [30u8, 31, 32, 33, 34, 35];

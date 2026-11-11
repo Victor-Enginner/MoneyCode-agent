@@ -283,14 +283,29 @@ drained:
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
+		resolved := false
 		select {
 		case res := <-h.clickResolvedCh:
-			if res.X > 0 && res.Y > 0 {
+			resolved = res.Found && res.X > 0 && res.Y > 0
+			if resolved {
 				finalX = res.X
 				finalY = res.Y
 			}
 		case <-time.After(12 * time.Second):
-			log.Printf("[click-cdp] timeout aguardando click_resolved para target=%s, usando fallback (%d,%d)", req.Target, finalX, finalY)
+			log.Printf("[click-cdp] timeout aguardando click_resolved para target=%s", req.Target)
+		}
+		// Aposta jamais é confirmada em coordenada cega: se o pano não informou onde está o alvo,
+		// aborta em vez de clicar no fallback (que pode cair sobre outra cobertura, ex.: uma dúzia).
+		// "clear" é best-effort: sem botão UNDO na tela não há o que desfazer.
+		if !resolved {
+			if req.Target == "clear" {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, `{"ok":true,"skipped":"clear_unresolved"}`+"\n")
+				return
+			}
+			log.Printf("[click-cdp] alvo não resolvido no pano: target=%s — clique abortado", req.Target)
+			http.Error(w, "click target not resolved on cloth: "+req.Target, http.StatusConflict)
+			return
 		}
 	}
 

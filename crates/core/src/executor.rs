@@ -653,6 +653,7 @@ pub fn place(
     let mut last_denom: Option<u64> = None;
     let mut cumulative_expected: u64 = 0;
     let mut verified_so_far: u64 = 0;
+    let applied = (|| -> Result<(), ExecError> {
     for (cover, cents) in &plan.covers {
         let _ = cal.coords(cover)?;
         for (denom, n) in decompose(*cents, &cal.denoms) {
@@ -700,6 +701,29 @@ pub fn place(
             expected: cumulative_expected,
         });
     }
+        Ok(())
+    })();
+    if let Err(err) = applied {
+        // Cobertura não resolvida no pano (sidecar respondeu 409): nunca confirmar aposta em
+        // coordenada cega — limpa a mesa e aborta. Os desvios de preview já se limpam internamente.
+        if matches!(err, ExecError::CdpTransport(_)) {
+            let _ = cdp.clear_bets(cal);
+            let _ = update_intent_decision(
+                pool,
+                intent_id,
+                IntentDecision::Aborted,
+                Some("click_unresolved"),
+            );
+            let _ = insert_error(
+                pool,
+                "click_unresolved",
+                &format!("intent={intent_id} {err}"),
+                now_ms,
+            );
+        }
+        return Err(err);
+    }
+
 
     // 3. Lê o preview no bet slip ANTES de confirmar (§1.4).
     let preview = read_settled(cdp, plan.total_cents)?;

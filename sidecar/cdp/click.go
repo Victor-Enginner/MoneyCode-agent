@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Despachante de cliques reais em coordenadas do canvas/SVG via Input.dispatchMouseEvent + resolução dinâmica DOM.
-// Localiza fichas exclusivamente no chip-rack (inferior direito) e separa rigorosamente Colunas (2to1) de Dúzias (1st/2nd/3rd 12).
+// A geometria do pano é derivada das âncoras do próprio jogo (rótulos "2to1" e bandeja de fichas), nunca de frações fixas de viewport.
+// Separa rigorosamente Colunas (2to1) de Dúzias (1st/2nd/3rd 12); alvo não resolvido sai com found:false e o sidecar não clica.
 // Envia estritamente UM evento físico CDP por chamada, após aguardar a abertura da janela "PLACE YOUR BETS".
+// Regressão: `node sidecar/cdp/resolver_spec/run.js` valida colunas, dúzias, fichas e o caso não resolvido.
 
 package cdp
 
@@ -74,155 +76,273 @@ func (c *Client) RequestTargetCoords(sid string, target string, fallbackX, fallb
 	}
 
 	targetJSON, _ := json.Marshal(target)
+	// Resolve a coordenada real do alvo DENTRO do pano, derivando a geometria do próprio jogo
+	// (âncoras `2to1` e bandeja de fichas) em vez de frações fixas de viewport.
+	// Qualquer alvo não resolvido sai com `found:false` para o sidecar abortar em vez de clicar às cegas.
 	js := fmt.Sprintf(`(async () => {
-	  const target = %s;
-	  const fbX = %d, fbY = %d;
-	  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const target = %s;
+  const fbX = %d, fbY = %d;
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-	  const isRoundOpenNow = () => {
-	    const bodyTxt = (document.body && document.body.innerText) || '';
-	    if (/PLACE YOUR BETS|FA[CÇ]A SUAS APOSTAS|FA[CÇ]AM SUAS APOSTAS/i.test(bodyTxt)) {
-	      return true;
-	    }
-	    if (/WAIT FOR THE NEXT ROUND|NO MORE BETS|AGUARDE A PR[OÓ]XIMA|N[AÃ]O H[AÁ] MAIS APOSTAS|SEM MAIS APOSTAS/i.test(bodyTxt)) {
-	      return false;
-	    }
-	    return true;
-	  };
+  const isRoundOpenNow = () => {
+    const bodyTxt = (document.body && document.body.innerText) || '';
+    if (/PLACE YOUR BETS|FA[CÇ]A SUAS APOSTAS|FA[CÇ]AM SUAS APOSTAS/i.test(bodyTxt)) {
+      return true;
+    }
+    if (/WAIT FOR THE NEXT ROUND|NO MORE BETS|AGUARDE A PR[OÓ]XIMA|N[AÃ]O H[AÁ] MAIS APOSTAS|SEM MAIS APOSTAS/i.test(bodyTxt)) {
+      return false;
+    }
+    return true;
+  };
 
-	  if (target !== 'clear') {
-	    let waited = false;
-	    for (let wait = 0; wait < 75; wait++) {
-	      if (isRoundOpenNow()) break;
-	      waited = true;
-	      await sleep(150);
-	    }
-	    if (waited) {
-	      // Aguarda a transição de câmera da Playtech estabilizar o layout do pano antes de ler getBoundingClientRect()
-	      await sleep(280);
-	    }
-	  }
+  if (target !== 'clear') {
+    let waited = false;
+    for (let wait = 0; wait < 75; wait++) {
+      if (isRoundOpenNow()) break;
+      waited = true;
+      await sleep(150);
+    }
+    if (waited) {
+      // Aguarda a transição de câmera da Playtech estabilizar o layout do pano antes de ler getBoundingClientRect()
+      await sleep(280);
+    }
+  }
 
-	  const centerOf = (el) => {
-	    if (!el || !el.getBoundingClientRect) return null;
-	    const r = el.getBoundingClientRect();
-	    if (r.width < 2 || r.height < 2) return null;
-	    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), w: r.width, h: r.height, el };
-	  };
+  const near = (a, b) => Math.abs(a - b);
 
-	  const findByText = (exactList) => {
-	    const all = document.querySelectorAll('text, tspan, span, div, button, g, [data-automation-locator]');
-	    const matches = [];
-	    for (let i = 0; i < all.length; i++) {
-	      const el = all[i];
-	      if (el.children && el.children.length > 2) continue;
-	      const t = (el.textContent || '').trim();
-	      if (exactList.includes(t)) {
-	        const c = centerOf(el);
-	        if (c && c.y > 120) matches.push(c);
-	      }
-	    }
-	    return matches;
-	  };
+  const boxOf = (el) => {
+    if (!el || !el.getBoundingClientRect) return null;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) return null;
+    return {
+      x: Math.round(r.left + r.width / 2),
+      y: Math.round(r.top + r.height / 2),
+      w: r.width,
+      h: r.height,
+      t: (el.textContent || '').trim(),
+      el: el
+    };
+  };
 
-	  // Localiza uma casa numérica (1..36) especificamente dentro do pano central de apostas (x entre 30%% e 73%% da tela)
-	  const findClothNumber = (numStr) => {
-	    const m = findByText([numStr]);
-	    const cloth = m.filter(p =>
-	      p.x > window.innerWidth * 0.34 &&
-	      p.x < window.innerWidth * 0.72 &&
-	      p.y > window.innerHeight * 0.65 &&
-	      p.y < window.innerHeight * 0.86
-	    );
-	    return cloth.length > 0 ? cloth[0] : null;
-	  };
+  // Varredura única DEPOIS de a janela abrir, para não usar geometria de layout antigo.
+  const scans = () => {
+    const out = [];
+    const all = document.querySelectorAll('text, tspan, span, div, button, g, [data-automation-locator]');
+    for (let i = 0; i < all.length; i++) {
+      const el = all[i];
+      if (el.children && el.children.length > 2) continue;
+      const b = boxOf(el);
+      if (b) out.push(b);
+    }
+    return out;
+  };
+  const nodes = scans();
 
-	  let pt = null;
-	  if (target.startsWith('chip:')) {
-	    const cents = parseInt(target.split(':')[1], 10);
-	    const label = (cents < 100) ? ('0.' + (cents / 10)) : String(cents / 100);
-	    // Busca exclusivamente no chip-rack (canto inferior direito: x > 72%% da largura e y > 84%% da altura),
-	    // jamais clicando em fichas que já estejam posicionadas sobre o pano de apostas.
-	    const m = findByText([label, 'R$' + label, label.replace('.', ',')]);
-	    const rack = m.filter(p => p.x > window.innerWidth * 0.72 && p.y > window.innerHeight * 0.84);
-	    if (rack.length > 0) {
-	      pt = rack[rack.length - 1];
-	    } else {
-	      const chipLoc = document.querySelector('[data-automation-locator*="chip-' + label + '"], [data-automation-locator*="chip_' + label + '"]');
-	      if (chipLoc) pt = centerOf(chipLoc);
-	    }
-	  } else if (target === 'dozen:1') {
-	    const m = findByText(['1st 12', '1ª 12', '1-12']).filter(p => p.x < window.innerWidth * 0.72);
-	    if (m.length > 0) pt = m[0];
-	  } else if (target === 'dozen:2') {
-	    const m = findByText(['2nd 12', '2ª 12', '13-24']).filter(p => p.x < window.innerWidth * 0.72);
-	    if (m.length > 0) pt = m[0];
-	  } else if (target === 'dozen:3') {
-	    const m = findByText(['3rd 12', '3ª 12', '25-36']).filter(p => p.x < window.innerWidth * 0.72);
-	    if (m.length > 0) pt = m[0];
-	  } else if (target.startsWith('col:') || target.startsWith('col2to1:')) {
-	    // Colunas reais (2to1 à direita do pano):
-	    // col:1 = fileira inferior (1, 4, 7 ... 31, 34)
-	    // col:2 = fileira do meio  (2, 5, 8 ... 32, 35)
-	    // col:3 = fileira superior (3, 6, 9 ... 33, 36)
-	    const rowIdx = parseInt(target.split(':')[1], 10);
-	    const m = findByText(['2to1', '2 to 1', '2:1']).filter(p =>
-	      p.x > window.innerWidth * 0.55 &&
-	      p.x < window.innerWidth * 0.76 &&
-	      p.y > window.innerHeight * 0.65 &&
-	      p.y < window.innerHeight * 0.86
-	    );
-	    if (m.length >= 3) {
-	      m.sort((a, b) => b.y - a.y); // ordena de baixo (maior Y = col:1) para cima (menor Y = col:3)
-	      pt = m[Math.min(Math.max(rowIdx - 1, 0), 2)];
-	    }
-	    if (!pt) {
-	      // Fallback geométrico exato a partir das duas últimas casas da fileira (31->34, 32->35, 33->36)
-	      const pair = rowIdx === 1 ? ['31', '34'] : (rowIdx === 2 ? ['32', '35'] : ['33', '36']);
-	      const cPrev = findClothNumber(pair[0]);
-	      const cLast = findClothNumber(pair[1]);
-	      if (cPrev && cLast && cLast.x > cPrev.x) {
-	        const stepX = cLast.x - cPrev.x;
-	        pt = { x: Math.round(cLast.x + stepX * 0.85), y: cLast.y };
-	      } else if (cLast) {
-	        pt = { x: Math.round(cLast.x + cLast.w * 0.95), y: cLast.y };
-	      }
-	    }
-	  } else if (target === 'low') {
-	    const m = findByText(['1-18', '1 to 18']).filter(p => p.x < window.innerWidth * 0.72);
-	    if (m.length > 0) pt = m[0];
-	  } else if (target === 'high') {
-	    const m = findByText(['19-36', '19 to 36']).filter(p => p.x < window.innerWidth * 0.72);
-	    if (m.length > 0) pt = m[0];
-	  } else if (target === 'even') {
-	    const m = findByText(['EVEN', 'PAR', 'Par']).filter(p => p.x < window.innerWidth * 0.72);
-	    if (m.length > 0) pt = m[0];
-	  } else if (target === 'odd') {
-	    const m = findByText(['ODD', 'ÍMPAR', 'IMPAR', 'Ímpar']).filter(p => p.x < window.innerWidth * 0.72);
-	    if (m.length > 0) pt = m[0];
-	  } else if (target === 'red' || target === 'black') {
-	    const loc = document.querySelector('[data-automation-locator*="' + target + '"], [class*="betSpot-' + target + '"], [class*="' + target + '-diamond"]');
-	    if (loc) pt = centerOf(loc);
-	    if (!pt) {
-	      const ev = findByText(['EVEN', 'PAR']).filter(p => p.x < window.innerWidth * 0.72)[0];
-	      const od = findByText(['ODD', 'ÍMPAR', 'IMPAR']).filter(p => p.x < window.innerWidth * 0.72)[0];
-	      if (ev && od) {
-	        const step = (od.x - ev.x) / 3;
-	        const x = Math.round(target === 'red' ? (ev.x + step) : (ev.x + step * 2));
-	        pt = { x, y: ev.y };
-	      }
-	    }
-	  } else if (target === 'clear') {
-	    const m = findByText(['UNDO', 'DESFAZER', 'Undo']);
-	    if (m.length > 0) pt = m[0];
-	  }
+  // ---- Âncora das colunas reais: os três rótulos "2to1" do pano dizem onde a coluna está.
+  // Sem filtro de viewport: "2to1" só existe nessa coluna, então a âncora é o próprio jogo.
+  const colAnchor = (() => {
+    const labels = nodes.filter(n => /^(2to1|2 to 1|2:1)$/i.test(n.t));
+    if (labels.length < 3) return null;
 
-	  const finalX = pt ? pt.x : fbX;
-	  const finalY = pt ? pt.y : fbY;
-	  if (typeof window.__emit === 'function') {
-	    window.__emit(JSON.stringify({ t: 'click_resolved', target, x: finalX, y: finalY, found: !!pt, at: Date.now() }));
-	  }
-	})()`, string(targetJSON), fallbackX, fallbackY)
+    const groups = [];
+    for (const p of labels) {
+      let g = groups.find(gr => near(gr.x, p.x) <= 45);
+      if (!g) {
+        g = { x: p.x, items: [] };
+        groups.push(g);
+      } else {
+        g.x = (g.x + p.x) / 2;
+      }
+      g.items.push(p);
+    }
+
+    let best = null;
+    for (const g of groups) {
+      const ys = [];
+      for (const it of g.items) {
+        if (!ys.some(y => near(y, it.y) <= 12)) ys.push(it.y);
+      }
+      if (ys.length < 3) continue;
+      ys.sort((a, b) => b - a); // Y maior = coluna 1 (base); Y menor = coluna 3 (topo)
+      const rows = [];
+      for (const y of ys.slice(0, 3)) {
+        const it = g.items.find(i => near(i.y, y) <= 12);
+        if (!it) { rows.length = 0; break; }
+        rows.push({ x: it.x, y: it.y });
+      }
+      if (rows.length !== 3) continue;
+      const gap = rows[0].y - rows[2].y;
+      if (gap <= 60) continue; // três linhas amontoadas não são o pano
+      if (!best || gap > best.gap) best = { x: g.x, rows: rows, gap: gap };
+    }
+    return best;
+  })();
+
+  // ---- Retângulo lógico do pano, derivado das âncoras (nada de 0.65/0.86 fixos).
+  const cloth = (() => {
+    if (!colAnchor) return null;
+    const rowGap = colAnchor.gap / 2;
+    if (!(rowGap > 10)) return null;
+    const right = colAnchor.x - rowGap * 0.35;
+    const top = colAnchor.rows[2].y - rowGap * 0.55;
+    const lastRowY = colAnchor.rows[0].y;
+    const bottom = lastRowY + rowGap * 3.2; // cobre a linha das dúzias e a de 18/par/vermelho
+    const nums = nodes.filter(n =>
+      /^\d{1,2}$/.test(n.t) &&
+      n.x < right &&
+      n.y > top &&
+      n.y <= lastRowY + rowGap * 0.55
+    );
+    if (nums.length < 12) return null;
+    let left = nums[0].x;
+    for (const n of nums) left = Math.min(left, n.x);
+    return { rowGap: rowGap, right: right, left: left, top: top, bottom: bottom, nums: nums };
+  })();
+
+  // Procura um texto do pano (dúzias, 18, par, ímpar) só dentro do retângulo derivado.
+  const findInCloth = (exactList) => {
+    const hits = nodes.filter(n => exactList.includes(n.t));
+    if (hits.length === 0) return null;
+    if (!cloth) return hits[0];
+    const inside = hits.filter(p =>
+      p.y > cloth.top &&
+      p.y < cloth.bottom &&
+      p.x > cloth.left - cloth.rowGap * 4 &&
+      p.x < cloth.right + cloth.rowGap * 2
+    );
+    return inside.length > 0 ? inside[0] : hits[0];
+  };
+
+  // ---- Bandeja de fichas: a linha horizontal com mais denominações distintas.
+  // Comparar denominações (e não posição na tela) evita clicar numa ficha já posta no pano.
+  const CHIP_VALUES = [10, 20, 50, 100, 500, 1000, 2000, 5000];
+  const chipValue = (txt) => {
+    const cleaned = String(txt).replace(/\s/g, '').replace(/R\$/i, '').replace(',', '.');
+    if (!/^\d+(\.\d+)?$/.test(cleaned)) return null;
+    const v = parseFloat(cleaned);
+    if (!isFinite(v) || v <= 0) return null;
+    return Math.round(v * 100);
+  };
+
+  const rack = (() => {
+    const cands = [];
+    for (const n of nodes) {
+      const v = chipValue(n.t);
+      if (v === null || CHIP_VALUES.indexOf(v) === -1) continue;
+      // "0.1"/"0.2" só existem como ficha; nenhuma casa do pano nem número da fita tem decimal.
+      const decimal = n.t.indexOf('.') !== -1 || n.t.indexOf(',') !== -1;
+      cands.push({ x: n.x, y: n.y, v: v, decimal: decimal });
+    }
+    const anchors = cands.filter(c => c.decimal && (c.v === 10 || c.v === 20));
+    if (anchors.length < 2) return null;
+
+    // A bandeja é a linha que carrega as fichas de centavos; entre candidatas, a mais completa vence.
+    let best = [];
+    for (const a of anchors) {
+      const row = cands.filter(c => near(c.y, a.y) <= 24);
+      const distinct = [];
+      for (const c of row) {
+        if (!distinct.some(d => d.v === c.v)) distinct.push(c);
+      }
+      if (distinct.length > best.length) best = distinct;
+    }
+    return best.length >= 3 ? best : null;
+  })();
+
+  let pt = null;
+  let how = 'none';
+
+  if (target.startsWith('chip:')) {
+    const denom = parseInt(target.split(':')[1], 10);
+    if (rack) {
+      const hit = rack.find(c => c.v === denom);
+      if (hit) {
+        pt = { x: hit.x, y: hit.y };
+        how = 'rack';
+      }
+    }
+    if (!pt) {
+      const label = (denom < 100) ? ('0.' + (denom / 10)) : String(denom / 100);
+      const loc = document.querySelector(
+        '[data-automation-locator*="chip-' + label + '"], [data-automation-locator*="chip_' + label + '"]'
+      );
+      const b = boxOf(loc);
+      if (b) {
+        pt = { x: b.x, y: b.y };
+        how = 'chip-locator';
+      }
+    }
+  } else if (target === 'dozen:1' || target === 'dozen:2' || target === 'dozen:3') {
+    const idx = parseInt(target.split(':')[1], 10);
+    const lists = {
+      1: ['1st 12', '1ST 12', '1ª 12', '1-12'],
+      2: ['2nd 12', '2ND 12', '2ª 12', '13-24'],
+      3: ['3rd 12', '3RD 12', '3ª 12', '25-36']
+    };
+    const hit = findInCloth(lists[idx] || []);
+    if (hit) {
+      pt = { x: hit.x, y: hit.y };
+      how = 'cloth-text';
+    }
+  } else if (target.startsWith('col:') || target.startsWith('col2to1:')) {
+    // Colunas reais do pano ("2to1"): col:1 = base (1,4,7...34), col:2 = meio, col:3 = topo.
+    // A âncora é o próprio rótulo da coluna, então o clique cai exatamente sobre ela.
+    const rowIdx = parseInt(target.split(':')[1], 10);
+    if (colAnchor && rowIdx >= 1 && rowIdx <= 3) {
+      const r = colAnchor.rows[rowIdx - 1];
+      pt = { x: r.x, y: r.y };
+      how = '2to1-anchor';
+    }
+  } else if (target === 'low') {
+    const hit = findInCloth(['1-18', '1 to 18']);
+    if (hit) { pt = { x: hit.x, y: hit.y }; how = 'cloth-text'; }
+  } else if (target === 'high') {
+    const hit = findInCloth(['19-36', '19 to 36']);
+    if (hit) { pt = { x: hit.x, y: hit.y }; how = 'cloth-text'; }
+  } else if (target === 'even') {
+    const hit = findInCloth(['EVEN', 'PAR', 'Par']);
+    if (hit) { pt = { x: hit.x, y: hit.y }; how = 'cloth-text'; }
+  } else if (target === 'odd') {
+    const hit = findInCloth(['ODD', 'ÍMPAR', 'IMPAR', 'Ímpar']);
+    if (hit) { pt = { x: hit.x, y: hit.y }; how = 'cloth-text'; }
+  } else if (target === 'red' || target === 'black') {
+    const loc = document.querySelector(
+      '[data-automation-locator*="' + target + '"], [class*="betSpot-' + target + '"], [class*="' + target + '-diamond"]'
+    );
+    const b = boxOf(loc);
+    if (b) {
+      pt = { x: b.x, y: b.y };
+      how = 'locator';
+    }
+    if (!pt) {
+      const ev = findInCloth(['EVEN', 'PAR']);
+      const od = findInCloth(['ODD', 'ÍMPAR', 'IMPAR']);
+      if (ev && od && od.x > ev.x) {
+        const step = (od.x - ev.x) / 3;
+        pt = { x: Math.round(target === 'red' ? (ev.x + step) : (ev.x + step * 2)), y: ev.y };
+        how = 'between-even-odd';
+      }
+    }
+  } else if (target === 'clear') {
+    const m = nodes.filter(n => /^(UNDO|DESFAZER|Undo)$/i.test(n.t));
+    if (m.length > 0) {
+      pt = { x: m[0].x, y: m[0].y };
+      how = 'undo';
+    }
+  }
+
+  if (typeof window.__emit === 'function') {
+    window.__emit(JSON.stringify({
+      t: 'click_resolved',
+      target: target,
+      x: pt ? pt.x : fbX,
+      y: pt ? pt.y : fbY,
+      found: !!pt,
+      how: how,
+      at: Date.now()
+    }));
+  }
+})()`, string(targetJSON), fallbackX, fallbackY)
 
 	return c.Send(sid, "Runtime.evaluate", map[string]any{
 		"expression":   js,
