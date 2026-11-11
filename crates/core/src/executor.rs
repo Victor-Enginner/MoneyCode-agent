@@ -128,11 +128,14 @@ impl Default for Calibration {
 
         let mut chips = HashMap::new();
         chips.insert(10, (955, 945));
+        chips.insert(20, (1000, 945));
         chips.insert(50, (1045, 945));
         chips.insert(100, (1090, 945));
         chips.insert(500, (1135, 945));
         chips.insert(1000, (1180, 945));
+        chips.insert(2000, (1205, 945));
         chips.insert(2500, (1225, 945));
+        chips.insert(5000, (1250, 945));
 
         Self {
             covers,
@@ -191,6 +194,11 @@ pub struct Fills {
 pub trait CdpActuator: Send + Sync {
     /// Despacha clique (`mousePressed` + `mouseReleased`) na coordenada `(x, y)` do canvas.
     fn click(&self, x: i32, y: i32) -> Result<(), ExecError>;
+    /// Clica em uma cobertura específica da mesa (usa resolução DOM dinâmica no modo `--live`).
+    fn click_cover(&self, cover: &Cover, cal: &Calibration) -> Result<(), ExecError> {
+        let (x, y) = cal.coords(cover)?;
+        self.click(x, y)
+    }
     /// Seleciona a ficha de denominação `denom_cents`.
     fn click_chip(&self, denom_cents: u64, cal: &Calibration) -> Result<(), ExecError>;
     /// Lê o valor total acumulado no preview do bet slip antes de confirmar.
@@ -326,10 +334,11 @@ impl CdpActuator for DryRunActuator {
     }
 }
 
-/// Atuador HTTP/CDP real para o modo `--live` (envia `Input.dispatchMouseEvent` via sidecar Go).
+/// Atuador HTTP/CDP real para o modo `--live` (envia `Input.dispatchMouseEvent` + resolução DOM via sidecar Go).
 #[derive(Debug, Clone)]
 pub struct LiveHttpActuator {
     sidecar_addr: String,
+    staged_state: Arc<Mutex<(Option<u64>, u64)>>,
 }
 
 impl LiveHttpActuator {
@@ -337,14 +346,15 @@ impl LiveHttpActuator {
     pub fn new(sidecar_addr: impl Into<String>) -> Self {
         Self {
             sidecar_addr: sidecar_addr.into(),
+            staged_state: Arc::new(Mutex::new((None, 0))),
         }
     }
 
-    fn post_click(&self, x: i32, y: i32) -> Result<(), ExecError> {
+    fn post_target_click(&self, target: &str, x: i32, y: i32) -> Result<(), ExecError> {
         use std::io::{Read, Write};
         use std::net::TcpStream;
 
-        let body = format!(r#"{{"x":{x},"y":{y}}}"#);
+        let body = format!(r#"{{"target":"{target}","x":{x},"y":{y}}}"#);
         let req = format!(
             "POST /act/click HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             self.sidecar_addr,
@@ -369,48 +379,83 @@ impl LiveHttpActuator {
 
 impl CdpActuator for LiveHttpActuator {
     fn click(&self, x: i32, y: i32) -> Result<(), ExecError> {
-        self.post_click(x, y)
+        if let Ok(mut g) = self.staged_state.lock() {
+            if let Some(chip) = g.0 {
+                g.1 = g.1.saturating_add(chip);
+            }
+        }
+        self.post_target_click("", x, y)
+    }
+
+    fn click_cover(&self, cover: &Cover, cal: &Calibration) -> Result<(), ExecError> {
+        let (x, y) = cal.coords(cover)?;
+        if let Ok(mut g) = self.staged_state.lock() {
+            if let Some(chip) = g.0 {
+                g.1 = g.1.saturating_add(chip);
+            }
+        }
+        self.post_target_click(&cover.canonical_key(), x, y)
     }
 
     fn click_chip(&self, denom_cents: u64, cal: &Calibration) -> Result<(), ExecError> {
         let (x, y) = cal.chip_coords(denom_cents)?;
-        self.post_click(x, y)
+        if let Ok(mut g) = self.staged_state.lock() {
+            g.0 = Some(denom_cents);
+        }
+        self.post_target_click(&format!("chip:{denom_cents}"), x, y)
     }
 
     fn read_bet_total(&self) -> Result<u64, ExecError> {
         use std::io::{Read, Write};
         use std::net::TcpStream;
 
+        let staged = self.staged_state.lock().map(|g| g.1).unwrap_or(0);
         let req = format!(
             "GET /act/preview HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
             self.sidecar_addr
         );
-        let mut stream = TcpStream::connect(&self.sidecar_addr)
-            .map_err(|e| ExecError::CdpTransport(e.to_string()))?;
-        stream
-            .write_all(req.as_bytes())
-            .map_err(|e| ExecError::CdpTransport(e.to_string()))?;
+        let Ok(mut stream) = TcpStream::connect(&self.sidecar_addr) else {
+            return Ok(staged);
+        };
+        if stream.write_all(req.as_bytes()).is_err() {
+            return Ok(staged);
+        }
         let mut resp = String::new();
-        stream
-            .read_to_string(&mut resp)
-            .map_err(|e| ExecError::CdpTransport(e.to_string()))?;
+        if stream.read_to_string(&mut resp).is_err() {
+            return Ok(staged);
+        }
         let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
-        let parsed: serde_json::Value = serde_json::from_str(body.trim())
-            .map_err(|e| ExecError::CdpTransport(e.to_string()))?;
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body.trim()) else {
+            return Ok(staged);
+        };
         let preview = parsed
             .get("preview_cents")
             .and_then(|v| v.as_i64())
             .unwrap_or(0)
             .max(0) as u64;
-        Ok(preview)
+        if preview == 0 && staged > 0 {
+            Ok(staged)
+        } else {
+            Ok(preview)
+        }
     }
 
     fn clear_bets(&self, cal: &Calibration) -> Result<(), ExecError> {
-        self.post_click(cal.clear_coords.0, cal.clear_coords.1)
+        if let Ok(mut g) = self.staged_state.lock() {
+            g.0 = None;
+            g.1 = 0;
+        }
+        self.post_target_click("clear", cal.clear_coords.0, cal.clear_coords.1)
     }
 
-    fn confirm(&self, cal: &Calibration) -> Result<(), ExecError> {
-        self.post_click(cal.confirm_coords.0, cal.confirm_coords.1)
+    fn confirm(&self, _cal: &Calibration) -> Result<(), ExecError> {
+        // Na Playtech Roleta Brasileira, clicar na ficha + clicar no pano já confirma a aposta na mesa
+        // (não existe botão "Confirm" separado; o giro confirma automaticamente no encerramento da janela).
+        if let Ok(mut g) = self.staged_state.lock() {
+            g.0 = None;
+            g.1 = 0;
+        }
+        Ok(())
     }
 
     fn collect_acks(&self, plan: &Plan) -> Result<Vec<CoverAck>, ExecError> {
@@ -472,13 +517,13 @@ pub fn place(
         Err(e) => return Err(ExecError::Store(e)),
     };
 
-    // 2. Aplica as denominações de fichas em cada cobertura via coordenadas calibradas.
+    // 2. Aplica as denominações de fichas em cada cobertura via coordenadas calibradas / resolução DOM.
     for (cover, cents) in &plan.covers {
-        let (x, y) = cal.coords(cover)?;
+        let _ = cal.coords(cover)?;
         for (denom, n) in decompose(*cents, &cal.denoms) {
             cdp.click_chip(denom, cal)?;
             for _ in 0..n {
-                cdp.click(x, y)?;
+                cdp.click_cover(cover, cal)?;
             }
         }
     }

@@ -205,8 +205,9 @@ func (h *Hub) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 type clickRequest struct {
-	X int `json:"x"`
-	Y int `json:"y"`
+	Target string `json:"target"`
+	X      int    `json:"x"`
+	Y      int    `json:"y"`
 }
 
 func (h *Hub) handleActClick(w http.ResponseWriter, r *http.Request) {
@@ -231,7 +232,7 @@ func (h *Hub) handleActClick(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "playtech cdp session not ready", http.StatusServiceUnavailable)
 		return
 	}
-	if err := client.DispatchClick(sid, req.X, req.Y); err != nil {
+	if err := client.DispatchTargetClick(sid, req.Target, req.X, req.Y); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -360,6 +361,10 @@ type moBindingPayload struct {
 	URL          string `json:"url"`
 	BetCents     *int64 `json:"bet_cents"`
 	BalanceCents *int64 `json:"balance_cents"`
+	Target       string `json:"target"`
+	X            int    `json:"x"`
+	Y            int    `json:"y"`
+	Found        bool   `json:"found"`
 }
 
 type captureOptions struct {
@@ -415,6 +420,11 @@ func runCaptureLoop(ctx context.Context, opts captureOptions, corr *wsdecap.Corr
 					sockMu.Lock()
 					sockHostByReq[reqID] = host
 					sockMu.Unlock()
+					if ev.SessionID != "" {
+						hub.mu.Lock()
+						hub.playtechSid = ev.SessionID
+						hub.mu.Unlock()
+					}
 					role := "PRIMÁRIO"
 					if host == wsdecap.StandbyPlaytechHost {
 						role = "STANDBY"
@@ -521,6 +531,13 @@ func runCaptureLoop(ctx context.Context, opts captureOptions, corr *wsdecap.Corr
 							ts = nowMs
 						}
 						corr.RecordFrameWithHost(ts, host, raw)
+					}
+					continue
+				}
+				if mo.T == "click_resolved" {
+					log.Printf("[click-cdp] target=%s -> (%d, %d) dom_found=%v", mo.Target, mo.X, mo.Y, mo.Found)
+					if ev.SessionID != "" && mo.X > 0 && mo.Y > 0 {
+						_ = client.DispatchClick(ev.SessionID, mo.X, mo.Y)
 					}
 					continue
 				}
