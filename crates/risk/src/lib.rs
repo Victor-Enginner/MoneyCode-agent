@@ -31,6 +31,117 @@ pub fn cum_loss_cents(step: u8, base_cents: u64) -> u64 {
     (1..=step).fold(0u64, |d, _| d + 2 * (d + base_cents))
 }
 
+/// Ficha mínima da bandeja em centavos (todas as denominações são múltiplas dela).
+pub const MIN_CHIP_CENTS: u64 = 10;
+
+/// Teto de números distintos que uma cobertura de número pode cobrir.
+pub const MAX_NUMBER_COVERS: u8 = 30;
+
+/// Divisão para cima em inteiros (centavos), sem float.
+const fn ceil_div(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return a;
+    }
+    a / b + if a % b == 0 { 0 } else { 1 }
+}
+
+/// Escada de cobertura por números (pleno e terminal), onde cada número paga 35:1.
+///
+/// Com `k` números pagos `x` cada: exposição `k·x`, retorno `36·x` no acerto e lucro
+/// `36·x − k·x = (36 − k)·x`. Para recuperar a perda `D` e lucrar `G` o degrau é
+/// `x = (D + G) / (36 − k)`, arredondado para cima até a ficha mínima.
+///
+/// A escada ×3 de [`stake_cents`] **não vale aqui**: ela assume exposição `2x` e retorno `3x`,
+/// que é a geometria de duas colunas/dúzias. Em cobertura de números ela superaposta a
+/// exposição (para `k=15` o degrau 2 correto é 10¢ por número, e ×3 pediria 30¢).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NumberLadder {
+    /// Quantidade de números distintos cobertos (`1` = pleno seco, `15` = cluster 1,4,7 + 0).
+    pub numbers: u8,
+    /// Lucro desejado por ciclo em centavos (o `base_cents` do §6).
+    pub base_cents: u64,
+    /// Ficha mínima aceita pela mesa em centavos.
+    pub min_chip_cents: u64,
+}
+
+impl NumberLadder {
+    /// Escada para `numbers` números com lucro alvo `base_cents` e piso de ficha da bandeja.
+    pub const fn new(numbers: u8, base_cents: u64) -> Self {
+        Self {
+            numbers,
+            base_cents,
+            min_chip_cents: MIN_CHIP_CENTS,
+        }
+    }
+
+    /// `k` normalizado em `1..=MAX_NUMBER_COVERS`.
+    fn k(&self) -> u64 {
+        u64::from(self.numbers.clamp(1, MAX_NUMBER_COVERS))
+    }
+
+    /// Unidades de lucro por unidade apostada no acerto: `36 − k`.
+    fn payout_units(&self) -> u64 {
+        36 - self.k()
+    }
+
+    /// Arredonda para cima até o múltiplo da ficha mínima, para a ficha ser decomponível.
+    fn round_chip(&self, cents: u64) -> u64 {
+        let step = self.min_chip_cents.max(1);
+        ceil_div(cents, step) * step
+    }
+
+    /// Ficha por número necessária para recuperar `d` e lucrar `base_cents`.
+    fn ficha(&self, d: u64) -> u64 {
+        self.round_chip(ceil_div(
+            d.saturating_add(self.base_cents),
+            self.payout_units(),
+        ))
+        .max(self.min_chip_cents)
+    }
+
+    /// Ficha por número no degrau `step` (1-based), já arredondada para ficha possível.
+    pub fn stake_cents(&self, step: u8) -> u64 {
+        let mut d = 0u64;
+        for _ in 1..step {
+            d = d.saturating_add(self.k().saturating_mul(self.ficha(d)));
+        }
+        self.ficha(d)
+    }
+
+    /// Perda acumulada em centavos ao perder até o degrau `step` (inclusivo).
+    pub fn cum_loss_cents(&self, step: u8) -> u64 {
+        let mut d = 0u64;
+        for _ in 1..=step {
+            d = d.saturating_add(self.k().saturating_mul(self.ficha(d)));
+        }
+        d
+    }
+
+    /// Exposição total do degrau `step`: uma ficha por número coberto.
+    pub fn exposure_cents(&self, step: u8) -> u64 {
+        self.k().saturating_mul(self.stake_cents(step))
+    }
+
+    /// Lucro líquido no acerto do degrau `step` (sempre `>= base_cents` pelo arredondamento).
+    pub fn win_profit_cents(&self, step: u8) -> i64 {
+        let x = self.stake_cents(step) as i64;
+        let d = self.cum_loss_cents(step.saturating_sub(1)) as i64;
+        (36 - self.k() as i64) * x - d
+    }
+
+    /// Último degrau cuja ficha por número ainda cabe no limite da mesa.
+    pub fn steps_within_limit(&self, max_bet_per_cover_cents: u64) -> Option<u8> {
+        let mut last = None;
+        for step in 1..=64u8 {
+            if self.stake_cents(step) > max_bet_per_cover_cents {
+                break;
+            }
+            last = Some(step);
+        }
+        last
+    }
+}
+
 /// Motivos de pulo temporário de uma entrada (`Skip`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Skip {
@@ -186,6 +297,57 @@ pub fn authorize(cfg: &Cfg, st: &State) -> Verdict {
     Verdict::Place
 }
 
+/// Gate de risco para cobertura de números, com a exposição real `k·x` do degrau.
+///
+/// Mesma precedência do [`authorize`] de colunas: `StopLoss → LadderBlown → TableLimit
+/// → Exposure → Cooldown → Window`. O limite de mesa é checado na ficha por número
+/// (é o valor de uma casa do pano); a exposição, no total do degrau (`k·x`).
+pub fn authorize_numbers(cfg: &Cfg, nl: &NumberLadder, st: &State) -> Verdict {
+    if st.session_pnl_cents <= -cfg.stop_loss_cents {
+        warn!(pnl = st.session_pnl_cents, stop_loss = cfg.stop_loss_cents, "gate abort: StopLoss (numeros)");
+        return Verdict::Abort(Abort::StopLoss);
+    }
+
+    let next = st.step.saturating_add(1);
+    if next > cfg.max_steps {
+        warn!(next_step = next, max_steps = cfg.max_steps, "gate abort: LadderBlown (numeros)");
+        return Verdict::Abort(Abort::LadderBlown);
+    }
+
+    let stake = nl.stake_cents(next);
+    if stake > cfg.max_bet_per_cover_cents {
+        warn!(
+            stake_cents = stake,
+            max_bet_per_cover_cents = cfg.max_bet_per_cover_cents,
+            "gate abort: TableLimit (numeros)"
+        );
+        return Verdict::Abort(Abort::TableLimit);
+    }
+
+    let total_exposure = st.exposure_cents.saturating_add(nl.exposure_cents(next));
+    let max_exposure_allowed = (st.bankroll_cents.max(0) as f64) * cfg.max_exposure_pct;
+    if st.bankroll_cents <= 0 || (total_exposure as f64) > max_exposure_allowed {
+        warn!(
+            total_exposure,
+            numbers = nl.numbers,
+            bankroll_cents = st.bankroll_cents,
+            max_exposure_pct = cfg.max_exposure_pct,
+            "gate abort: Exposure (numeros)"
+        );
+        return Verdict::Abort(Abort::Exposure);
+    }
+
+    if st.spins_since_blow < cfg.cooldown_spins {
+        return Verdict::Skip(Skip::Cooldown);
+    }
+
+    if st.remaining_window_ms < cfg.min_window_ms {
+        return Verdict::Skip(Skip::WindowTooShort);
+    }
+
+    Verdict::Place
+}
+
 /// Decompõe `total_cents` nas denominações de fichas de forma greedy decrescente.
 /// Retorna pares `(denom_cents, count)` apenas para denominações utilizadas (`count > 0`).
 pub fn decompose(total_cents: u64, denoms: &[u64]) -> Vec<(u64, u8)> {
@@ -323,6 +485,129 @@ mod tests {
         };
         assert_eq!(
             authorize(&cfg, &st_window),
+            Verdict::Skip(Skip::WindowTooShort)
+        );
+    }
+
+    /// Escada de números: um acerto em qualquer degrau devolve ao menos `base_cents`
+    /// de lucro líquido, sem estourar a exposição do ciclo.
+    #[test]
+    fn number_ladder_win_always_returns_at_least_base_profit() {
+        for k in 3..=15u8 {
+            for base in (10..=100u64).step_by(10) {
+                let nl = NumberLadder::new(k, base);
+                for step in 1..=8u8 {
+                    assert!(
+                        nl.win_profit_cents(step) >= base as i64,
+                        "k={k} base={base} step={step}: lucro {} < base {base}",
+                        nl.win_profit_cents(step)
+                    );
+                }
+            }
+        }
+    }
+
+    /// A ficha por número nunca diminui ao subir degrau (senão a escada não recupera).
+    #[test]
+    fn number_ladder_stake_is_monotonic_in_step() {
+        for k in 1..=20u8 {
+            let nl = NumberLadder::new(k, 10);
+            for step in 1..=12u8 {
+                assert!(
+                    nl.stake_cents(step + 1) >= nl.stake_cents(step),
+                    "k={k}: degrau {} maior que degrau {}",
+                    step + 1,
+                    step
+                );
+            }
+        }
+    }
+
+    /// Degrau 1 nunca desce do piso da ficha (10¢) e toda ficha é decomponível.
+    #[test]
+    fn number_ladder_step_one_is_min_chip_and_decomposable() {
+        let denoms = [2500, 1000, 500, 100, 50, 10];
+        let nl = NumberLadder::new(15, 10);
+        assert_eq!(nl.stake_cents(1), 10);
+        for step in 1..=10u8 {
+            let x = nl.stake_cents(step);
+            let chips = decompose(x, &denoms);
+            let sum: u64 = chips.iter().map(|&(d, c)| d * u64::from(c)).sum();
+            assert_eq!(sum, x, "ficha {x} do degrau {step} não decomponível");
+        }
+    }
+
+    /// O terminal (k=4) recupera com a regra `(D+G)/(36-k)`, não com a ×3 de duas colunas.
+    #[test]
+    fn number_ladder_does_not_reuse_the_x3_ladder() {
+        let nl = NumberLadder::new(15, 10);
+        // Perder o degrau 1 custa 15 x 10 = 150¢.
+        assert_eq!(nl.cum_loss_cents(1), 150);
+        // Com ×3 a ficha do degrau 2 seria 30¢ por número: 450¢ de exposição para recuperar 150¢.
+        assert!(nl.exposure_cents(2) < 15 * stake_cents(2, 10));
+        // Confirma que o lucro do acerto cobre a perda acumulada com folga mínima.
+        assert!(nl.win_profit_cents(2) >= 10);
+    }
+
+    /// O limite de mesa corta a escada no último degrau que ainda cabe.
+    #[test]
+    fn number_ladder_reports_last_step_within_table_limit() {
+        let nl = NumberLadder::new(15, 10);
+        assert_eq!(nl.stake_cents(4), 30);
+        assert_eq!(nl.stake_cents(5), 60);
+        assert_eq!(nl.steps_within_limit(50), Some(4));
+        assert_eq!(nl.steps_within_limit(5), None);
+    }
+
+    /// `authorize_numbers` mantém a precedência do gate de colunas.
+    #[test]
+    fn authorize_numbers_keeps_strict_precedence_order() {
+        let cfg = Cfg::default();
+        let nl = NumberLadder::new(15, 10);
+        let base = State {
+            bankroll_cents: 200_000,
+            exposure_cents: 0,
+            session_pnl_cents: 0,
+            remaining_window_ms: 5000,
+            spins_since_blow: 5,
+            step: 0,
+        };
+        assert_eq!(authorize_numbers(&cfg, &nl, &base), Verdict::Place);
+
+        let stop = State { session_pnl_cents: -cfg.stop_loss_cents, ..base };
+        assert_eq!(
+            authorize_numbers(&cfg, &nl, &stop),
+            Verdict::Abort(Abort::StopLoss)
+        );
+
+        let blown = State { step: cfg.max_steps, ..base };
+        assert_eq!(
+            authorize_numbers(&cfg, &nl, &blown),
+            Verdict::Abort(Abort::LadderBlown)
+        );
+
+        let mut low_limit = cfg.clone();
+        low_limit.max_bet_per_cover_cents = 5;
+        assert_eq!(
+            authorize_numbers(&low_limit, &nl, &base),
+            Verdict::Abort(Abort::TableLimit)
+        );
+
+        let poor = State { bankroll_cents: 100, ..base };
+        assert_eq!(
+            authorize_numbers(&cfg, &nl, &poor),
+            Verdict::Abort(Abort::Exposure)
+        );
+
+        let cooling = State { spins_since_blow: 1, remaining_window_ms: 100, ..base };
+        assert_eq!(
+            authorize_numbers(&cfg, &nl, &cooling),
+            Verdict::Skip(Skip::Cooldown)
+        );
+
+        let late = State { remaining_window_ms: 1999, ..base };
+        assert_eq!(
+            authorize_numbers(&cfg, &nl, &late),
             Verdict::Skip(Skip::WindowTooShort)
         );
     }
