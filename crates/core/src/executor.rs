@@ -220,6 +220,10 @@ struct DryRunState {
     clicks: Vec<(i32, i32)>,
     forced_preview_delta_cents: i64,
     partial_ack_index: Option<usize>,
+    /// Leituras do slip que ainda mostram o total anterior (mesa animando o preview).
+    slip_lag_reads: u32,
+    /// Valor mostrado enquanto o slip está atrasado.
+    slip_lag_value_cents: u64,
 }
 
 /// Atuador determinístico para modo `--dry-run` (§1.5 e §15.5).
@@ -253,6 +257,22 @@ impl DryRunActuator {
         self.inner.lock().map(|g| g.confirmed_count).unwrap_or(0)
     }
 
+    /// Simula o slip animando: as próximas `reads` leituras do preview devolvem o total
+    /// anterior à entrada (`0¢`). Usado para provar que atraso de DOM não aborta aposta correta.
+    pub fn set_slip_lag(&self, reads: u32, stale_value_cents: u64) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.slip_lag_reads = reads;
+            g.slip_lag_value_cents = stale_value_cents;
+        }
+    }
+
+    /// Define o total já postado na mesa, sem passar pelos cliques (simula fichas presentes).
+    pub fn set_staged_total(&self, cents: u64) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.staged_total_cents = cents;
+        }
+    }
+
     /// Quantidade de chamadas a `clear_bets()` executadas.
     pub fn cleared_count(&self) -> u64 {
         self.inner.lock().map(|g| g.cleared_count).unwrap_or(0)
@@ -284,10 +304,14 @@ impl CdpActuator for DryRunActuator {
     }
 
     fn read_bet_total(&self) -> Result<u64, ExecError> {
-        let g = self
+        let mut g = self
             .inner
             .lock()
             .map_err(|_| ExecError::CdpTransport("mutex poisoned".to_string()))?;
+        if g.slip_lag_reads > 0 {
+            g.slip_lag_reads -= 1;
+            return Ok(g.slip_lag_value_cents);
+        }
         // O desvio forçado só se materializa depois do primeiro clique (mesa já suja),
         // simulando a divergência que aparece ao colocar fichas — nunca uma mesa suja antes da entrada.
         let adjusted = if g.staged_total_cents > 0 {
@@ -569,14 +593,22 @@ impl CdpActuator for LiveHttpActuator {
 }
 
 /// Lê o total real da mesa aguardando o DOM da Playtech refletir os cliques recém-enviados.
+/// O slip anima: uma leitura 200 ms depois do último clique ainda mostra o total anterior e
+/// abortaria uma aposta correta (foi o que matou toda entrada acima do degrau 1 na sessão ao
+/// vivo). Por isso a leitura é refeita até ver o total esperado, com teto de
+/// `SETTLE_DEADLINE_MS` — que cabe no orçamento de cliques do §2.
 /// Retorna o último valor lido (mesmo divergente) para permitir diagnóstico e `clear_bets()`.
+const SETTLE_POLL_MS: u64 = 70;
+const SETTLE_DEADLINE_MS: u64 = 1_200;
+
 fn read_settled(cdp: &dyn CdpActuator, expected: u64) -> Result<u64, ExecError> {
+    let started = std::time::Instant::now();
     let mut last = cdp.read_bet_total()?;
-    for _ in 0..3 {
-        if last == expected {
-            return Ok(last);
+    while last != expected {
+        if started.elapsed().as_millis() as u64 >= SETTLE_DEADLINE_MS {
+            break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(90));
+        std::thread::sleep(std::time::Duration::from_millis(SETTLE_POLL_MS));
         last = cdp.read_bet_total()?;
     }
     Ok(last)
@@ -653,9 +685,15 @@ pub fn place(
     let mut last_denom: Option<u64> = None;
     let mut cumulative_expected: u64 = 0;
     let mut verified_so_far: u64 = 0;
+    let apply_started = std::time::Instant::now();
     let applied = (|| -> Result<(), ExecError> {
     for (cover, cents) in &plan.covers {
         let _ = cal.coords(cover)?;
+        let chips_desc = decompose(*cents, &cal.denoms)
+            .iter()
+            .map(|(d, n)| format!("{d}x{n}"))
+            .collect::<Vec<_>>()
+            .join("+");
         for (denom, n) in decompose(*cents, &cal.denoms) {
             if last_denom != Some(denom) {
                 cdp.click_chip(denom, cal)?;
@@ -678,10 +716,13 @@ pub fn place(
         if seen == verified_so_far {
             continue;
         }
+        let elapsed_ms = apply_started.elapsed().as_millis();
         error!(
             cover = %cover.canonical_key(),
             seen,
             expected = cumulative_expected,
+            chips = %chips_desc,
+            elapsed_ms,
             intent_id,
             "cobertura com valor divergente: limpando a mesa e abortando"
         );
@@ -691,7 +732,7 @@ pub fn place(
             pool,
             "cover_mismatch",
             &format!(
-                "intent={intent_id} cover={} lido={seen} esperado={cumulative_expected}",
+                "intent={intent_id} cover={} lido={seen} esperado={cumulative_expected} fichas={chips_desc} ms={elapsed_ms}",
                 cover.canonical_key()
             ),
             now_ms,
@@ -797,4 +838,35 @@ pub fn place(
         preview_cents: preview,
         naked,
     })
+}
+
+#[cfg(test)]
+mod slip_settle_tests {
+    use super::*;
+
+    /// O slip da Playtech anima: ler o preview logo após os cliques devolve o total antigo. Antes
+    /// da correção isso abortava toda entrada acima de uma ficha de 10¢ (`cover_mismatch` com
+    /// `lido=70 esperado=90` na sessão ao vivo). O leitor precisa esperar o valor estabilizar.
+    #[test]
+    fn atraso_no_slip_nao_aborta_aposta_correta() {
+        let cdp = DryRunActuator::new();
+        cdp.set_staged_total(90);
+        cdp.set_slip_lag(4, 0); // slip ainda mostra 0¢ nas 4 primeiras leituras
+        let seen = read_settled(&cdp, 90).expect("leitura do preview");
+        assert_eq!(seen, 90, "leitura atrasada nao pode virar divergencia");
+    }
+
+    /// Divergência permanente (valor estável e errado) continua sendo reportada, sem laço infinito.
+    #[test]
+    fn divergencia_estavel_encerra_rapido_e_devolve_o_lido() {
+        let cdp = DryRunActuator::new();
+        let started = std::time::Instant::now();
+        let seen = read_settled(&cdp, 90).expect("leitura do preview");
+        assert_eq!(seen, 0);
+        let waited = started.elapsed().as_millis() as u64;
+        assert!(
+            (SETTLE_DEADLINE_MS..=SETTLE_DEADLINE_MS + 400).contains(&waited),
+            "mesa zerada com esperado 90¢ deve esperar o teto e desistir, sem laco infinito (esperou {waited} ms)"
+        );
+    }
 }
