@@ -32,28 +32,35 @@ stake, resolução de clique nem limites — é exatamente o buraco que este arq
   quando `número % 10 == t`, `Straight(n)` quando `número == n` (usado pelo `reconciler`).
 - `reconciler.rs` já ordena o pagamento de `Terminal` acima de coluna/dúzia.
 
-## 3. O que o código NÃO tem (e por isso hoje não é possível apostar número)
+## 3. O que faltava (e o que já foi resolvido em 2026-11-11)
 
-1. **Nenhum matcher emite `Terminal` ou `Straight`.** `grep Cover::Terminal` só encontra
-   `backtest.rs` e `reconciler.rs`. O `cluster_terminal` conta final (`n % 10`) mas aposta
-   **duas colunas** — nome de número, comportamento de coluna.
-2. **Não há alvo de clique por número.** `sidecar/cdp/click.go` resolve `col`, `col2to1`,
-   `dozen`, `low/high`, `even/odd`, `red/black`, `clear`, `chip`. Não existe `straight:N`
-   nem `terminal:N`; qualquer um cai em `found:false` e o sidecar responde **409**.
-3. **Não há coordenada de número na calibração.** `config/calibration.toml` tem só
-   `col:*` e `dozen:*`; `Calibration::coords()` devolve `MissingCalibration` para
-   `straight:*`, então `place()` aborta antes de clicar.
-4. **A escada do §6 não vale para número.** `stake_cents` foi derivada para cobertura 2:1
-   (duas colunas: exposição `2x`, ganho `x`, perda `2x`). Número pleno paga 35:1 e terminal
-   de k números custa `k` fichas por rodada — a progressão ×3 está errada nesse pagamento.
-5. **`payout_multiplier(Terminal) = 8` só fecha por coincidência.** Em `reconciler.rs` o
-   multiplicador de `Terminal` é fixo em 8. Isso acerta apenas o terminal de 4 números visto como
-   exposição de `4x` (lucro `32x`). Para k=3 o correto é `11x` por unidade exposta (lucro `33x`), e
-   se a cobertura for expandida em plenos o multiplicador tem de sair de `36/k`, não de uma tabela
-   fixa. Hoje ninguém chega nesse caminho porque nada emite `Terminal`, mas ao ligar o matcher é
-   aqui que o P&L passa a mentir.
-6. **Não existe cartão de estratégia.** `corpus/cards/` não existe (só `corpus/knowledge_graph.json`).
-   Sem cartão não há chi², EV nem walk-forward do sinal de número.
+1. ~~**Nenhum matcher emite `Terminal` ou `Straight`.**~~ Resolvido: `ClusterFinal`
+   (`matcher.cluster_final`) emite `Terminal(0)` + os três finais da família ativa. O
+   `cluster_terminal` antigo continua cobrindo duas colunas (nome de número, comportamento de
+   coluna) e foi mantido por compatibilidade de histórico.
+2. ~~**Não há alvo de clique por número.**~~ Resolvido: `straight:N` em `sidecar/cdp/click.go`,
+   resolvido pela grade 3×12 derivada das âncoras `2to1`; grade incompleta → `found:false` →
+   409, nunca clique cego. Coberto por `resolver_spec` (`straight:17`, `straight:1`,
+   `straight:36` e o caso do número ausente).
+3. ~~**Não há coordenada de número na calibração.**~~ Resolvido: `Calibration::coords` devolve
+   `(0,0)` para pleno/terminal e delega ao DOM; os outros tipos continuam exigindo calibração.
+4. ~~**A escada do §6 não vale para número.**~~ Resolvido: `monster_risk::NumberLadder`
+   (`x = ceil((D+G)/(36−k))`, arredondado à ficha) + `authorize_numbers` com a mesma
+   precedência do gate de colunas. `stake_cents` (×3) continua exclusiva de coluna/dúzia/cor.
+5. ~~**`payout_multiplier(Terminal) = 8` só fecha por coincidência.**~~ Resolvido por
+   construção: o `slip.compiler` expande `Terminal(t)` em plenos antes do executor, então
+   `fills` só contém `Straight` (35:1). O multiplicador 8 virou caminho morto.
+6. ~~**Não existe cartão de estratégia.**~~ Resolvido: `corpus/cards/cluster_final.yaml` com
+   hipótese, cobertura, escada, gates de backtest e modos de falha.
+
+### O que continua faltando
+
+- Detecção de **troca de regime** de verdade (o matcher usa streak + dominância, não um
+  changepoint bayesiano): ver `docs/estudo-arxiv-clusters.md`.
+- Teste de **permutabilidade/e-value** antes de autorizar `--live`.
+- Backtest real nos 500 giros (o cartão define as métricas; o número ainda não existe).
+- Overlay de cobertura de número na FUI (hoje desenha coluna/dúzia).
+- `corpus/pdf/` vazio: os PDFs de origem não estão no repositório.
 
 ## 4. Matemática que tem de substituir a escada ×3
 
@@ -82,30 +89,25 @@ Stakes têm de continuar inteiros em centavos e decomponíveis nas fichas
 (`0,10 / 0,50 / 1 / 5 / 10 / 25`); `x` cai no centavo e a sobra não pode virar aposta
 fantasma — arredondar para cima e registrar o total real no plano.
 
-## 5. Checklist do que precisa ser construído
+## 5. Checklist
 
-- [ ] **Expansão de cobertura** em `slip.compiler`: `Terminal(t)` → `[Straight(n) …]`, cada
-      um com a ficha calculada por `x = (D+G)/(36−k)`. O contrato §5.2 já permite; o plano
-      continua com `covers: Vec<(Cover, u64)>`.
-- [ ] **Resolver `straight:N`** no `click.go` derivando a grade 3×12 do próprio pano a partir
-      das âncoras `2to1` que já existem (linha = coluna do número, coluna = faixa da dúzia).
-      Nenhuma coordenada fixa nova: a geometria já é derivada hoje.
-- [ ] **Fallback de calibração** para `straight:*` (`config/calibration.toml`) quando a mesa
-      não expuser as âncoras — e erro duro, nunca clique cego, se nem isso resolver.
-- [ ] **Escada por pagamento**: `stake_cents_for_payout(k, D, G)` com testes de propriedade
-      (acerto devolve exatamente `G`) e Monte Carlo de 10.000 sessões antes de `--live`
-      (gate do §13).
-- [ ] **Limite de mesa por número**: validar `x` e `k·x` contra o limite por casa
-      (R$ 500–2.000) no boot, como o §2 exige.
-- [ ] **Matcher de número**: emitir `cover: [Terminal(t)]` com confiança, sem inventar sinal —
-      hoje `cluster_terminal` mede final e aposta coluna; decidir se vira matcher de terminal
-      ou se nasce um `matcher.terminal_final` novo.
-- [ ] **Cartão em `corpus/cards/`** com backtest de 500 giros: taxa de acerto, χ² do desvio por
-      final, EV e banda de confiança (senão é aposta sem evidência).
-- [ ] **FUI**: overlay de cobertura para número/terminal (hoje desenha coluna e dúzia) e tabela
-      da escada ciente do tipo de cobertura.
-- [ ] **Teste de replay** com terminais no pipeline: 500 giros, zero `cover_mismatch`, zero
-      órfão — o mesmo gate da Fase 5, agora com `k` cliques por cobertura.
+- [x] **Expansão de cobertura** no `slip.compiler`: `Terminal(t)` → `[Straight(n) …]`, ficha de
+      cada número por `NumberLadder`. Plano continua `covers: Vec<(Cover, u64)>`.
+- [x] **Resolver `straight:N`** no `click.go`, derivado da grade 3×12 das âncoras `2to1`.
+- [x] **Fallback de calibração** para `straight:*` com delegação ao DOM e 409 quando não resolve.
+- [x] **Escada por pagamento**: `NumberLadder` + `authorize_numbers`, com teste de propriedade
+      (`lucro no acerto ≥ base` para `k = 3..=15`, todos os degraus) e teste dedicado
+      `number_ladder_does_not_reuse_the_x3_ladder`.
+- [x] **Limite de mesa por número**: `steps_within_limit(max_bet_per_cover_cents)` diz até onde
+      a escada cabe; o gate aborta com `TableLimit` acima disso.
+- [x] **Matcher de número**: `cluster_final` emite `Terminal(0)` + família, com teste de que a
+      cobertura é de terminal (nunca coluna).
+- [x] **Cartão em `corpus/cards/`**: `cluster_final.yaml`.
+- [x] **Teste de integração** do caminho de números: `fase5_cluster_final_aposta_em_numeros_com_escada_propria`
+      (15 plenos, preview somando, acerto/erro e degrau subindo 1→2→3).
+- [ ] **FUI**: overlay de cobertura para número/terminal e tabela da escada ciente do tipo.
+- [ ] **Backtest de 500 giros** com χ² por final e e-value (o cartão define; o número não existe).
+- [ ] **Monte Carlo** com a escada de números antes de `--live` (§13).
 
 ## 6. Vocabulário (para não confundir na UI e no código)
 
@@ -120,8 +122,8 @@ fantasma — arredondar para cima e registrar o total real no plano.
 
 ## 7. Ordem sugerida
 
-1. `straight:N` no resolver + calibração (sem isso nada de número chega na mesa).
-2. Escada por pagamento + testes + MC.
-3. Expansão `Terminal → Straight` no plano.
-4. Matcher + cartão com backtest.
-5. FUI e gate de replay.
+1. ~~`straight:N` no resolver + calibração~~ — feito (ADR 0003).
+2. ~~Escada por pagamento + testes~~ — feito; falta o MC de 10.000 sessões com `k=15`.
+3. ~~Expansão `Terminal → Straight` no plano~~ — feito.
+4. ~~Matcher + cartão~~ — feito; falta o backtest de 500 giros.
+5. FUI e gate de replay com números reais.
