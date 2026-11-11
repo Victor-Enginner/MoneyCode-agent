@@ -5,9 +5,10 @@
 
 use monster_capture::{CaptureSource, SpinBus, StreamClient, DEFAULT_STREAM_ADDR};
 use monster_core::{
-    boot_reconcile, evaluate_all_matchers_history, evaluate_dag_with_history, place,
-    reconcile_spin, Calibration, CdpActuator, CoverAck, DryRunActuator, ExecutionMode,
-    HistoryBuffer, KillSwitch, LiveHttpActuator, Plan, Window30, REAL_TABLE_479_RECENT_FIRST,
+    boot_reconcile, build_brain_snapshot, evaluate_all_matchers_history,
+    evaluate_dag_with_history, place, reconcile_spin, write_gbrain_file, Calibration, CdpActuator,
+    CoverAck, DryRunActuator, ExecutionMode, HistoryBuffer, KillSwitch, LiveHttpActuator, Plan,
+    Window30, REAL_TABLE_479_RECENT_FIRST,
 };
 use monster_risk::{run_monte_carlo, Cfg, McParams, State, Verdict};
 use monster_store::{
@@ -83,6 +84,22 @@ fn spawn_fui_http_server(
                     .unwrap_or_default();
                 let stats = evaluate_all_matchers_history(&matchers, &chrono, &cfg);
                 if let Ok(body) = serde_json::to_string(&stats) {
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    continue;
+                }
+                let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n");
+            } else if first_line.starts_with("GET /api/brain") {
+                let chrono = history
+                    .lock()
+                    .map(|h| h.to_chronological_vec())
+                    .unwrap_or_default();
+                let snap = build_brain_snapshot(&matchers, &chrono, &cfg);
+                if let Ok(body) = serde_json::to_string(&snap) {
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
@@ -218,6 +235,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let init_chrono = initial_hist.to_chronological_vec();
+    let init_snap = build_brain_snapshot(&matchers, &init_chrono, &cfg);
+    let _ = write_gbrain_file(
+        std::path::Path::new("O:/Archives/Eistein/FUI AGENT ROULLET/docs/memory/BRAIN_STATE.md"),
+        &init_snap,
+    );
     let init_stats = evaluate_all_matchers_history(&matchers, &init_chrono, &cfg);
     println!(
         "=== [WALK-FORWARD: {} GIROS DA MESA ANALISADOS] ===",

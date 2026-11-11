@@ -3,14 +3,25 @@
 //! Opera em modo `--dry-run` por padrão e coordena reconciliação pós-spin e kill switch.
 //! Orçamento estrito de latência (<250 ms no DAG) sem chamadas de LLM no caminho crítico.
 
+pub mod analytics;
 pub mod backtest;
+pub mod brain;
 pub mod dag;
 pub mod executor;
 pub mod reconciler;
 
+pub use analytics::{
+    analyze_table_systemic, compute_chi_square_37, compute_chi_square_cols,
+    compute_shannon_entropy_norm, compute_wald_wolfowitz_z, predict_ncm_break_probability,
+    SystemicAnalysisReport,
+};
 pub use backtest::{
     evaluate_all_matchers_history, evaluate_matcher_walk_forward, HistoryBuffer,
     PatternHistoryStats, HISTORY_CAPACITY, REAL_TABLE_479_RECENT_FIRST,
+};
+pub use brain::{
+    build_brain_snapshot, render_gbrain_markdown, write_gbrain_file, BrainSnapshot, HarnessTier,
+    StrategyEvidence,
 };
 pub use dag::{
     classify, compute_ev_cents_two_covers, evaluate_dag, evaluate_dag_with_history, fan_in,

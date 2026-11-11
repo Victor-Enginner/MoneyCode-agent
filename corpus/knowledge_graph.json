@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.0.0",
+  "generator": "monster-graphify-ast",
+  "project": "MONSTER (MoneyCode-agent)",
+  "nodes": [
+    {
+      "id": "crate:monster-core",
+      "kind": "rust_crate",
+      "path": "crates/core/src/lib.rs",
+      "exports": ["dag", "executor", "reconciler", "backtest", "analytics", "brain"],
+      "latency_budget_us": 250000
+    },
+    {
+      "id": "crate:monster-risk",
+      "kind": "rust_crate",
+      "path": "crates/risk/src/lib.rs",
+      "exports": ["stake_cents", "cum_loss_cents", "authorize", "decompose", "run_monte_carlo"],
+      "invariants": ["integer_cents_only", "ladder_x3_growth", "p_ruin_lt_0_05"]
+    },
+    {
+      "id": "crate:monster-strategy-native",
+      "kind": "rust_crate",
+      "path": "crates/strategy-native/src/lib.rs",
+      "matchers": [
+        { "id": "quebra_coluna_real_2to1", "pre_alert": 3, "entry_streak": 4, "cover_type": "col2to1" },
+        { "id": "quebra_permanencia_duzia", "pre_alert": 3, "entry_streak": 4, "cover_type": "dozen" },
+        { "id": "quebra_permanencia_coluna", "pre_alert": 3, "entry_streak": 4, "cover_type": "col" },
+        { "id": "quebra_cor_6x", "pre_alert": 5, "entry_streak": 6, "cover_type": "red_black" },
+        { "id": "quebra_alto_baixo_6x", "pre_alert": 5, "entry_streak": 6, "cover_type": "low_high" },
+        { "id": "quebra_par_impar_6x", "pre_alert": 5, "entry_streak": 6, "cover_type": "even_odd" },
+        { "id": "cluster_terminal", "pre_alert": 3, "entry_streak": 4, "cover_type": "col" },
+        { "id": "setor_vies", "min_window": 20, "bias_threshold": 0.55, "cover_type": "col" },
+        { "id": "fibonacci_lag", "lags": [0, 1, 2, 4], "cover_type": "col" }
+      ]
+    },
+    {
+      "id": "crate:monster-store",
+      "kind": "sqlite_wal_store",
+      "path": "crates/store/src/lib.rs",
+      "migration": "migrations/0001_init.sql",
+      "tables": ["spins", "intents", "fills", "reconciliations", "ladder_state", "errors"]
+    },
+    {
+      "id": "sidecar:capture-go",
+      "kind": "go_service",
+      "path": "sidecar/cmd/capture/main.go",
+      "endpoints": ["GET /stream", "POST /spin", "GET /health", "POST /act/click", "GET /act/preview"],
+      "protobuf_frozen_path": "/3/103/1/1",
+      "primary_ws_host": "eurolive-frontend.playtechgaming.com",
+      "standby_ws_host": "ielive-gateway.ptielive.com"
+    },
+    {
+      "id": "ui:fui-dashboard",
+      "kind": "operational_fui",
+      "path": "ui/live.html",
+      "spec": "docs/FUI.md",
+      "endpoints": ["GET /api/tick", "GET /api/patterns", "GET /api/brain", "POST /api/kill", "POST /api/pause", "POST /api/resume"]
+    }
+  ],
+  "edges": [
+    { "from": "sidecar:capture-go", "to": "crate:monster-core", "relation": "ndjson_stream_8787" },
+    { "from": "crate:monster-core", "to": "crate:monster-strategy-native", "relation": "dag_fan_out" },
+    { "from": "crate:monster-core", "to": "crate:monster-risk", "relation": "gate_authorize_and_decompose" },
+    { "from": "crate:monster-core", "to": "crate:monster-store", "relation": "wal_persistence" },
+    { "from": "crate:monster-core", "to": "sidecar:capture-go", "relation": "live_http_actuator_click" },
+    { "from": "crate:monster-core", "to": "ui:fui-dashboard", "relation": "http_4hz_tick_8791" }
+  ]
+}

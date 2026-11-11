@@ -129,6 +129,7 @@
         <button class="tab-btn" onclick="setTab('ORFAOS', this)">[3] ORFAOS</button>
         <button class="tab-btn" onclick="setTab('ERROS', this)">[4] ERROS</button>
         <button class="tab-btn" onclick="setTab('PADROES', this)">[5] PADROES (WALK-FORWARD)</button>
+        <button class="tab-btn" onclick="setTab('BRAIN', this)">[6] BRAIN &amp; DATALAB (24/7)</button>
       </div>
       <div style="overflow-y:auto;flex:1;">
         <table class="num"><thead id="tab-head"></thead><tbody id="tab-body"></tbody></table>
@@ -139,6 +140,7 @@
     let currentTab = 'DECISOES';
     let lastTick = null;
     let lastPatterns = [];
+    let lastBrain = null;
     const fmtCents = (c) => (c === null || c === undefined) ? '—' : (c < 0 ? '-R$ ' : 'R$ ') + Math.floor(Math.abs(c)/100) + ',' + String(Math.abs(c)%100).padStart(2,'0');
     const fmtVal = (v) => (v === null || v === undefined || v === '') ? '—' : String(v);
     const fmtClock = (s) => (s === null || s === undefined) ? '—' : String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
@@ -159,6 +161,7 @@
       else if (e.key === '3') setTab('ORFAOS', document.querySelectorAll('.tab-btn')[2]);
       else if (e.key === '4') setTab('ERROS', document.querySelectorAll('.tab-btn')[3]);
       else if (e.key === '5') setTab('PADROES', document.querySelectorAll('.tab-btn')[4]);
+      else if (e.key === '6') setTab('BRAIN', document.querySelectorAll('.tab-btn')[5]);
     });
     function render(t) {
       lastTick = t;
@@ -217,6 +220,22 @@
           const label = p.worth_entering ? '● SIM (APROVADO)' : '✖ NÃO (BLOQUEADO)';
           return `<tr><td>${p.strategy_id}</td><td>${p.spins_analyzed}g</td><td>${wins}V / ${p.busts}E</td><td>${d[0]} · ${d[1]} · ${d[2]} · ${d[3]}</td><td style="color:${p.net_pnl_cents>=0?'var(--accent)':'var(--loss)'}">${fmtCents(p.net_pnl_cents)}</td><td style="color:${color};font-weight:600">${label}</td></tr>`;
         }).join('') : '<tr><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>';
+      } else if (currentTab === 'BRAIN') {
+        th.innerHTML = '<tr><th>MÉTRICA CIENTÍFICA (DATALAB / NCM / JEV / GBRAIN)</th><th>VALOR ATUAL</th><th>INTERPRETAÇÃO OPERACIONAL</th></tr>';
+        if (lastBrain && lastBrain.systemic) {
+          const s = lastBrain.systemic;
+          const hot = (s.hot_numbers || []).map(h => `${h[0]} (${h[1]}x)`).join(', ');
+          tb.innerHTML = `
+            <tr><td>CLASSE DE REGIME (SIMPLE-JEV)</td><td style="color:var(--accent);font-weight:600">${s.jev_regime_class}</td><td>Classificação em sub-milissegundo (${s.sample_size} giros)</td></tr>
+            <tr><td>PROBABILIDADE NCM DE QUEBRA NO PRÓXIMO GIRO</td><td style="color:var(--ok);font-weight:600">${(s.ncm_break_probability*100).toFixed(1)}%</td><td>Preditor Markoviano HazyResearch/NCM</td></tr>
+            <tr><td>CHI-QUADRADO RODA (37 CASAS, df=36)</td><td>${s.chi_square_37.toFixed(2)}</td><td>${s.wheel_bias_significant ? '⚠ VIÉS FÍSICO DETECTADO (p < 0.05)' : '● Roda dentro da normalidade (p >= 0.05)'}</td></tr>
+            <tr><td>WALD-WOLFOWITZ RUNS TEST (Z-SCORE)</td><td>${s.wald_wolfowitz_z.toFixed(2)}</td><td>${s.wald_wolfowitz_z < -1.5 ? 'Permanência/Clusters acima da média' : (s.wald_wolfowitz_z > 1.5 ? 'Alternância rápida acima da média' : 'Equilíbrio de sequências')}</td></tr>
+            <tr><td>ENTROPIA DE SHANNON NORMALIZADA</td><td>${s.shannon_entropy_norm.toFixed(4)}</td><td>Top 3 Quentes: ${hot || '—'}</td></tr>
+            <tr><td>HARNESS2 TIER-1 INVICTOS NA MESA</td><td style="color:var(--ok);font-weight:600">${lastBrain.tier1_count} estratégias</td><td>Lucro Histórico Combinado Tier-1: ${fmtCents(lastBrain.tier1_combined_pnl_cents)}</td></tr>
+          `;
+        } else {
+          tb.innerHTML = '<tr><td>—</td><td>—</td><td>—</td></tr>';
+        }
       } else {
         th.innerHTML = '<tr><th>ID</th><th>KIND</th><th>DETALHE</th><th>TS</th></tr>';
         const rows = t.errors || [];
@@ -228,8 +247,10 @@
     }, 250);
     setInterval(async () => {
       try { const r = await fetch('/api/patterns'); if (r.ok) lastPatterns = await r.json(); } catch (_) {}
+      try { const b = await fetch('/api/brain'); if (b.ok) lastBrain = await b.json(); } catch (_) {}
     }, 1000);
     fetch('/api/patterns').then(r => r.ok ? r.json() : []).then(d => { lastPatterns = d; }).catch(() => {});
+    fetch('/api/brain').then(r => r.ok ? r.json() : null).then(d => { lastBrain = d; }).catch(() => {});
   </script>
 </body>
 </html>
