@@ -1,0 +1,161 @@
+# LINKS.md — arsenal do projeto MONSTER
+
+> Curadoria das stars de @Victor-Enginner + docs oficiais, filtrada por
+> utilidade real neste projeto. Toda entrada tem **onde usar** e **fase**.
+> Marcações: `[STAR]` = do seu GitHub · `[DOC]` = documentação oficial.
+
+## Como usar este arquivo
+- Leia a seção 1 antes de escrever a primeira linha.
+- Só clone o que estiver marcado `CLONE`. O resto é leitura de referência.
+- Nada da seção 9 entra no caminho crítico de aposta.
+- Se for adicionar link novo, coloque a fase e o motivo — link sem fase vira peso morto.
+
+---
+
+## 1. Núcleo do projeto (obrigatório, leia hoje)
+
+| Link | Para que serve | Fase |
+|---|---|---|
+| [jogatudo — Roleta Brasileira](https://www.jogatudo.com/pt-BR/game/playtech-brasileira.roleta-brasileira) | alvo. Bloqueia por região: use VPN ou o domínio espelho do white-label | 0 |
+| [Victor-Enginner/Roullet-bot-eistein](https://github.com/Victor-Enginner/Roullet-bot-eistein) | base de referência: decoder protobuf, observer, engine, telegram | 0 |
+| [Playtech](https://www.playtech.com/) | fornecedor da mesa: regras, la partage, limites | 0 |
+
+**CLONE:** `Roullet-bot-eistein`. Porte `scraper/monitor.py`, `strategy/engine.py`,
+`database.py` e `utils/logger.py` para a arquitetura Rust/Go. Não reescreva do zero
+o que já foi depurado contra a mesa real.
+
+## 2. Captura e automação de browser (a peça que decide o projeto)
+
+| Link | Para que serve | Fase |
+|---|---|---|
+| [CDP — DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) `[DOC]` | `Target.setAutoAttach`, `Network.webSocketFrameReceived`, `Input.dispatchMouseEvent`. É a base inteira da captura | 2 |
+| [vercel-labs/agent-browser](https://github.com/vercel-labs/agent-browser) `[STAR]` **CLONE** | CLI de automação em Rust: modelo pronto de attach, sessão e comando | 2 |
+| [vercel-labs/agent-desktop](https://github.com/vercel-labs/agent-desktop) `[STAR]` | computer use em Rust: referência de input em nível de SO se o CDP não bastar | 2 |
+| [daijro/camoufox](https://github.com/daijro/camoufox) `[STAR]` **CLONE** | anti-detect Firefox. Plano C se a Playtech começar a derrubar sessão CDP | 5 |
+| [Playwright](https://playwright.dev/) `[DOC]` | só para os testes de fixture e calibração, nunca na captura | 3 |
+| [milind-soni/OpenMausBot](https://github.com/milind-soni/OpenMausBot) `[STAR]` | bot com VM própria: padrão de isolamento de perfil | 5 |
+
+## 3. Engenharia reversa de protocolo (o walker protobuf sai daqui)
+
+| Link | Para que serve | Fase |
+|---|---|---|
+| [morluto/rea](https://github.com/morluto/rea) `[STAR]` **CLONE** | RE com agentes, do comportamento ao binário: metodologia para achar o campo do resultado | 2 |
+| [JoasASantos/REA-Prompts](https://github.com/JoasASantos/REA-Prompts) `[STAR]` | prompts de RE prontos: use para instruir o agente no `--ws-probe` | 2 |
+| [alexgaoth/awesome-reverse-engineered](https://github.com/alexgaoth/awesome-reverse-engineered) `[STAR]` | 17k ferramentas de RE indexadas. Busque "protobuf", "websocket", "casino" | 2 |
+| [lemonadesaltbagel/crab](https://github.com/lemonadesaltbagel/crab) `[STAR]` | reimplementação clean-room a partir de comportamento observado | 2 |
+| [protobuf.dev — encoding](https://protobuf.dev/programming-guides/encoding/) `[DOC]` | wire types: é o que o walker genérico percorre sem `.proto` | 2 |
+| [gorilla/websocket](https://github.com/gorilla/websocket) `[DOC]` | cliente WS do sidecar Go | 2 |
+
+## 4. Conhecimento sobre os 8 PDFs (RAG e grafo)
+
+| Link | Para que serve | Fase |
+|---|---|---|
+| [Graphify-Labs/graphify](https://github.com/Graphify-Labs/graphify) `[STAR]` **CLONE** | converte PDF + schema em grafo consultável com AST determinístico. É o motor do `corpus/` | 7 |
+| [Egonex-AI/Understand-Anything](https://github.com/Egonex-AI/Understand-Anything) `[STAR]` | grafo interativo de conhecimento: mesma função, foco em exploração | 7 |
+| [semantica-agi/semantica](https://github.com/semantica-agi/semantica) `[STAR]` | infra graph-native com rastreabilidade de decisão — casa com `intents`/`fills` | 7 |
+| [langgenius/dify](https://github.com/langgenius/dify) `[STAR]` | RAG pipeline self-hosted se quiser UI de curadoria do corpus | 7 |
+| [onyx-dot-app/onyx](https://github.com/onyx-dot-app/onyx) `[STAR]` | chat sobre corpus próprio, para consultar os PDFs durante a modelagem | 7 |
+| [DataLab-Platform/DataLab](https://github.com/DataLab-Platform/DataLab) `[STAR]` | processamento científico: chi², runs test, bootstrap com rigor | 4 |
+
+## 5. Orquestração de agentes (o jeito de rodar opencode/kilo/freebuff)
+
+| Link | Para que serve | Fase |
+|---|---|---|
+| [Ryder-Sun/Meldwork](https://github.com/Ryder-Sun/Meldwork) `[STAR]` **CLONE** | workspace multi-agente local-first, permissões escopadas, evidência por run | 1 |
+| [different-ai/openwork](https://github.com/different-ai/openwork) `[STAR]` | alternativa open ao Cowork, base opencode: dispatch dos agentes por tarefa | 1 |
+| [generalaction/emdash](https://github.com/generalaction/emdash) `[STAR]` | ambiente para vários agentes em paralelo com providers distintos | 1 |
+| [bastani-inc/atomic](https://github.com/bastani-inc/atomic) `[STAR]` **CLONE** | transforma o §15 do AGENTS.md em stages com gates e aprovação — evita agente "pular fase" | 1 |
+| [kenryu42/cc-safety-net](https://github.com/kenryu42/cc-safety-net) `[STAR]` **CLONE** | guarda pré-execução: bloqueia `git reset --hard`, `rm -rf`, leitura de `.env` | 1 |
+| [davidondrej/cloudroom](https://github.com/davidondrej/cloudroom) `[STAR]` | sandbox isolado por sessão de agente | 1 |
+| [google-research/harness2](https://github.com/google-research/harness2) `[STAR]` | referência de harness de avaliação de agente | 8 |
+| [deepseek-ai/dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype) `[STAR]` | arquitetura de superagente autônomo | 8 |
+
+## 6. Skills instaláveis para os agentes
+
+| Link | Para que serve | Fase |
+|---|---|---|
+| [sickn33/agentic-awesome-skills](https://github.com/sickn33/agentic-awesome-skills) `[STAR]` | catálogo de skills: base para escrever as skills do MONSTER | 1 |
+| [rtadewald/skills](https://github.com/rtadewald/skills) `[STAR]` | skills em PT-BR, fluxos de agente — modelo de redação | 1 |
+| [finfin/awesome-frontend-skills](https://github.com/finfin/awesome-frontend-skills) `[STAR]` | skills de frontend para a FUI | 6 |
+| [SnailSploit/Claude-Red](https://github.com/SnailSploit/Claude-Red) `[STAR]` | metodologia estruturada em SKILL.md: formato a copiar | 1 |
+| [Anthropic — Agent Skills](https://docs.claude.com/en/docs/claude-code/skills) `[DOC]` | spec do formato de skill | 1 |
+
+## 7. Decisão local em milissegundos (opcional, se o DAG nativo não bastar)
+
+| Link | Para que serve | Fase |
+|---|---|---|
+| [featherless-ai/simple-jev](https://github.com/featherless-ai/simple-jev) `[STAR]` | transforma modelo aberto em classificador de endpoint: classe de regime em <10 ms | 8 |
+| [mizorewww/laya-coreml](https://github.com/mizorewww/laya-coreml) `[STAR]` | decisões tipadas ~5 ms em Core ML (só se for Mac) | 8 |
+| [HazyResearch/ncm](https://github.com/HazyResearch/ncm) `[STAR]` | Next Concept Modeling: representação de conceito, útil para features de janela | 8 |
+| [Edge0-AI/Edge0](https://github.com/Edge0-AI/Edge0) `[STAR]` | MoE 35B em 2,5 GB de RAM: LLM local pesado sem GPU | 8 |
+| [JustVugg/colibri](https://github.com/JustVugg/colibri) `[STAR]` | inferência MoE hierárquica em CPU/NVMe | 8 |
+| [Zagitta/gpu-unlock](https://github.com/Zagitta/gpu-unlock) `[STAR]` | 2× throughput FP16 em GeForce 20/30/40 — patch de driver, leia antes | 8 |
+| [Mesh-LLM/mesh-llm](https://github.com/Mesh-LLM/mesh-llm) `[STAR]` | compute distribuído: rodar o analisador em outra máquina | 8 |
+
+## 8. UI da FUI (design que não parece IA)
+
+| Link | Para que serve | Fase |
+|---|---|---|
+| [heydamir/unslop](https://github.com/heydamir/unslop) `[STAR]` **CLONE** | converte UI vibecodada em interface desenhada. Passe a FUI por aqui antes de aprovar | 6 |
+| [Nutlope/hallmark](https://github.com/Nutlope/hallmark) `[STAR]` | skill anti-slop de design | 6 |
+| [pbakaus/impeccable](https://github.com/pbakaus/impeccable) `[STAR]` | vocabulário de design para agente: "polish", "critique", "audit" | 6 |
+| [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail) `[STAR]` | agente com preguiça de senior dev: menos código, menos painel inútil | 6 |
+| [meta/astryx](https://github.com/meta/astryx) `[STAR]` | design system agent-ready: base de componentes | 6 |
+| [DavidHDev/react-bits](https://github.com/DavidHDev/react-bits) `[STAR]` | componentes animados: só onde agrega (LED de health, countdown) | 6 |
+| [cathrynlavery/diagram-design](https://github.com/cathrynlavery/diagram-design) `[STAR]` | diagramas editoriais sem Mermaid: docs de arquitetura | 1 |
+| [excalidraw/excalidraw-mcp](https://github.com/excalidraw/excalidraw-mcp) `[STAR]` | desenho rápido do fluxo de aposta | 1 |
+| [kunal-chaudhary-design/liquid-buttons](https://github.com/kunal-chaudhary-design/liquid-buttons) `[STAR]` | botão de vidro: candidato ao kill switch | 6 |
+| [blader/humanizer](https://github.com/blader/humanizer) `[STAR]` | tira cara de IA do texto de docs e alertas | 1 |
+| [petergyang/no-ai-slop](https://github.com/petergyang/no-ai-slop) `[STAR]` | mesmo fim, para README e runbooks | 1 |
+| [Tailwind CSS](https://tailwindcss.com/) `[DOC]` | estilo da UI | 6 |
+| [Tauri](https://tauri.app/) `[DOC]` | shell, IPC, tray, global shortcut | 6 |
+
+## 9. Observabilidade e apoio (nunca no caminho crítico)
+
+| Link | Para que serve | Fase |
+|---|---|---|
+| [openobserve/openobserve](https://github.com/openobserve/openobserve) `[STAR]` | logs/traces/métricas self-hosted: substitui o `tracing` local quando crescer | 8 |
+| [rerun-io/rerun](https://github.com/rerun-io/rerun) `[STAR]` | stream multimodal: plotar latência por estágio ao vivo | 8 |
+| [getopenscreen/openscreen](https://github.com/getopenscreen/openscreen) `[STAR]` | gravar a sessão de aposta para auditoria e debug | 6 |
+| [T8RIN/ImageToolbox](https://github.com/T8RIN/ImageToolbox) `[STAR]` | OCR/processamento de imagem: plano D da captura | 5 |
+| [oomol-lab/open-flow](https://github.com/oomol-lab/open-flow) `[STAR]` | workflow visual em TypeScript: alternativa se quiser DAG editável | 7 |
+| [hugohe3/ppt-master](https://github.com/hugohe3/ppt-master) `[STAR]` | deck do projeto a partir dos docs | 8 |
+| [Swisskyrepo/PayloadsAllTheThings](https://github.com/swisskyrepo/PayloadsAllTheThings) `[STAR]` | se precisar burlar age gate / fingerprint | 5 |
+| [hexstrike-ai](https://github.com/0x4m4/hexstrike-ai) `[STAR]` | MCP com 150+ ferramentas ofensivas: inspeção de tráfego TLS | 2 |
+
+## 10. Rust, Go, SQLite e licença (docs de base)
+
+| Link | Para que serve | Fase |
+|---|---|---|
+| [Rust Book](https://doc.rust-lang.org/book/) `[DOC]` | ownership antes de escrever o bus | 0 |
+| [Tokio](https://tokio.rs/) `[DOC]` | runtime async do core | 2 |
+| [sqlx](https://docs.rs/sqlx) `[DOC]` | queries checadas em compile-time | 1 |
+| [SQLite WAL](https://sqlite.org/wal.html) `[DOC]` | concorrência leitura/escrita sem travar o executor | 1 |
+| [Go — net/http e contexto](https://pkg.go.dev/context) `[DOC]` | timeout e cancelamento no sidecar | 2 |
+| [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) `[DOC]` | licença do projeto + NOTICE para os `.proto` de terceiros | 0 |
+| [Tauri — assinatura de código](https://tauri.app/distribute/sign/windows/) `[DOC]` | sem isso o SmartScreen come o instalador | 8 |
+
+## 11. Fica de fora (e por quê)
+
+- **Genjustsu / openfilm / seedance / WanGP / bridgeclip / openreel** — vídeo.
+  Só entram se você quiser gravar demo do produto.
+- **TryHackMe / Awesome-Hacking / redamon / CyberStrike / T3MP3ST / AiSOC** —
+  pentest. Útil depois, não bloqueia nada aqui.
+- **BIMCraft / blender / mmpose / openpose / WHAM / 4D-Humans / mediapipe** —
+  visão 3D. Vira tentação; só se um dia for OCR de vídeo da roda.
+- **localthings / nectarlink / cleanyourtv / webssh / coteditor** — infra de casa.
+- **gmail-account-creator** — se precisar de conta nova no white-label.
+- **gods-eye-view / diagramas 3D** — bonito, não bloqueia.
+- **AstraCalls / WA-AKG / DeskcommCRM / cogsend** — WhatsApp/CRM. Só se o
+  alerta migrar de Telegram para WhatsApp.
+
+## 12. Ordem de leitura (30 min, antes do primeiro commit)
+
+1. §1 inteira — alvo e base de referência.
+2. [CDP](https://chromedevtools.github.io/devtools-protocol/) — `Target.setAutoAttach`
+   e `Network.webSocketFrameReceived`. Sem entender isso, a Fase 2 não existe.
+3. [protobuf encoding](https://protobuf.dev/programming-guides/encoding/) — varint
+   e wire type 2. É o que o walker percorre.
+4. [atomic](https://github.com/bastani-inc/atomic) — como prender o agente nas fases.
+5. [unslop](https://github.com/heydamir/unslop) — antes de deixar qualquer agente
+   tocar em `ui/`.

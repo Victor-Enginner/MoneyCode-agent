@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# Caminhos protobuf da Playtech (ielive-gateway.ptielive.com/ws) portados de Roullet-bot-eistein.
+# Podem ser re-validados ao vivo com `start-probe.bat` (--ws-probe).
+
+gateway_host_contains = "ptielive"
+number_offset = 100
+round_id_path = "/3/11"
+
+[[candidate_paths]]
+message_type = "pt.live.game/gameRoundOver/1.0"
+path = "/3/16/3/1/2"
+encoding = "offset100"
+
+[[candidate_paths]]
+message_type = "pt.live.game/GameEventRequest"
+path = "/3/118/1"
+encoding = "offset100"
+
+[[candidate_paths]]
+message_type = "pt.live.game/GameEventRequest"
+path = "/3/4/3/1/2"
+encoding = "offset100"

@@ -1,0 +1,482 @@
+Perfeito — e a resposta curta sobre o iframe é: **sim, dá, e nem é pelo caminho que você imaginou.** O iframe da Playtech é cross-origin, então `MutationObserver` na página da jogatudo devolve DOM vazio. O jeito certo é **CDP attach no seu Chrome já logado**, que ignora same-origin, e daí você tem dois níveis: injetar o observer *dentro* do frame, ou — melhor — **nem olhar o DOM e capturar os frames WebSocket protobuf** antes da UI pintar.
+
+O motor de risco já está rodando acima: mexe na ficha base, nos degraus e no limite de mesa e vê a curva de ruína mudar. Agora o resto.
+
+---
+
+# PARTE 1 — Conexão com o iframe da Playtech
+
+## 1.1 Por que o caminho óbvio falha
+
+```
+jogatudo.com (origem A)
+  └─ <iframe src="casino.playtech.com/...">  (origem B, cross-origin)
+        └─ timeline de números, canvas da mesa, bet slip
+```
+
+- `page.evaluate()` do contexto A → `SecurityError` ou DOM vazio.
+- `document.querySelector` no pai → só vê o `<iframe>`, nunca o conteúdo.
+- Extensão sem `all_frames: true` → injeta só no topo, inútil.
+
+## 1.2 O caminho que funciona: CDP com auto-attach em OOPIF
+
+Iframes cross-origin viram **targets separados** (out-of-process iframe) no CDP. Com `Target.setAutoAttach { flatten: true }` você é notificado de cada iframe novo e fala com ele direto, com sessão própria:
+
+```go
+// sidecar/cdp/attach.go
+func (c *Client) AutoAttach() error {
+	return c.Send("", "Target.setAutoAttach", map[string]any{
+		"autoAttach":             true,
+		"waitForDebuggerOnStart": false,
+		"flatten":                true, // sessão por target, sem túnel
+	})
+}
+
+func (c *Client) onAttached(ev Event) {
+	t := ev.Params["targetInfo"]
+	if !strings.Contains(t.URL, "playtech") { return }
+	sid := ev.Params["sessionId"].(string)
+	c.Send(sid, "Runtime.enable", nil)
+	c.Send(sid, "Network.enable", nil)
+	c.Send(sid, "Runtime.addBinding", map[string]any{"name": "__emit"})
+	c.Send(sid, "Runtime.evaluate", map[string]any{
+		"expression": observerJS, "awaitPromise": false,
+	})
+}
+```
+
+**Pré-requisito crítico do Chrome:** desde a versão 136, `--remote-debugging-port` **só funciona com `--user-data-dir` não-padrão**. Sem isso a porta abre e fica muda.
+
+```
+chrome.exe --remote-debugging-port=9222 ^
+  --user-data-dir="%LOCALAPPDATA%\roulette-profile" ^
+  --disable-blink-features=AutomationControlled ^
+  --profile-directory="Default"
+```
+
+Você loga **uma vez, na mão**, nesse perfil. O bot nunca digita senha. O perfil é a sessão.
+
+## 1.3 O observer roda dentro do frame
+
+```js
+// sidecar/cdp/inject.js — executado no target do iframe
+(() => {
+  if (window.__mo) return;
+  const seen = new Set();
+
+  const emit = (n, node) => {
+    const key = n + '|' + (node?.dataset?.ts || node?.id || '');
+    if (seen.has(key)) return;
+    seen.add(key);
+    window.__emit(JSON.stringify({ t: 'spin', n, src: 'mo', at: Date.now() }));
+  };
+
+  const scan = (root) => {
+    const sel = '.history .number, [class*="lastNumbers"] li, [class*="result"] .num';
+    root.querySelectorAll?.(sel).forEach(el => {
+      const n = parseInt(el.textContent, 10);
+      if (n >= 0 && n <= 36) emit(n, el);
+    });
+  };
+
+  const arm = () => {
+    const host = document.querySelector('[class*="history"], [class*="lastNumbers"]');
+    if (!host) return setTimeout(arm, 500);
+    window.__mo = new MutationObserver(() => scan(host));
+    window.__mo.observe(host, { childList: true, subtree: true, characterData: true });
+    scan(host);
+  };
+  arm();
+
+  // re-arma se o SPA trocar a timeline de lugar
+  new MutationObserver(() => { if (!document.contains(window.__mo?._host)) arm(); })
+    .observe(document.body, { childList: true, subtree: true });
+})();
+```
+
+O retorno chega em `Runtime.bindingCalled` — sem polling, sem `postMessage`.
+
+## 1.4 A fonte superior: WS protobuf, sem `.proto`
+
+`Network.webSocketFrameReceived` entrega o payload em base64. Você **não precisa do schema** para começar: um walker genérico de protobuf (varint + length-delimited) coleta todo candidato `(caminho_de_campo, valor)` com valor entre 0 e 36, e você correlaciona com o número que a UI mostrou. O campo que acerta 20 spins seguidos é o campo do resultado.
+
+```go
+// sidecar/wsdecap/walker.go
+type Cand struct{ Path string; Val uint64 }
+
+func Walk(b []byte) []Cand {
+	var out []Cand
+	walk(b, "", &out, 0)
+	return out
+}
+
+func walk(b []byte, path string, out *[]Cand, depth int) {
+	if depth > 8 { return }
+	for len(b) > 0 {
+		key, n := uvarint(b)
+		if n <= 0 { return }
+		b = b[n:]
+		field, wire := key>>3, key&7
+		p := path + "/" + strconv.FormatUint(field, 10)
+		switch wire {
+		case 0: // varint
+			v, m := uvarint(b)
+			if m <= 0 { return }
+			b = b[m:]
+			if v <= 36 { *out = append(*out, Cand{p, v}) }
+		case 2: // length-delimited
+			ln, m := uvarint(b)
+			if m <= 0 || int(ln) > len(b) { return }
+			walk(b[:ln], p, out, depth+1) // pode ser mensagem aninhada ou string
+			b = b[ln:]
+		case 1: if len(b) < 8 { return }; b = b[8:]
+		case 5: if len(b) < 4 { return }; b = b[4:]
+		default: return
+		}
+	}
+}
+```
+
+Depois de 20 spins você fixa o caminho (ex.: `/4/1/2`), congela em `schema.toml` e passa a ler só ele. Ganho: resultado ~200–600 ms antes do DOM, com `spin_id` monotônico — que é o que permite idempotência real.
+
+## 1.5 Clique: nunca `.click()` em canvas
+
+A mesa é canvas. Use coordenadas reais do target do iframe:
+
+```go
+c.Send(sid, "Input.dispatchMouseEvent", map[string]any{
+	"type": "mousePressed", "x": x, "y": y, "button": "left",
+	"clickCount": 1, "buttons": 1,
+})
+c.Send(sid, "Input.dispatchMouseEvent", map[string]any{
+	"type": "mouseReleased", "x": x, "y": y, "button": "left",
+	"clickCount": 1, "buttons": 0,
+})
+```
+
+Mapeie a posição de cada casa **uma vez** (calibração por screenshot, salva em `calibration.toml`) e valide relendo o bet slip.
+
+## 1.6 Cadeia de fallback obrigatória
+
+```
+WS protobuf  →  MutationObserver no frame  →  extensão (all_frames)  →  OCR
+```
+
+Extensão como plano C: `chrome.scripting.registerContentScripts` com `allFrames: true`, `matches: ["https://*.playtech.com/*"]`, e ela abre `ws://127.0.0.1:8787` para o sidecar. Sem native messaging, sem registro no Windows.
+
+Todas as fontes emitem **o mesmo** evento canônico. O normalizador descarta duplicata por `spin_id` e marca `source`. Fonte morta → `DEGRADED` na UI, nunca parada total.
+
+---
+
+# PARTE 2 — Scaffold
+
+## 2.1 Workspace
+
+```toml
+# Cargo.toml
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/store", "crates/capture", "crates/risk", "crates/strategy-native", "crates/strategy-runtime", "crates/ui"]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "migrate"] }
+tracing = "0.1"
+thiserror = "2"
+```
+
+```sql
+-- migrations/0001_init.sql
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+
+CREATE TABLE spins (
+  id INTEGER PRIMARY KEY,
+  spin_id TEXT UNIQUE NOT NULL,
+  number INTEGER NOT NULL CHECK (number BETWEEN 0 AND 36),
+  ts INTEGER NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('ws','mo','ext','ocr')),
+  received_at INTEGER NOT NULL,
+  latency_ms INTEGER
+);
+CREATE INDEX idx_spins_ts ON spins(ts DESC);
+
+CREATE TABLE intents (
+  id INTEGER PRIMARY KEY,
+  spin_id TEXT NOT NULL,
+  strategy_id TEXT NOT NULL,
+  ladder_step INTEGER NOT NULL,
+  stake_cents INTEGER NOT NULL,
+  ev_cents INTEGER NOT NULL,
+  confidence REAL NOT NULL,
+  decision TEXT NOT NULL CHECK (decision IN ('placed','skipped','aborted','orphan')),
+  reason TEXT,
+  created_at INTEGER NOT NULL,
+  UNIQUE (strategy_id, spin_id)
+);
+
+CREATE TABLE fills (
+  id INTEGER PRIMARY KEY,
+  intent_id INTEGER NOT NULL REFERENCES intents(id),
+  cover TEXT NOT NULL,
+  stake_cents INTEGER NOT NULL,
+  acked INTEGER NOT NULL DEFAULT 0,
+  confirmed_at INTEGER
+);
+
+CREATE TABLE ladder_state (
+  strategy_id TEXT PRIMARY KEY,
+  step INTEGER NOT NULL DEFAULT 0,
+  loss_cents INTEGER NOT NULL DEFAULT 0,
+  reset_at INTEGER
+);
+
+CREATE TABLE errors (
+  id INTEGER PRIMARY KEY, kind TEXT NOT NULL, detail TEXT, ts INTEGER NOT NULL
+);
+```
+
+## 2.2 Motor de risco (a peça que mais importa)
+
+```rust
+// crates/risk/src/lib.rs
+pub const P_LOSE: f64 = 13.0 / 37.0; // 0 + coluna perdedora
+
+/// Ficha por cobertura no degrau `step`. Cresce ×3, não ×2:
+/// cobrir 2 colunas custa 2x por perda, então x = perda_acumulada + lucro_alvo.
+pub fn stake_cents(step: u8, base_cents: u64) -> u64 {
+    let mut d = 0u64;
+    for _ in 1..step {
+        let x = d + base_cents;
+        d += 2 * x;
+    }
+    d + base_cents
+}
+
+pub fn cum_loss_cents(step: u8, base_cents: u64) -> u64 {
+    (1..=step).fold(0u64, |d, _| d + 2 * (d + base_cents))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Verdict { Place, Skip(Skip), Abort(Abort) }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Skip { WindowTooShort, Cooldown }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Abort { LadderBlown, TableLimit, Exposure, StopLoss, AlreadyEntered }
+
+pub struct Cfg {
+    pub base_cents: u64,
+    pub max_steps: u8,
+    pub max_bet_per_cover_cents: u64,
+    pub max_exposure_pct: f64,
+    pub stop_loss_cents: i64,
+    pub min_window_ms: u32,
+    pub cooldown_spins: u32,
+}
+
+pub struct State {
+    pub bankroll_cents: i64,
+    pub exposure_cents: u64,
+    pub session_pnl_cents: i64,
+    pub remaining_window_ms: u32,
+    pub spins_since_blow: u32,
+    pub step: u8,
+}
+
+pub fn authorize(cfg: &Cfg, st: &State) -> Verdict {
+    if st.session_pnl_cents <= -cfg.stop_loss_cents { return Verdict::Abort(Abort::StopLoss); }
+    let next = st.step + 1;
+    if next > cfg.max_steps { return Verdict::Abort(Abort::LadderBlown); }
+    let stake = stake_cents(next, cfg.base_cents);
+    if stake > cfg.max_bet_per_cover_cents { return Verdict::Abort(Abort::TableLimit); }
+    if (st.exposure_cents + 2 * stake) as f64 > st.bankroll_cents as f64 * cfg.max_exposure_pct {
+        return Verdict::Abort(Abort::Exposure);
+    }
+    if st.spins_since_blow < cfg.cooldown_spins { return Verdict::Skip(Skip::Cooldown); }
+    if st.remaining_window_ms < cfg.min_window_ms { return Verdict::Skip(Skip::WindowTooShort); }
+    Verdict::Place
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn ladder_is_triple_not_double() {
+        let b = 10;
+        assert_eq!(stake_cents(1, b), 10);
+        assert_eq!(stake_cents(2, b), 30);
+        assert_eq!(stake_cents(3, b), 90);
+        assert_eq!(stake_cents(4, b), 270);
+        assert_eq!(stake_cents(5, b), 810);
+        assert_eq!(cum_loss_cents(5, b), 2420);
+    }
+    #[test]
+    fn each_win_nets_exactly_one_base() {
+        for step in 1..=5u8 {
+            let loss = (1..step).fold(0i64, |d, _| d + 2 * (d as u64 + 10) as i64);
+            let win = stake_cents(step, 10) as i64;
+            assert_eq!(win - loss, 10);
+        }
+    }
+}
+```
+
+## 2.3 DAG
+
+```rust
+// crates/core/src/dag.rs
+use std::sync::Arc;
+
+pub struct Spin { pub spin_id: String, pub number: u8, pub ts: i64 }
+
+#[async_trait::async_trait]
+pub trait Matcher: Send + Sync {
+    fn id(&self) -> &'static str;
+    /// `window` = últimos N números, mais recente em [0]
+    fn score(&self, window: &[u8]) -> Option<f32>;
+}
+
+pub enum Regime { Permanence, Momentum, Neutral }
+
+/// Permanência e cluster se contradizem. Sem isto você tem dois sinais
+/// opostos e nenhum desempate.
+pub fn classify(window: &[u8]) -> Regime {
+    if window.len() < 20 { return Regime::Neutral; }
+    let runs = 1 + window.windows(2).filter(|w| w[0] != w[1]).count();
+    let n = window.len() as f32;
+    // esperado de runs numa sequência aleatória ~ n/2; muito menos = colado
+    let ratio = runs as f32 / (n / 2.0);
+    if ratio < 0.75 { Regime::Permanence } else if ratio > 1.25 { Regime::Momentum } else { Regime::Neutral }
+}
+
+pub struct Aggregate { pub strategy_id: &'static str, pub confidence: f32 }
+
+pub fn fan_in(window: &[u8], matchers: &[Arc<dyn Matcher>]) -> Vec<Aggregate> {
+    let regime = classify(window);
+    matchers.iter()
+        .filter_map(|m| {
+            let s = m.score(window)?;
+            let bias = match (regime, m.id()) {
+                (Regime::Permanence, id) if id.contains("cluster") => 0.85,
+                (Regime::Momentum, id) if id.contains("permanencia") => 0.85,
+                _ => 1.0,
+            };
+            Some(Aggregate { strategy_id: m.id(), confidence: s * bias })
+        })
+        .collect()
+}
+```
+
+Matcher de permanência, com o gatilho exato que você descreveu (4–6 na mesma coluna):
+
+```rust
+// crates/strategy-native/src/permanencia.rs
+pub struct QuebraColuna { pub min: usize, pub max: usize }
+
+impl Matcher for QuebraColuna {
+    fn id(&self) -> &'static str { "quebra_permanencia_coluna" }
+    fn score(&self, w: &[u8]) -> Option<f32> {
+        let cols: Vec<u8> = w.iter().map(|&n| if n == 0 { 0 } else { (n - 1) / 12 + 1 }).collect();
+        let alvo = *cols.first()?;
+        if alvo == 0 { return None; }
+        let streak = cols.iter().take_while(|&&c| c == alvo).count();
+        if !(self.min..=self.max).contains(&streak) { return None; }
+        // confiança cresce até 5, satura em 6
+        Some((0.55 + 0.08 * (streak as f32 - self.min as f32)).min(0.95))
+    }
+}
+```
+
+## 2.4 Executor com preview e reconciliação
+
+```rust
+// crates/core/src/executor.rs
+pub struct Plan { pub covers: Vec<(Cover, u64)>, pub total_cents: u64 }
+
+/// Decompõe o valor em fichas: 8.10 → 5.00 + 2.00 + 1.00 + 0.10 (4 cliques, não 81).
+pub fn decompose(total_cents: u64, denoms: &[u64]) -> Vec<(u64, u8)> {
+    let mut rest = total_cents;
+    let mut out = Vec::new();
+    for &d in denoms { // ordem decrescente
+        let n = (rest / d) as u8;
+        if n > 0 { out.push((d, n)); rest -= d * n as u64; }
+    }
+    out
+}
+
+pub async fn place(cdp: &Cdp, plan: &Plan, cal: &Calibration) -> Result<Fills, ExecError> {
+    for (cover, cents) in &plan.covers {
+        let (x, y) = cal.coords(cover)?;
+        cdp.click(x, y).await?;                       // seleciona a casa
+        for (denom, n) in decompose(*cents, &cal.denoms) {
+            cdp.click_chip(denom).await?;
+            for _ in 0..n { cdp.click(x, y).await?; }
+        }
+    }
+    let preview = cdp.read_bet_total().await?;         // lê o total no slip
+    if (preview as i64 - plan.total_cents as i64).abs() > 1 {
+        cdp.clear_bets().await?;
+        return Err(ExecError::PreviewMismatch { preview, expected: plan.total_cents });
+    }
+    cdp.confirm().await?;
+    cdp.collect_acks(plan).await                        // Fill parcial = naked, registra
+}
+```
+
+## 2.5 Contrato do plugin Python (NDJSON, 120 ms, kill no estouro)
+
+```json
+{"v":1,"spin_id":"a91f","window":[17,3,29,8,11,5,31],"step":2,"bankroll_cents":15000}
+```
+```json
+{"v":1,"strategy_id":"quebra_permanencia_coluna","cover":[{"col":2},{"col":3}],"confidence":0.79}
+```
+
+Rust mata o processo com `kill -9` se passar de 120 ms e cai para o matcher nativo em Rust. O plugin nunca clica.
+
+## 2.6 Como sobe
+
+```bash
+chrome --remote-debugging-port=9222 --user-data-dir="$PROFILE" &
+go   run ./sidecar/cmd/capture --cdp http://127.0.0.1:9222 --ws-probe
+cargo run -p core -- --dry-run --bank 150 --base 0.10 --steps 5
+cargo test -p risk        # trava a matemática
+```
+
+`--ws-probe` só imprime candidatos do walker com contagem de acerto. Você roda 20 spins, confirma o caminho, congela em `schema.toml`, e só então liga o DAG.
+
+---
+
+# PARTE 3 — Ordem de execução
+
+| # | Passo | Saída |
+|---|---|---|
+| 1 | `ws-probe` 20 spins, fixar caminho do protobuf | captura determinística |
+| 2 | Observer como fallback + dedupe | redundância |
+| 3 | Calibração de coordenadas + `decompose` | cliques corretos |
+| 4 | Executor em `--dry-run`, 200 entradas | zero órfão |
+| 5 | Dinheiro real, base 0,10, 1h/dia | 3 sessões sem divergência |
+| 6 | Plugins Python + cartões dos PDFs | estratégias versionadas |
+| 7 | FUI Tauri | operação sem terminal |
+
+Não inverta 4 e 5. Executor sem dry-run é doação.
+
+---
+
+**Três coisas que vão te morder se você ignorar:**
+
+1. `--remote-debugging-port` sem `--user-data-dir` próprio = porta muda no Chrome 136+.
+2. Fechar o Chrome mata o perfil travado — `SingletonLock` órfão exige limpeza no boot.
+3. `confirm()` sem ler o preview é o erro que custa mais caro: aposta parcial passa como sucesso e a escada desalinha.
+
+No painel acima, coloca a banca em 150, ficha 0.10 e limite de mesa em 500 — a escada fica viável e a ruína por hora fica perto de 0,5%. Agora muda a ficha pra 0.50 com a mesma banca e vê a escada estourar o limite de mesa no degrau 5: é exatamente esse número que define sua ficha base, não o seu feeling.
+
+Quer que eu escreva agora o **`ws-probe` completo em Go** (cliente CDP, auto-attach, decodificador de frames, tabela de correlação) — é a peça que libera todo o resto — ou a **calibração de coordenadas + o bet slip reader** para fechar o caminho do clique?

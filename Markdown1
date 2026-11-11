@@ -1,0 +1,322 @@
+Não vou te vender fantasia: dá pra construir o monstro que você descreveu, mas o que separa "bot de Python que lê DOM" de "produto de verdade" não é LLM nem Tauri — é **captura determinística, orçamento de latência e reconciliação de fill**. O resto (RAG, DAG, FUI) é o que torna isso operável e auditável em vez de uma caixa-preta que você não confia depois de 3 loss seguidos.
+
+Abaixo está a arquitetura completa, com as correções matemáticas que o seu plano atual tem (a mais crítica: **martingale em 2 colunas cresce ×3 por degrau, não ×2** — dobrar pra 0.20/0.40/0.80 nunca recupera).
+
+---
+
+## 0. Veredito sobre o que você pediu
+
+| Peça | Vale a pena? | Por quê |
+|---|---|---|
+| Rust no core | **Sim** | Event bus, DAG, risk gate: latência sub-ms, sem GIL, sem GC. É onde a decisão morre se travar. |
+| Go no sidecar de captura | **Sim** | Decoder protobuf + WS + Telegram + health. Concorrência barata, binário estático, reinício em ms. |
+| Python só nos plugins de estratégia | **Sim, isolado** | Você já tem os bots e os 8 PDFs em Python. Roda como subprocess com protocolo estrito, nunca no caminho crítico. |
+| Tauri para a FUI | **Sim** | É o único jeito de ter app Windows leve com UI web e IPC em Rust, sem Electron de 200MB. |
+| RAG sobre os 8 PDFs | **Parcialmente** | RAG serve para *recuperar e parametrizar* estratégia, não para *decidir* aposta. O juiz tem que ser backtest. |
+| LLM em tempo real no loop de aposta | **Não** | 300–2000ms de inferência estoura a janela. LLM só em análise pós-sessão e em geração de código de plugin. |
+
+---
+
+## 1. A realidade técnica da Playtech/jogatudo (o que vai te quebrar)
+
+**A timeline é DOM dentro de iframe cross-origin.** `MutationObserver` só funciona se o script *executar dentro do frame da Playtech*. Playwright injeta via `page.frames()`; extensão Chrome precisa de `all_frames: true` + `match_about_blank` + bridge `postMessage`. Não tente observar o frame de fora — você recebe DOM vazio.
+
+**Ordem de prioridade das fontes** (a mesma do seu repo, e está certa):
+
+1. **WebSocket protobuf da Playtech** (primário) — resultado chega antes da UI pintar, com `spin_id`. É a única fonte com latência e unicidade confiáveis.
+2. **MutationObserver no frame** (fallback) — com dedupe por hash `(número, timestamp do pill)`.
+3. **Diff de canvas/OCR** (último recurso) — caro, mas cobre mudança de layout.
+
+**Regra de ouro:** as três fontes emitem o **mesmo** evento canônico e o normalizador descarta duplicata por `spin_id`. Se a fonte primária cair, o sistema degrada, não para.
+
+**Janela de aposta.** Em live dealer o ciclo é ~`resultado → place your bets (~12-15s) → no more bets → spin`. Orçamento de latência obrigatório:
+
+```
+captura do evento ......... < 150 ms
+DAG completo .............. < 250 ms
+compilação da ficha ....... < 100 ms
+cliques ................... < 3000 ms
+margem de aborto .......... 2000 ms antes de "no more bets"
+```
+
+Se `janela_restante < 2s` → **não entra**. Entrada parcial é pior que entrada perdida.
+
+**Chips.** 8.10 numa coluna com ficha de 0.10 = 81 cliques. Inviável. Precisa de **otimizador de denominação** (greedy: 1 clique de 5.00 + 1 de 2.00 + 1 de 1.00 + 1 de 0.10). Se o input de valor do bet slip existir, use ele e valide o total antes de confirmar.
+
+**Limite de mesa.** Coluna/dúzia costuma ter máximo próprio (frequentemente R$ 500–2.000, às vezes menos). Se o degrau 5 da escada passar do limite, a escada está inválida *antes* de começar. O bot lê o limite no boot e recalcula a escada.
+
+---
+
+## 2. Fronteiras de stack (o que roda onde)
+
+```
+Tauri (Rust + React)      → shell do app, UI, IPC, tray, keychain
+core-rust                 → event bus, DAG, risk gate, executor, reconciliação
+sidecar-go                → WS/protobuf, content script bridge, Telegram, métricas
+runtime-python            → plugins de estratégia + RAG (subprocess, stdin/stdout JSON)
+sqlite (WAL)              → spins, entradas, fills, erros, métricas
+```
+
+**Contrato Python↔Rust:** NDJSON por stdio, uma linha por request, timeout duro de 120ms, `kill -9` no estouro, fallback para a estratégia nativa em Rust. O plugin **nunca** clica em nada — só devolve um `BetIntent`.
+
+```rust
+#[derive(Serialize, Deserialize)]
+struct BetIntent {
+    strategy_id: String,
+    spin_id: u64,
+    cover: Vec<(Cover, u8)>,   // Cover::Column(2), Cover::Dozen(3)...
+    confidence: f32,
+    ladder_step: u8,
+}
+```
+
+---
+
+## 3. Estrutura de repositório (workspace Cargo + módulo Go)
+
+```
+monster/
+├── Cargo.toml                    # [workspace]
+├── crates/
+│   ├── core/                     # bus, DAG, risk, executor
+│   ├── capture-bridge/           # IPC com o sidecar Go
+│   ├── strategy-native/          # matchers em Rust (sempre disponíveis)
+│   ├── strategy-runtime/         # spawn/gestão do subprocess Python
+│   ├── rag/                      # ingestão dos PDFs + índice + retrieval
+│   ├── store/                    # sqlx, migrations, WAL, retenção
+│   ├── telemetry/                # tracing, métricas, health
+│   └── ui/                       # comandos Tauri (IPC)
+├── sidecar/                      # módulo Go
+│   ├── ws/protobuf/              # decoder Playtech
+│   ├── inject/                   # content script + bridge
+│   ├── telegram/                 # fila não-bloqueante
+│   └── health/
+├── plugins/                      # Python, um diretório por estratégia
+│   ├── _proto/                   # NDJSON, sandbox, testes
+│   └── quebra_permanencia_col/
+├── corpus/                       # 8 PDFs → strategy cards (YAML)
+├── ui/                           # React + Tailwind (FUI)
+├── migrations/
+├── docker/
+└── docs/adr/
+```
+
+---
+
+## 4. Modelo de dados e contrato de evento
+
+```sql
+CREATE TABLE spins (
+  id INTEGER PRIMARY KEY, spin_id TEXT UNIQUE NOT NULL,
+  number INTEGER NOT NULL CHECK(number BETWEEN 0 AND 36),
+  ts INTEGER NOT NULL, source TEXT NOT NULL,   -- ws | mo | ocr
+  received_at INTEGER NOT NULL, latency_ms INTEGER
+);
+CREATE TABLE intents (
+  id INTEGER PRIMARY KEY, spin_id TEXT NOT NULL, strategy_id TEXT NOT NULL,
+  ladder_step INTEGER, stake_total_cents INTEGER, ev_cents INTEGER,
+  confidence REAL, created_at INTEGER, decision TEXT  -- placed | skipped | aborted
+);
+CREATE TABLE fills (
+  id INTEGER PRIMARY KEY, intent_id INTEGER REFERENCES intents(id),
+  cover TEXT, stake_cents INTEGER, acked INTEGER, confirmed_at INTEGER
+);
+CREATE TABLE ladder_state (
+  strategy_id TEXT PRIMARY KEY, step INTEGER, loss_cents INTEGER, reset_at INTEGER
+);
+```
+
+`intents` + `fills` existem porque **o bot precisa sobreviver a crash no meio do clique**. No boot: qualquer intent sem `fills` confirmados vira `orphan` e é reconciliada contra o extrato antes de qualquer nova entrada.
+
+---
+
+## 5. DAG de execução (nós reais, não metáfora)
+
+Fan-out paralelo, fan-in no agregador, gates sequenciais depois:
+
+```
+spin.ingested
+  └→ dedupe → persist
+       ├→ feat.window(30)            # janela deslizante, O(1)
+       ├→ matcher.permanencia_col    # 4-6 na mesma coluna → cobre as outras 2
+       ├→ matcher.permanencia_doz    # idem em dúzia
+       ├→ matcher.cluster_terminal   # 3.6.9.2 nos últimos N
+       ├→ matcher.fibonacci_lag      # defasagem de gaps
+       ├→ matcher.setor_vies         # chi² por setor da roda
+       └→ regime.classifier          # PERMANENCE | MOMENTUM | NEUTRAL
+              ↓ (fan-in)
+         aggregator.score           # pesos por estratégia × regime
+              ↓
+         gate.edge (EV ≥ mínimo?)
+              ↓
+         gate.risk (escada, stop, limite de mesa, exposição)
+              ↓
+         slip.compiler (cover → mapa de números → denominações)
+              ↓
+         executor.place → reconciler.confirm
+              ↓
+         bus.publish(entry.placed | entry.failed)
+```
+
+**Insight que quase todo bot erra:** permanência (contrarian) e cluster (momentum) **se contradizem**. Se a coluna 1 saiu 5×, o matcher de permanência quer cobrir 2 e 3, mas o cluster pode estar quente em 1. Sem `regime.classifier` você tem dois sinais opostos e nenhuma regra de desempate. O classificador usa teste de runs + chi² da janela: variância alta → permanence; distribuição colada → momentum.
+
+**Chaves de idempotência:** `(strategy_id, spin_id)` — um spin nunca gera duas entradas da mesma estratégia, mesmo com retry.
+
+---
+
+## 6. RAG sobre os 8 PDFs (o jeito que funciona)
+
+RAG de "pergunta e resposta" aqui é inútil. O que funciona é **compilar PDF em cartão de estratégia executável**:
+
+```yaml
+# corpus/strategy_cards/quebra_permanencia_coluna.yaml
+id: quebra_permanencia_coluna
+fonte: [pdf/estrategia_07.pdf#p12, pdf/matriz_entradas.pdf#p3]
+trigger: { tipo: streak, alvo: coluna, min: 4, max: 6 }
+cobertura: [coluna_oposta_1, coluna_oposta_2]
+payout: 2
+p_dentro: 0.6486            # 24/37
+escada: { tipo: linear_3x, base_cents: 10, max_passos: 5 }
+limites: { max_exposicao_pct_banca: 0.20, min_janela_ms: 2000 }
+validacao: { chi2_min: 0.05, amostra_min: 300 }
+```
+
+Pipeline: PDF → extração de texto/tabela → chunk → **LLM offline** (Ollama ou Venice API, sem pressa) propõe o YAML → validação de schema → **backtest obrigatório contra o histórico SQLite** → só entra em produção se bater `chi2_min` e EV dentro da banda. PDF que não compila em cartão fica como documento consultável, não como estratégia.
+
+**RAG em runtime** recupera o cartão + trechos de origem para justificar a entrada na UI ("entrada em 2/3 porque cartão X, fonte p12, streak=5, chi²=0.31"). Isso é o que te faz confiar no bot às 4 da manhã.
+
+---
+
+## 7. Matemática do risco — corrigindo sua escada
+
+Cobrir 2 colunas: aposta `x` em cada, exposição `2x`. Ganho = `+x`. Perda = `-2x`. P(ganho) = 24/37 = **0,6486**. P(perda) = 13/37 = 0,3514.
+
+Para recuperar perda acumulada `D` e ainda lucrar `G`, precisa `x = D + G`. Como cada perda custa `2x`, a escada cresce **×3 por degrau**:
+
+| Degrau | Ficha/coluna | Exposição | Perda acumulada | P(chegar aqui) |
+|---|---|---|---|---|
+| 1 | 0,10 | 0,20 | 0,20 | 100% |
+| 2 | 0,30 | 0,60 | 0,80 | 35,1% |
+| 3 | 0,90 | 1,80 | 2,60 | 12,4% |
+| 4 | 2,70 | 5,40 | 8,00 | 4,34% |
+| 5 | 8,10 | 16,20 | **24,20** | 1,53% |
+
+- P(estourar a escada de 5) = 0,3514⁵ = **0,54% (1 em 187 entradas)**
+- Custo de um estouro = **242 × G** (R$ 24,20 com G = 0,10)
+- EV por entrada ≈ **−2,7% do total apostado** (borda da casa em colunas é 2/37, e você dobra a exposição ao cobrir duas)
+
+Com G = 0,10 e ~40 entradas/h: bruto +R$ 4,00/h, EV ≈ −R$ 1,20/h, ruína em ~1 a cada 4-5 horas de operação contínua. **Com 150 de banca a escada é folgada (16% da banca no degrau 5), mas a banca não cresce sozinha com 0,10** — para crescer, você precisa filtrar entrada, não aumentar base.
+
+**Gate de risco (pseudo-código do que realmente importa):**
+
+```rust
+fn authorize(&self, intent: &BetIntent, st: &TableState) -> Verdict {
+    let step = st.ladder.get(&intent.strategy_id).step + 1;
+    let stake = ladder_stake(step, self.base_cents);        // 10, 30, 90, 270, 810
+    if step > self.max_steps { return Verdict::Abort("escada estourada"); }
+    if stake > st.max_bet_per_cover { return Verdict::Abort("limite de mesa"); }
+    if st.exposure_cents + 2 * stake > self.bankroll_cents * self.max_exposure_pct {
+        return Verdict::Abort("exposição");
+    }
+    if st.session_pnl_cents <= -self.stop_loss_cents { return Verdict::Halt("stop loss"); }
+    if st.remaining_window_ms < self.min_window_ms { return Verdict::Skip("janela"); }
+    Verdict::Place
+}
+```
+
+**Stop loss (trave isso no TOML, não na cabeça):**
+- `stop_loss_sessao = 3 × custo_estouro` (R$ 72,60) → pausa 15 min, reseta escada
+- `stop_win = +8% da banca` → sessão encerra e registra
+- `max_entradas_por_hora = 45` (acima disso a EV por entrada degrada)
+- `cooldown_apos_estouro = 2 spins`
+
+---
+
+## 8. Executor e reconciliação
+
+1. Compila `cover` → mapa de números → denominações de ficha.
+2. **Preview** (lê o total no bet slip) e compara com o esperado; divergência > 1 centavo → aborta.
+3. Confirma, captura `fill.acked` por cover.
+4. Se `acked < esperado`: entra na janela com cobertura parcial — registra `naked` e **não** tenta cobrir o que falta depois do fechamento.
+5. Pós-spin: casa `fills` com o resultado real; se o total apostado não fechar com o extrato, dispara alarme e marca a sessão como suspeita.
+
+`kill switch` = tecla global (Tauri global shortcut + `/kill` no Telegram) → solta o executor, cancela intents pendentes, para de clicar, mantém captura viva.
+
+---
+
+## 9. FUI (Tauri) — o que a tela tem que mostrar
+
+Sua referência visual (LAELETTE) está no caminho: escuro, neon ciano/magenta, densidade alta. A minha versão prioriza **o que você precisa ver sem pensar**:
+
+- **Topo:** sessão, banca, P&L, degrau atual, LEDs de health (WS / MO / executor / DB), kill switch físico.
+- **Esquerda:** timeline de 20 números, com marcação nos que dispararam matcher.
+- **Centro:** roda + overlay de cobertura da entrada atual, com contagem regressiva da janela em barra.
+- **Direita:** curva de P&L, tabela da escada com degrau ativo, EV por hora, drawdown.
+- **Base:** stream de decisões (com o porquê — cartão + chi²), aba de fills, aba de órfãos.
+- **Tray:** ícone muda de cor por estado (observando / entrada ativa / pausado / erro). Fechar a janela não mata o processo.
+
+Sem `position: fixed` no layout Tauri, tudo em grid; números em fonte mono tabular para não pular coluna.
+
+---
+
+## 10. Resiliência e observabilidade
+
+- `systemd`/Windows Service + supervisor no core: watchdog de 5s por componente, restart com backoff exponencial (1s→30s), máx 5 tentativas → estado `DEGRADED` visível na UI.
+- Reattach de WS, re-login em age gate, re-inject do content script após navegação.
+- Logs rotativos 5MB × 10, JSON estruturado, `tracing` com `spin_id` como span id.
+- Métricas: latência p50/p95 por estágio, taxa de abort, taxa de órfão, divergência de extrato, uptime por fonte.
+- Alerta Telegram só para: entrada executada, estouro de escada, stop loss, fonte morta, divergência de extrato. Nada de ruído.
+
+---
+
+## 11. Backtest e validação (o que separa de achismo)
+
+- Replay do histórico SQLite com o **mesmo** código de DAG, relógio virtual, sem clicar.
+- Para cada cartão: chi² de aderência, teste de runs, bootstrap de 10.000 sessões sintéticas, curva de ruína.
+- **Monte Carlo da escada** obrigatório antes de subir G: distribuição de drawdown máximo e P(ruína em 8h) para G = 0,10 / 0,25 / 0,50.
+- Só promove cartão a produção se sobreviver a 300+ spins históricos e ao MC com P(ruína 8h) < 5%.
+- Testes de integração com DOM gravado (HTML fixture), não com a mesa ao vivo.
+
+---
+
+## 12. Roadmap
+
+| Fase | Entrega | Critério de saída |
+|---|---|---|
+| 0 | Esqueleto do workspace, SQLite, bus, captura WS protobuf | 500 spins sem duplicata nem perda |
+| 1 | Normalizador + DAG nativo + persistência | latência p95 < 400ms |
+| 2 | Risk gate + escada + stop + backtest/MC | P(ruína 8h) < 5% no MC |
+| 3 | Executor com preview/reconciliação em modo **dry-run** | 200 entradas simuladas sem órfão |
+| 4 | Dinheiro real, base 0,10, 1 hora/dia | 3 sessões sem divergência de extrato |
+| 5 | Runtime Python + compilação dos 8 PDFs em cartões | 5 cartões validados |
+| 6 | FUI completa + Telegram + tray | operação 8h sem intervenção |
+| 7 | Regime classifier + multi-estratégia | EV/hora melhor que single-strategy no backtest |
+
+Nunca pule a fase 3. Executor sem dry-run é doação.
+
+---
+
+## 13. Armadilhas que vão te morder
+
+- **Assumir 2:1 "recupera dobrando"** — é ×3, já mostrado.
+- **Escada sem ler limite de mesa** — degrau 5 bate no teto e o bot tenta mesmo assim.
+- **Entrar com cobertura parcial** — metade da aposta executada é pior que nenhuma.
+- **LLM no caminho crítico** — 1,5s de inferência = janela perdida.
+- **Confiar no saldo da tela** — leia sempre do extrato/API, a tela pode estar defasada.
+- **MutationObserver só no frame principal** — iframe cross-origin devolve vazio.
+- **Rodar sem idempotência** — retry após crash duplica aposta.
+- **Tratar o bot como edge positivo** — é −2,7%; o ganho é disciplina, throughput e não errar clique.
+
+---
+
+## 14. Licença e distribuição
+
+Apache-2.0 no seu código é adequada (patent grant + atribuição, compatível com uso comercial). Duas ressalvas: os **schemas protobuf da Playtech** são de terceiros — mantenha-os em `vendor/` com NOTICE separado; e o `.proto` de versões antigas quebra silenciosamente, então versione o schema junto do decoder e trate `unknown field` como degradação para o fallback DOM, nunca como erro fatal.
+
+Para distribuir como app Windows: assinatura de código (senão o SmartScreen come o executável), instalador NSIS via Tauri, credenciais no Credential Manager via `keyring`, e primeira execução guiada (login manual no navegador embutido, sessão persistida em perfil dedicado — nunca digitar senha no bot).
+
+---
+
+O mockup que gerei acima já é uma direção de FUI utilizável; o diagrama mostra o fluxo de camadas com o feedback de reconciliação voltando pro gate de risco e o kill switch cortando o executor.
+
+Quer que eu **escafolde o workspace de verdade** (Cargo workspace + módulo Go + migrations SQLite + DAG com os 5 matchers já compilando e um dry-run de ponta a ponta), ou prefere que eu comece pelo **motor de risco + Monte Carlo da escada** para você ver os números de ruína antes de escrever qualquer linha de captura?
