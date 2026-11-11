@@ -61,17 +61,21 @@ func (e SpinEvent) Validate() error {
 
 // Hub gerencia deduplicação canônica, telemetria da mesa, atuação CDP síncrona e fanout NDJSON para GET /stream.
 type Hub struct {
-	mu              sync.Mutex
-	actMu           sync.Mutex
-	seenSpinID      map[string]struct{}
-	seenBucket      map[string]struct{}
-	subs            map[chan []byte]struct{}
-	totalSpins      atomic.Uint64
-	lastEventAt     atomic.Int64
-	degraded        atomic.Bool
-	cdpClient       *cdp.Client
-	playtechSid     string
-	lastBetCents    atomic.Int64
+	mu           sync.Mutex
+	actMu        sync.Mutex
+	seenSpinID   map[string]struct{}
+	seenBucket   map[string]struct{}
+	subs         map[chan []byte]struct{}
+	totalSpins   atomic.Uint64
+	lastEventAt  atomic.Int64
+	degraded     atomic.Bool
+	cdpClient    *cdp.Client
+	playtechSid  string
+	lastBetCents atomic.Int64
+	// betAtMs é o instante (ms) da última leitura de `Bet` publicada pelo observer.
+	// Serve para o executor distinguir total FRESCO de valor em cache de rodada anterior:
+	// um 0¢ velho esconde ficha residual na mesa e faz a entrada seguinte ler alta (§1.4).
+	betAtMs         atomic.Int64
 	lastBalCents    atomic.Int64
 	lastWinCents    atomic.Int64
 	roundOpen       atomic.Bool
@@ -322,7 +326,10 @@ drained:
 }
 
 type previewResponse struct {
-	PreviewCents int64  `json:"preview_cents"`
+	PreviewCents int64 `json:"preview_cents"`
+	// BetAgeMs é a idade da leitura de `Bet` em milissegundos; -1 quando nunca houve leitura.
+	// O executor usa isso para não comparar preview com total esperado em cima de valor velho.
+	BetAgeMs     int64  `json:"bet_age_ms"`
 	BalanceCents int64  `json:"balance_cents"`
 	LastWinCents int64  `json:"last_win_cents"`
 	RoundOpen    bool   `json:"round_open"`
@@ -358,8 +365,14 @@ func (h *Hub) handleActPreview(w http.ResponseWriter, _ *http.Request) {
 	gc := h.lastGameCode
 	h.mu.Unlock()
 
+	betAgeMs := int64(-1)
+	if at := h.betAtMs.Load(); at > 0 {
+		betAgeMs = time.Now().UnixMilli() - at
+	}
+
 	resp := previewResponse{
 		PreviewCents: h.lastBetCents.Load(),
+		BetAgeMs:     betAgeMs,
 		BalanceCents: h.lastBalCents.Load(),
 		LastWinCents: h.lastWinCents.Load(),
 		RoundOpen:    h.roundOpen.Load(),
@@ -484,6 +497,7 @@ type moBindingPayload struct {
 func (h *Hub) updateTelemetryFromPayload(sid string, mo moBindingPayload) {
 	if mo.BetCents != nil {
 		h.lastBetCents.Store(*mo.BetCents)
+		h.betAtMs.Store(time.Now().UnixMilli())
 	}
 	if mo.BalanceCents != nil && *mo.BalanceCents > 0 {
 		h.lastBalCents.Store(*mo.BalanceCents)

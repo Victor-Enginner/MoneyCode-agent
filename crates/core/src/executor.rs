@@ -87,6 +87,11 @@ pub enum ExecError {
     /// Falha de comunicação CDP durante clique ou leitura.
     #[error("falha de transporte CDP: {0}")]
     CdpTransport(String),
+    /// O sidecar devolveu um total de `Bet` em cache, não uma leitura desta mesa agora.
+    /// Comparar preview velho com o esperado é como não comparar: um `0¢` de rodada anterior
+    /// esconde ficha residual e a entrada seguinte lê alta (§1.4).
+    #[error("leitura do bet slip velha demais ({0} ms): aguardando leitura fresca da mesa")]
+    SlipStale(i64),
     /// Erro de persistência no SQLite WAL.
     #[error("erro de banco de dados no executor: {0}")]
     Store(#[from] StoreError),
@@ -224,6 +229,8 @@ struct DryRunState {
     slip_lag_reads: u32,
     /// Valor mostrado enquanto o slip está atrasado.
     slip_lag_value_cents: u64,
+    /// Leituras que respondem `SlipStale` (sidecar sem leitura fresca desta mesa).
+    slip_stale_reads: u32,
 }
 
 /// Atuador determinístico para modo `--dry-run` (§1.5 e §15.5).
@@ -263,6 +270,13 @@ impl DryRunActuator {
         if let Ok(mut g) = self.inner.lock() {
             g.slip_lag_reads = reads;
             g.slip_lag_value_cents = stale_value_cents;
+        }
+    }
+
+    /// Simula o sidecar devolvendo cache (`bet_age_ms` velho) nas próximas `reads` leituras.
+    pub fn set_slip_stale_reads(&self, reads: u32) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.slip_stale_reads = reads;
         }
     }
 
@@ -308,6 +322,10 @@ impl CdpActuator for DryRunActuator {
             .inner
             .lock()
             .map_err(|_| ExecError::CdpTransport("mutex poisoned".to_string()))?;
+        if g.slip_stale_reads > 0 {
+            g.slip_stale_reads -= 1;
+            return Err(ExecError::SlipStale(SLIP_FRESH_MAX_MS + 1));
+        }
         if g.slip_lag_reads > 0 {
             g.slip_lag_reads -= 1;
             return Ok(g.slip_lag_value_cents);
@@ -538,6 +556,12 @@ impl CdpActuator for LiveHttpActuator {
         let parsed: serde_json::Value = serde_json::from_str(body.trim())
             .map_err(|e| ExecError::CdpTransport(format!("preview inválido: {e}")))?;
         // Sempre devolve o total REAL da mesa: nunca mascara divergência com o valor que achamos ter apostado.
+        // Valor em cache (sem leitura desta mesa agora) vira `SlipStale`, para o chamador re-ler.
+        if let Some(age) = parsed.get("bet_age_ms").and_then(|v| v.as_i64()) {
+            if !(0..=SLIP_FRESH_MAX_MS).contains(&age) {
+                return Err(ExecError::SlipStale(age));
+            }
+        }
         Ok(parsed
             .get("preview_cents")
             .and_then(|v| v.as_i64())
@@ -555,6 +579,8 @@ impl CdpActuator for LiveHttpActuator {
             match self.read_bet_total() {
                 Ok(0) => return Ok(()),
                 Ok(_) => {}
+                // Leitura velha não autoriza nem limpar nem parar: tenta de novo no próximo UNDO.
+                Err(ExecError::SlipStale(_)) => {}
                 Err(err) => return Err(err),
             }
             self.post_target_click("clear", cal.clear_coords.0, cal.clear_coords.1)?;
@@ -598,20 +624,37 @@ impl CdpActuator for LiveHttpActuator {
 /// vivo). Por isso a leitura é refeita até ver o total esperado, com teto de
 /// `SETTLE_DEADLINE_MS` — que cabe no orçamento de cliques do §2.
 /// Retorna o último valor lido (mesmo divergente) para permitir diagnóstico e `clear_bets()`.
+/// Idade máxima aceita para o total de `Bet` do sidecar. Mais velho que isso não descreve
+/// a mesa neste instante — o valor é cache, e comparar em cima dele é apostar às cegas.
+const SLIP_FRESH_MAX_MS: i64 = 700;
 const SETTLE_POLL_MS: u64 = 70;
 const SETTLE_DEADLINE_MS: u64 = 1_200;
 
 fn read_settled(cdp: &dyn CdpActuator, expected: u64) -> Result<u64, ExecError> {
     let started = std::time::Instant::now();
-    let mut last = cdp.read_bet_total()?;
-    while last != expected {
+    let mut last: Option<u64> = None;
+    let mut stale_age: i64 = 0;
+    loop {
+        match cdp.read_bet_total() {
+            Ok(seen) => {
+                last = Some(seen);
+                if seen == expected {
+                    return Ok(seen);
+                }
+            }
+            // Cache não é leitura: continua tentando até o teto, sem inventar valor.
+            Err(ExecError::SlipStale(age)) => stale_age = age,
+            Err(err) => return Err(err),
+        }
         if started.elapsed().as_millis() as u64 >= SETTLE_DEADLINE_MS {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(SETTLE_POLL_MS));
-        last = cdp.read_bet_total()?;
     }
-    Ok(last)
+    match last {
+        Some(seen) => Ok(seen),
+        None => Err(ExecError::SlipStale(stale_age)),
+    }
 }
 
 /// Executa o plano de aposta seguindo estritamente o protocolo do §9 e invariantes §1.3, §1.4 e §1.8:
@@ -629,11 +672,13 @@ pub fn place(
     }
 
     // 0. A mesa precisa estar zerada: aposta residual jamais é empilhada com a entrada nova.
-    let residual = cdp.read_bet_total()?;
+    // A leitura tem de ser FRESCA: um `0¢` em cache de rodada anterior deixou 60¢ na mesa e a
+    // entrada seguinte leu 240¢ para 180¢ esperados. Cache não vale como "mesa limpa".
+    let residual = read_settled(cdp, 0)?;
     if residual > 0 {
         warn!(residual, "aposta residual na mesa: limpando antes da entrada");
         cdp.clear_bets(cal)?;
-        let after = cdp.read_bet_total()?;
+        let after = read_settled(cdp, 0)?;
         if after > 0 {
             let _ = insert_error(
                 pool,
@@ -854,6 +899,29 @@ mod slip_settle_tests {
         cdp.set_slip_lag(4, 0); // slip ainda mostra 0¢ nas 4 primeiras leituras
         let seen = read_settled(&cdp, 90).expect("leitura do preview");
         assert_eq!(seen, 90, "leitura atrasada nao pode virar divergencia");
+    }
+
+    /// Total em cache (sidecar sem leitura fresca) não é leitura da mesa: o leitor pula essas
+    /// respostas e só devolve um valor vindo de leitura real.
+    #[test]
+    fn leitura_em_cache_nao_vira_veredito_da_mesa() {
+        let cdp = DryRunActuator::new();
+        cdp.set_staged_total(90);
+        cdp.set_slip_stale_reads(3);
+        let seen = read_settled(&cdp, 90).expect("leitura do preview");
+        assert_eq!(seen, 90, "resposta em cache nao pode substituir leitura fresca");
+    }
+
+    /// Sidecar sem leitura fresca o tempo todo: erro explícito, jamais um `0¢` inventado
+    /// (que faria `place()` tratar mesa suja como mesa limpa).
+    #[test]
+    fn slip_sempre_em_cache_falha_em_vez_de_assumir_zero() {
+        let cdp = DryRunActuator::new();
+        cdp.set_slip_stale_reads(1_000);
+        match read_settled(&cdp, 0) {
+            Err(ExecError::SlipStale(_)) => {}
+            other => panic!("esperava SlipStale, veio {other:?}"),
+        }
     }
 
     /// Divergência permanente (valor estável e errado) continua sendo reportada, sem laço infinito.
