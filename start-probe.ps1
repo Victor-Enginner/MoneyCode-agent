@@ -59,6 +59,6 @@ if ($CdpAlive) {
 }
 
 Write-Host "[MONSTER] Conectando sidecar ao Chrome (porta 9222)..." -ForegroundColor Green
-Write-Host "[MONSTER] Aguardando giros reais da Roleta Brasileira (20 rodadas)..." -ForegroundColor Yellow
+Write-Host "[MONSTER] Modos ativos: --ws-probe --strict --dump-frames=3 --dump-op" -ForegroundColor Yellow
 Set-Location "$PSScriptRoot\sidecar"
-go run ./cmd/capture --ws-probe
+go run ./cmd/capture --ws-probe --strict --dump-frames=3 --dump-op

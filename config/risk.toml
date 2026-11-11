@@ -1,10 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# Configuração de risco calibrada para banca de R$ 70,58 (escada de 4 degraus: 10, 30, 90, 270 centavos).
+# Exposição máxima no degrau 4 = 540 centavos (R$ 5,40); estouro acumulado = 800 centavos (R$ 8,00).
 base_cents = 10
-max_steps = 5
-max_bet_per_cover_cents = 50000
-max_exposure_pct = 0.16
-stop_loss_cents = 7260
+max_steps = 4
+max_bet_per_cover_cents = 100000
+max_exposure_pct = 0.10
+stop_loss_cents = 1600
 stop_win_pct = 0.08
 min_window_ms = 2000
 cooldown_spins = 2
-max_entries_per_hour = 45
+max_entries_per_hour = 40
 chip_denoms_cents = [2500, 1000, 500, 100, 50, 10]

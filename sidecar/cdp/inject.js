@@ -46,9 +46,27 @@
   let lastEmitTs = 0;
   const seen = new Set();
 
+  const readRoundCounter = () => {
+    const roundSel = [
+      '[data-automation-locator*="round"]',
+      '[data-automation-locator*="gameId"]',
+      '[class*="round-id"]',
+      '[class*="game-id"]',
+      '[class*="roundCounter"]',
+      '[class*="limits-and-info"] span'
+    ].join(', ');
+    const el = document.querySelector(roundSel);
+    if (el) {
+      const m = (el.textContent || '').trim().match(/\b(\d{2,12})\b/);
+      if (m) return m[1];
+    }
+    return '';
+  };
+
   const emit = (n, node) => {
     const now = Date.now();
-    const explicitKey = node?.dataset?.ts || node?.id || '';
+    const rid = readRoundCounter();
+    const explicitKey = rid || node?.dataset?.ts || node?.id || '';
     if (explicitKey) {
       const key = n + '|' + explicitKey;
       if (seen.has(key)) return;
@@ -58,7 +76,7 @@
       lastEmitTs = now;
     }
     if (typeof window.__emit === 'function') {
-      window.__emit(JSON.stringify({ t: 'spin', n, src: 'mo', at: now }));
+      window.__emit(JSON.stringify({ t: 'spin', n, rid, src: 'mo', at: now }));
     }
   };
 

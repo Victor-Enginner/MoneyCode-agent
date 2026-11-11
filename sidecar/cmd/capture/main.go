@@ -1,22 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // Ponto de entrada do sidecar de captura do projeto MONSTER.
-// Expõe POST /spin, GET /stream (NDJSON fanout com deduplicação) e GET /health em 127.0.0.1:8790.
-// Coordena o cliente CDP (auto-attach + observer + WS protobuf) e o modo --ws-probe.
+// Implementa whitelist estrita de sockets Playtech (eurolive-frontend primário / ielive-gateway standby),
+// filtro de frames de controle (len > 8), --strict, --freeze, --dump-frames e --dump-op (FrameSent).
 
 package main
 
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -189,23 +193,125 @@ func (h *Hub) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	)
 }
 
+// classifyPlaytechSocket decodifica a URL (incluindo túnel ?u=wss%3A%2F%2F...) e aplica a whitelist estrita.
+// Retorna apenas "eurolive-frontend.playtechgaming.com" (primário) ou "ielive-gateway.ptielive.com" (standby).
+func classifyPlaytechSocket(rawURL string) (string, bool) {
+	if rawURL == "" {
+		return "", false
+	}
+	decoded, err := url.QueryUnescape(rawURL)
+	if err != nil {
+		decoded = rawURL
+	}
+	lower := strings.ToLower(decoded + " " + rawURL)
+	if strings.Contains(lower, "eurolive-frontend.playtechgaming.com") {
+		return wsdecap.PrimaryPlaytechHost, true
+	}
+	if strings.Contains(lower, "ielive-gateway.ptielive.com") {
+		return wsdecap.StandbyPlaytechHost, true
+	}
+	return "", false
+}
+
+func writeFrozenSchema(schemaPath, fieldPath string) error {
+	nowDate := time.Now().Format("2006-01-02")
+	content := fmt.Sprintf(`# SPDX-License-Identifier: Apache-2.0
+# Caminho protobuf congelado via --freeze em %s.
+# Host primário declarado: %s (standby: %s).
+
+[protobuf]
+frozen_date = %q
+primary_host = %q
+standby_host = %q
+winning_number_path = %q
+round_id_path = "/3/11"
+`,
+		nowDate,
+		wsdecap.PrimaryPlaytechHost,
+		wsdecap.StandbyPlaytechHost,
+		nowDate,
+		wsdecap.PrimaryPlaytechHost,
+		wsdecap.StandbyPlaytechHost,
+		fieldPath,
+	)
+	if err := os.MkdirAll(filepath.Dir(schemaPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(schemaPath, []byte(content), 0o644)
+}
+
+func appendOpLog(logsDir, reqID string, tsMs int64, raw []byte) {
+	if err := os.MkdirAll(logsDir, 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(logsDir, "oplog.bin"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	reqBytes := []byte(reqID)
+	hdr := make([]byte, 2+8+4)
+	binary.LittleEndian.PutUint16(hdr[0:2], uint16(len(reqBytes)))
+	binary.LittleEndian.PutUint64(hdr[2:10], uint64(tsMs))
+	binary.LittleEndian.PutUint32(hdr[10:14], uint32(len(raw)))
+	_, _ = f.Write(hdr)
+	_, _ = f.Write(reqBytes)
+	_, _ = f.Write(raw)
+}
+
+func dumpHandshakeMeta(logsDir, reqID, host string, params map[string]any) {
+	if err := os.MkdirAll(logsDir, 0o755); err != nil {
+		return
+	}
+	safeReqID := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, reqID)
+	meta := map[string]any{
+		"request_id": reqID,
+		"host":       host,
+		"ts_ms":      time.Now().UnixMilli(),
+		"request":    params["request"],
+	}
+	b, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(logsDir, fmt.Sprintf("handshake-%s.json", safeReqID)), b, 0o600)
+}
+
 type moBindingPayload struct {
 	T   string `json:"t"`
 	N   int    `json:"n"`
+	Rid string `json:"rid"`
 	Src string `json:"src"`
 	At  int64  `json:"at"`
 	B64 string `json:"b64"`
 	URL string `json:"url"`
 }
 
-func runCaptureLoop(ctx context.Context, cdpURL string, corr *wsdecap.Correlator, hub *Hub) {
+type captureOptions struct {
+	cdpURL     string
+	logsDir    string
+	dumpOp     bool
+	frozenPath string
+}
+
+func runCaptureLoop(ctx context.Context, opts captureOptions, corr *wsdecap.Correlator, hub *Hub) {
 	var seq atomic.Uint64
-	var wsFramesLogged atomic.Uint64
+	var recvDiagCount atomic.Uint64
+	var sentOpCount atomic.Uint64
+	var sockMu sync.RWMutex
+	sockHostByReq := make(map[string]string)
+
 	errLogger := func(kind, detail string) {
 		log.Printf("[errors] kind=%s detail=%s", kind, detail)
 	}
 
-	client, err := cdp.ConnectWithBackoff(ctx, cdpURL, errLogger)
+	client, err := cdp.ConnectWithBackoff(ctx, opts.cdpURL, errLogger)
 	if err != nil {
 		hub.degraded.Store(true)
 		errLogger("cdp_fatal", err.Error())
@@ -230,11 +336,71 @@ func runCaptureLoop(ctx context.Context, cdpURL string, corr *wsdecap.Correlator
 			case "Page.frameNavigated", "Page.loadEventFired":
 				client.ReEvaluateObserver(ev.SessionID)
 			case "Network.webSocketCreated":
+				reqID, _ := ev.Params["requestId"].(string)
 				wsURL, _ := ev.Params["url"].(string)
-				if wsURL != "" {
-					log.Printf("[ws] conectado: %s", wsURL)
+				if host, allowed := classifyPlaytechSocket(wsURL); allowed && reqID != "" {
+					sockMu.Lock()
+					sockHostByReq[reqID] = host
+					sockMu.Unlock()
+					role := "PRIMÁRIO"
+					if host == wsdecap.StandbyPlaytechHost {
+						role = "STANDBY"
+					}
+					log.Printf("[ws-whitelist] socket aceito (%s) reqId=%s host=%s", role, reqID, host)
+				}
+			case "Network.webSocketWillSendHandshakeRequest":
+				reqID, _ := ev.Params["requestId"].(string)
+				sockMu.RLock()
+				host, allowed := sockHostByReq[reqID]
+				sockMu.RUnlock()
+				if allowed && opts.dumpOp {
+					dumpHandshakeMeta(opts.logsDir, reqID, host, ev.Params)
+				}
+			case "Network.webSocketFrameSent":
+				reqID, _ := ev.Params["requestId"].(string)
+				sockMu.RLock()
+				host, allowed := sockHostByReq[reqID]
+				sockMu.RUnlock()
+				if !allowed {
+					continue
+				}
+				resp, ok := ev.Params["response"].(map[string]any)
+				if !ok {
+					continue
+				}
+				payloadB64, _ := resp["payloadData"].(string)
+				if payloadB64 == "" {
+					payloadB64, _ = resp["payload"].(string)
+				}
+				if payloadB64 == "" {
+					continue
+				}
+				raw, err := decodeFramePayload(payloadB64)
+				if err != nil || len(raw) <= wsdecap.MinFramePayloadLen {
+					continue
+				}
+				nowMs := time.Now().UnixMilli()
+				appendOpLog(opts.logsDir, reqID, nowMs, raw)
+				if opts.dumpOp {
+					opNum := sentOpCount.Add(1)
+					fmt.Printf(
+						"\n=== [DUMP-OP #%d] FrameSent reqId=%s host=%s len=%d ===\nHEX64: %s\nTREE:\n%s==========================================================\n",
+						opNum,
+						reqID,
+						host,
+						len(raw),
+						wsdecap.HexHead(raw, 64),
+						wsdecap.FormatTree(raw),
+					)
 				}
 			case "Network.webSocketFrameReceived":
+				reqID, _ := ev.Params["requestId"].(string)
+				sockMu.RLock()
+				host, allowed := sockHostByReq[reqID]
+				sockMu.RUnlock()
+				if !allowed {
+					continue
+				}
 				resp, ok := ev.Params["response"].(map[string]any)
 				if !ok {
 					continue
@@ -243,17 +409,22 @@ func runCaptureLoop(ctx context.Context, cdpURL string, corr *wsdecap.Correlator
 				if payloadB64 == "" {
 					continue
 				}
-				raw, err := base64.StdEncoding.DecodeString(payloadB64)
-				if err != nil {
-					raw, err = base64.RawStdEncoding.DecodeString(payloadB64)
-					if err != nil {
-						raw = []byte(payloadB64)
-					}
+				raw, err := decodeFramePayload(payloadB64)
+				// Ignora frames de controle (ping/close <= 8 bytes) para não sujar a correlação
+				if err != nil || len(raw) <= wsdecap.MinFramePayloadLen {
+					continue
 				}
-				if wsFramesLogged.Add(1) == 1 {
-					log.Printf("[ws] 1º frame binário recebido via CDP (%d bytes)", len(raw))
+				diagIdx := recvDiagCount.Add(1)
+				if diagIdx <= 10 {
+					log.Printf(
+						"[ws-diag #%02d] host=%s len=%d head4=[%s]",
+						diagIdx,
+						host,
+						len(raw),
+						wsdecap.HexHead(raw, 4),
+					)
 				}
-				corr.RecordFrame(time.Now().UnixMilli(), raw)
+				corr.RecordFrameWithHost(time.Now().UnixMilli(), host, raw)
 			case "Runtime.bindingCalled":
 				name, _ := ev.Params["name"].(string)
 				if name != "__emit" {
@@ -266,16 +437,17 @@ func runCaptureLoop(ctx context.Context, cdpURL string, corr *wsdecap.Correlator
 				}
 				nowMs := time.Now().UnixMilli()
 				if mo.T == "ws" && mo.B64 != "" {
-					raw, err := base64.StdEncoding.DecodeString(mo.B64)
-					if err == nil && len(raw) > 0 {
-						if wsFramesLogged.Add(1) == 1 {
-							log.Printf("[ws] 1º frame binário recebido via hook JS (%d bytes) url=%s", len(raw), mo.URL)
-						}
+					host, allowed := classifyPlaytechSocket(mo.URL)
+					if !allowed {
+						continue
+					}
+					raw, err := decodeFramePayload(mo.B64)
+					if err == nil && len(raw) > wsdecap.MinFramePayloadLen {
 						ts := mo.At
 						if ts <= 0 {
 							ts = nowMs
 						}
-						corr.RecordFrame(ts, raw)
+						corr.RecordFrameWithHost(ts, host, raw)
 					}
 					continue
 				}
@@ -287,14 +459,31 @@ func runCaptureLoop(ctx context.Context, cdpURL string, corr *wsdecap.Correlator
 				}
 				top := corr.OnConfirmedSpin(uint64(mo.N), mo.At)
 				id := seq.Add(1)
+				spinID := fmt.Sprintf("mo-%d-%d", mo.At, id)
+				if mo.Rid != "" {
+					spinID = "rid-" + mo.Rid
+				}
+				dualFeed, dualHits := corr.DualFeedStats()
 				if len(top) > 0 {
-					log.Printf("[spin #%d] confirmado via observer: numero=%d | lider=%s (%d/%d)", id, mo.N, top[0].Path, top[0].Hits, top[0].Spins)
+					log.Printf(
+						"[spin #%d] spin_id=%s numero=%d | lider=%s (%d/%d distinct=%d host=%s dual_feed=%v/%d)",
+						id,
+						spinID,
+						mo.N,
+						top[0].Path,
+						top[0].Hits,
+						top[0].Spins,
+						top[0].Distinct,
+						top[0].Host,
+						dualFeed,
+						dualHits,
+					)
 				} else {
-					log.Printf("[spin #%d] confirmado via observer: numero=%d ts=%d", id, mo.N, mo.At)
+					log.Printf("[spin #%d] spin_id=%s numero=%d ts=%d", id, spinID, mo.N, mo.At)
 				}
 				spinEv := SpinEvent{
 					V:         1,
-					SpinID:    fmt.Sprintf("mo-%d-%d", mo.At, id),
+					SpinID:    spinID,
 					Number:    mo.N,
 					Ts:        mo.At,
 					Source:    "mo",
@@ -304,6 +493,16 @@ func runCaptureLoop(ctx context.Context, cdpURL string, corr *wsdecap.Correlator
 			}
 		}
 	}
+}
+
+func decodeFramePayload(payloadB64 string) ([]byte, error) {
+	if raw, err := base64.StdEncoding.DecodeString(payloadB64); err == nil {
+		return raw, nil
+	}
+	if raw, err := base64.RawStdEncoding.DecodeString(payloadB64); err == nil {
+		return raw, nil
+	}
+	return nil, errors.New("invalid base64 payload")
 }
 
 func maxInt64(a, b int64) int64 {
@@ -316,14 +515,30 @@ func maxInt64(a, b int64) int64 {
 func main() {
 	cdpFlag := flag.String("cdp", "http://127.0.0.1:9222", "CDP HTTP/WS endpoint")
 	wsProbeFlag := flag.Bool("ws-probe", false, "Enable protobuf path correlation ranking every 5 spins")
+	strictFlag := flag.Bool("strict", false, "Require 40/40 hits and >=30 distinct numbers in probe")
+	freezeFlag := flag.String("freeze", "", "Freeze winning protobuf path to config/schema.toml (e.g. /3/103/1/1)")
+	dumpFramesFlag := flag.Int("dump-frames", 0, "Print full hex + decoded tree for the next N rounds")
+	dumpOpFlag := flag.Bool("dump-op", false, "Capture and print client->server FrameSent protobuf trees and logs/oplog.bin")
 	portFlag := flag.Int("port", 8787, "HTTP port for /spin and /stream")
 	flag.Parse()
+
+	schemaPath := filepath.Clean(filepath.Join("..", "config", "schema.toml"))
+	logsDir := filepath.Clean(filepath.Join("..", "logs"))
+
+	if *freezeFlag != "" {
+		if err := writeFrozenSchema(schemaPath, *freezeFlag); err != nil {
+			log.Fatalf("[freeze] falha ao gravar %s: %v", schemaPath, err)
+		}
+		log.Printf("[freeze] caminho %s congelado em %s (host primário=%s)", *freezeFlag, schemaPath, wsdecap.PrimaryPlaytechHost)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	hub := NewHub()
-	corr := wsdecap.NewCorrelator(*wsProbeFlag)
+	corr := wsdecap.NewCorrelator(*wsProbeFlag || *strictFlag)
+	corr.SetStrict(*strictFlag)
+	corr.SetDumpFrames(*dumpFramesFlag)
 
 	streamMux := http.NewServeMux()
 	streamMux.HandleFunc("/spin", hub.handlePostSpin)
@@ -345,10 +560,13 @@ func main() {
 	}
 
 	log.Printf(
-		"[monster-sidecar] iniciando | stream=http://127.0.0.1:%d/stream | health=http://127.0.0.1:8790/health | cdp=%s | ws-probe=%v",
+		"[monster-sidecar] iniciando | stream=http://127.0.0.1:%d/stream | cdp=%s | ws-probe=%v | strict=%v | dump-frames=%d | dump-op=%v",
 		*portFlag,
 		*cdpFlag,
 		*wsProbeFlag,
+		*strictFlag,
+		*dumpFramesFlag,
+		*dumpOpFlag,
 	)
 
 	go func() {
@@ -363,7 +581,17 @@ func main() {
 		}
 	}()
 
-	go runCaptureLoop(ctx, *cdpFlag, corr, hub)
+	go runCaptureLoop(
+		ctx,
+		captureOptions{
+			cdpURL:     *cdpFlag,
+			logsDir:    logsDir,
+			dumpOp:     *dumpOpFlag,
+			frozenPath: *freezeFlag,
+		},
+		corr,
+		hub,
+	)
 
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
