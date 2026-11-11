@@ -32,12 +32,22 @@ if (-not (Test-Path $ChromeExe)) {
     Write-Error "Chromium dedicado nao encontrado em $ChromeExe"
 }
 
-$CdpAlive = $false
-try {
-    $ver = Invoke-RestMethod -Uri "http://127.0.0.1:9222/json/version" -TimeoutSec 1
-    $CdpAlive = $true
-} catch {
+$RunningChromium = Get-Process chrome -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $ChromeExe }
+if (-not $RunningChromium) {
+    # Se havia um Chrome comum segurando a porta 9222, libera para subir a Roleta no Chromium dedicado
+    $Port9222 = Get-NetTCPConnection -LocalPort 9222 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($Port9222) {
+        Stop-Process -Id $Port9222.OwningProcess -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+    }
     $CdpAlive = $false
+} else {
+    try {
+        $null = Invoke-RestMethod -Uri "http://127.0.0.1:9222/json/version" -TimeoutSec 1
+        $CdpAlive = $true
+    } catch {
+        $CdpAlive = $false
+    }
 }
 
 if (-not $CdpAlive) {
@@ -46,6 +56,7 @@ if (-not $CdpAlive) {
         Remove-Item -Force -ErrorAction SilentlyContinue $SingletonLock
     }
 
+    Write-Host "[MONSTER] Abrindo MESA DA ROLETA no Chromium dedicado ($ChromeExe)..." -ForegroundColor Cyan
     Start-Process -FilePath $ChromeExe -ArgumentList @(
         "--remote-debugging-port=9222",
         "--user-data-dir=$ProfileDir",
@@ -77,11 +88,7 @@ if (-not $HealthAlive) {
     Start-Sleep -Seconds 3
 }
 
-Write-Host "[MONSTER] Abrindo painel FUI em modo App Dedicado (http://127.0.0.1:8791) e iniciando monster-core (--dry-run)..." -ForegroundColor Yellow
-Start-Process -FilePath $ChromeExe -ArgumentList @(
-    "--user-data-dir=$ProfileDir",
-    "--app=http://127.0.0.1:8791",
-    "--window-size=1440,900"
-)
+Write-Host "[MONSTER] Abrindo painel FUI em http://127.0.0.1:8791 e iniciando monster-core (--dry-run)..." -ForegroundColor Yellow
+Start-Process "http://127.0.0.1:8791"
 Set-Location $RootDir
 cargo run --offline -p monster-core -- --dry-run

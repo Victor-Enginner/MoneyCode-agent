@@ -22,25 +22,34 @@ Write-Host " MONSTER WS-PROBE - Roleta Brasileira (jogatudo.com)" -ForegroundCol
 Write-Host " Perfil salvo em: $ProfileDir" -ForegroundColor Cyan
 Write-Host "================================================================" -ForegroundColor Cyan
 
-$CdpAlive = $false
-try {
-    $null = Invoke-RestMethod -Uri "http://127.0.0.1:9222/json/version" -TimeoutSec 1
-    $CdpAlive = $true
-} catch {
+$ChromeExe = "O:\Archives\Eistein\chromium\chrome.exe"
+if (-not (Test-Path $ChromeExe)) {
+    Write-Error "Chromium dedicado nao encontrado em $ChromeExe"
+}
+
+$RunningChromium = Get-Process chrome -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $ChromeExe }
+if (-not $RunningChromium) {
+    $Port9222 = Get-NetTCPConnection -LocalPort 9222 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($Port9222) {
+        Stop-Process -Id $Port9222.OwningProcess -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+    }
     $CdpAlive = $false
+} else {
+    try {
+        $null = Invoke-RestMethod -Uri "http://127.0.0.1:9222/json/version" -TimeoutSec 1
+        $CdpAlive = $true
+    } catch {
+        $CdpAlive = $false
+    }
 }
 
 if ($CdpAlive) {
-    Write-Host "[MONSTER] Chrome já está aberto na porta 9222 — conectando direto na mesa aberta!" -ForegroundColor Green
+    Write-Host "[MONSTER] Chromium dedicado já está aberto na porta 9222 — conectando direto na mesa!" -ForegroundColor Green
 } else {
     $SingletonLock = Join-Path $ProfileDir "SingletonLock"
     if (Test-Path $SingletonLock) {
         Remove-Item -Force -ErrorAction SilentlyContinue $SingletonLock
-    }
-
-    $ChromeExe = "O:\Archives\Eistein\chromium\chrome.exe"
-    if (-not (Test-Path $ChromeExe)) {
-        Write-Error "Chromium dedicado nao encontrado em $ChromeExe"
     }
 
     Start-Process -FilePath $ChromeExe -ArgumentList @(

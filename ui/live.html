@@ -166,7 +166,7 @@
       const badge = document.getElementById('state-badge');
       badge.className = 'state-badge num state-' + st;
       badge.textContent = (glyphs[st] || '●') + ' ' + st;
-      document.getElementById('m-session').textContent = fmtClock(t.session?.uptime_sec);
+      document.getElementById('m-uptime').textContent = fmtClock(t.session?.uptime_sec);
       document.getElementById('m-bank').textContent = fmtCents(t.session?.bankroll_cents);
       document.getElementById('m-pnl').textContent = fmtCents(t.session?.pnl_cents);
       document.getElementById('m-step').textContent = (t.ladder?.current_step !== null && t.ladder?.max_steps !== null) ? `${t.ladder.current_step}/${t.ladder.max_steps}` : '—';

@@ -38,6 +38,7 @@ fn spawn_fui_http_server(
     cfg: Cfg,
 ) {
     thread::spawn(move || {
+        let boot_instant = std::time::Instant::now();
         let matchers = default_matchers();
         let Ok(listener) = TcpListener::bind("127.0.0.1:8791") else {
             eprintln!("[FUI-HTTP] porta 127.0.0.1:8791 já em uso");
@@ -60,6 +61,7 @@ fn spawn_fui_http_server(
             let first_line = req.lines().next().unwrap_or("");
 
             if first_line.starts_with("GET /api/tick") {
+                fui.touch_uptime(boot_instant.elapsed().as_secs());
                 if let Ok(tick) = fui.build_bus_tick(&pool, "quebra_permanencia_coluna") {
                     if let Ok(body) = serde_json::to_string(&tick) {
                         let resp = format!(
@@ -100,13 +102,14 @@ fn spawn_fui_http_server(
                 let _ = fui.resume();
                 let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}");
             } else {
-                let body = LIVE_FUI_HTML.as_bytes();
+                let disk_html = std::fs::read("O:/Archives/Eistein/FUI AGENT ROULLET/ui/live.html")
+                    .unwrap_or_else(|_| LIVE_FUI_HTML.as_bytes().to_vec());
                 let hdr = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
+                    disk_html.len()
                 );
                 let _ = stream.write_all(hdr.as_bytes());
-                let _ = stream.write_all(body);
+                let _ = stream.write_all(&disk_html);
             }
         }
     });

@@ -420,6 +420,13 @@ impl FuiController {
         }
     }
 
+    /// Atualiza o relógio de sessão (`uptime_sec`) a cada tick da FUI.
+    pub fn touch_uptime(&self, uptime_sec: u64) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.session.uptime_sec = Some(uptime_sec);
+        }
+    }
+
     /// Comando IPC de leitura: `get_session` (§7).
     pub fn get_session(&self) -> Result<SessionDto, UiError> {
         let g = self.inner.lock().map_err(|_| UiError::StateLock)?;
