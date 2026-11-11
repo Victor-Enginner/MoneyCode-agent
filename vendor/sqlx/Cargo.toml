@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "sqlx"
+version = "0.8.0"
+edition = "2021"
+license.workspace = true
+
+[features]
+default = ["sqlite", "runtime-tokio", "migrate"]
+sqlite = []
+runtime-tokio = []
+migrate = []
+
+[dependencies]
+parking_lot = "0.12"
+rusqlite = { version = "0.31.0", features = ["bundled"] }
+thiserror.workspace = true

@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+/target/
+**/*.rs.bk
+*.db
+*.db-shm
+*.db-wal
+*.exe
+*.dll
+*.so
+*.dylib
+.env
+.env.*
+!.env.example
+/sidecar/capture
+/sidecar/capture.exe
+/node_modules/
+/dist/
+/.DS_Store
+Thumbs.db

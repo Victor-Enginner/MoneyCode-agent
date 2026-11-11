@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "monster-store"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

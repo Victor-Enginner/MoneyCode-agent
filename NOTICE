@@ -1,0 +1,11 @@
+MONSTER Project
+Copyright 2026 @Victor-Enginner and Contributors
+
+This product includes software developed for the MONSTER automated telemetry
+and execution engine under the Apache License, Version 2.0.
+
+Third-party components:
+- github.com/gorilla/websocket (BSD-2-Clause)
+- Rust crates (tokio, serde, sqlx, tracing, thiserror) under MIT / Apache-2.0
+- Playtech wire observations and third-party protocol schemas in vendor/ carry
+  their respective notices and remain property of their respective owners.

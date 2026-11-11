@@ -1,0 +1,10 @@
+base_cents = 10
+max_steps = 5
+max_bet_per_cover_cents = 50000
+max_exposure_pct = 0.16
+stop_loss_cents = 7260
+stop_win_pct = 0.08
+min_window_ms = 2000
+cooldown_spins = 2
+max_entries_per_hour = 45
+chip_denoms_cents = [2500, 1000, 500, 100, 50, 10]
