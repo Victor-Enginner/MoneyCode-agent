@@ -113,6 +113,9 @@ impl Default for Calibration {
         covers.insert("col:1".to_string(), (875, 760));
         covers.insert("col:2".to_string(), (875, 710));
         covers.insert("col:3".to_string(), (875, 660));
+        covers.insert("col2to1:1".to_string(), (875, 760));
+        covers.insert("col2to1:2".to_string(), (875, 710));
+        covers.insert("col2to1:3".to_string(), (875, 660));
         covers.insert("dozen:1".to_string(), (520, 815));
         covers.insert("dozen:2".to_string(), (670, 815));
         covers.insert("dozen:3".to_string(), (815, 815));
@@ -432,6 +435,13 @@ pub fn place(
     }
 
     // 1. Grava a intent ANTES de qualquer clique (§1.8 e §1.3 UNIQUE(strategy_id, spin_id)).
+    let covers_desc: Vec<String> = plan.covers.iter().map(|(c, _)| c.canonical_key()).collect();
+    let auto_reason = format!(
+        "degrau={} cobrindo={} total={}c",
+        plan.ladder_step,
+        covers_desc.join("+"),
+        plan.total_cents
+    );
     let intent_id = match insert_intent(
         pool,
         &NewIntent {
@@ -442,7 +452,7 @@ pub fn place(
             ev_cents: plan.ev_cents,
             confidence: plan.confidence,
             decision: IntentDecision::Placed,
-            reason: None,
+            reason: Some(auto_reason),
             created_at: now_ms,
         },
     ) {

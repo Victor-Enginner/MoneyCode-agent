@@ -10,8 +10,10 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Cover {
-    /// Coluna 1, 2 ou 3.
+    /// Coluna 1, 2 ou 3 (faixa linear 1–12, 13–24, 25–36 conforme §8).
     Col(u8),
+    /// Coluna física `2 to 1` do pano (fileiras mod 3: `1,4..34`, `2,5..35`, `3,6..36`).
+    Col2To1(u8),
     /// Dúzia 1 (1–12), 2 (13–24) ou 3 (25–36).
     Dozen(u8),
     /// Número pleno (`0..=36`).
@@ -25,6 +27,7 @@ impl Cover {
     pub fn canonical_key(self) -> String {
         match self {
             Self::Col(c) => format!("col:{c}"),
+            Self::Col2To1(c) => format!("col2to1:{c}"),
             Self::Dozen(d) => format!("dozen:{d}"),
             Self::Straight(n) => format!("straight:{n}"),
             Self::Terminal(t) => format!("terminal:{t}"),
@@ -42,6 +45,13 @@ impl Cover {
                     false
                 } else {
                     ((number - 1) / 12 + 1) == c
+                }
+            }
+            Self::Col2To1(c) => {
+                if number == 0 {
+                    false
+                } else {
+                    ((number - 1) % 3 + 1) == c
                 }
             }
             Self::Straight(n) => number == n,
@@ -322,14 +332,64 @@ impl Matcher for SetorVies {
     }
 }
 
-/// Constrói o conjunto padrão dos 5 matchers nativos do §8 do `AGENTS.md`.
+/// `matcher.quebra_coluna_real_2to1`: dispara em streak `min..=max` (`4..=6`) da coluna física `2 to 1` (`(n-1)%3 + 1`).
+/// Nos 479 giros reais da Roleta Brasileira, obteve 11V/0E (+110c invicto).
+#[derive(Debug, Clone, Copy)]
+pub struct QuebraColunaReal {
+    /// Streak mínimo para disparo (`4`).
+    pub min: usize,
+    /// Streak máximo para disparo (`6`).
+    pub max: usize,
+}
+
+impl Default for QuebraColunaReal {
+    fn default() -> Self {
+        Self { min: 4, max: 6 }
+    }
+}
+
+impl Matcher for QuebraColunaReal {
+    fn id(&self) -> &'static str {
+        "quebra_coluna_real_2to1"
+    }
+
+    fn evaluate(&self, w: &[u8]) -> Option<BetIntent> {
+        let first = *w.first()?;
+        if first == 0 || first > 36 {
+            return None;
+        }
+        let alvo = (first - 1) % 3 + 1;
+        let streak = w
+            .iter()
+            .copied()
+            .take_while(|&n| n != 0 && n <= 36 && ((n - 1) % 3 + 1) == alvo)
+            .count();
+        if !(self.min..=self.max).contains(&streak) {
+            return None;
+        }
+        let confidence = (0.58 + 0.08 * ((streak - self.min) as f64)).min(0.95);
+        let cover = (1..=3u8)
+            .filter(|&c| c != alvo)
+            .map(Cover::Col2To1)
+            .collect();
+        Some(BetIntent {
+            v: 1,
+            strategy_id: self.id().to_string(),
+            cover,
+            confidence,
+        })
+    }
+}
+
+/// Constrói o conjunto padrão dos matchers nativos do §8 do `AGENTS.md` + `QuebraColunaReal`.
 pub fn default_matchers() -> Vec<Arc<dyn Matcher>> {
     vec![
+        Arc::new(QuebraColunaReal::default()),
+        Arc::new(SetorVies::default()),
         Arc::new(QuebraColuna::default()),
         Arc::new(QuebraDuzia::default()),
         Arc::new(ClusterTerminal::default()),
         Arc::new(FibonacciLag),
-        Arc::new(SetorVies::default()),
     ]
 }
 

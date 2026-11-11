@@ -390,6 +390,36 @@ impl FuiController {
         CloseDisposition::HideWindowKeepAlive
     }
 
+    /// Sincroniza métricas vivas do `monster-core` (banca, P&L, relógio de sessão e cobertura ativa) com a FUI.
+    pub fn sync_live_metrics(
+        &self,
+        uptime_sec: u64,
+        bankroll_cents: i64,
+        pnl_cents: i64,
+        active_cover_label: Option<String>,
+        exposure_cents: Option<u64>,
+    ) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.session.uptime_sec = Some(uptime_sec);
+            g.session.bankroll_cents = Some(bankroll_cents);
+            g.session.pnl_cents = Some(pnl_cents);
+            g.session.pnl_history_cents.push(pnl_cents);
+            if g.session.pnl_history_cents.len() > 60 {
+                let drop_n = g.session.pnl_history_cents.len() - 60;
+                g.session.pnl_history_cents.drain(0..drop_n);
+            }
+            g.session.active_cover_label = active_cover_label;
+            g.session.exposure_cents = exposure_cents;
+            if g.session.state != GlobalState::Killed && g.session.state != GlobalState::Pausado {
+                g.session.state = if exposure_cents.unwrap_or(0) > 0 {
+                    GlobalState::Entrada
+                } else {
+                    GlobalState::Observando
+                };
+            }
+        }
+    }
+
     /// Comando IPC de leitura: `get_session` (§7).
     pub fn get_session(&self) -> Result<SessionDto, UiError> {
         let g = self.inner.lock().map_err(|_| UiError::StateLock)?;

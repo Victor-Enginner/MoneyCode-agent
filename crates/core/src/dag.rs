@@ -3,6 +3,7 @@
 //! Implementa `feat.window(30)` O(1), `regime.classifier`, `fan_in`, `gate.edge`, `gate.risk` e `slip.compiler`.
 //! Executa 100% em memória sem alocação pesada e sem LLM no caminho crítico (<250 ms).
 
+use crate::backtest::{evaluate_matcher_walk_forward, PatternHistoryStats};
 use monster_risk::{authorize, decompose, stake_cents, Cfg, State, Verdict};
 use monster_strategy_native::{BetIntent, Cover, Matcher};
 use serde::{Deserialize, Serialize};
@@ -197,7 +198,112 @@ pub struct DagOutput {
     pub elapsed_us: u64,
 }
 
-/// Executa o pipeline completo do DAG (§8):
+/// Executa o pipeline completo do DAG (§8) combinado com validação Walk-Forward histórica (`HistoryBuffer`):
+/// Se `chronological_history.len() >= 25`, simula cada candidato nos giros passados da mesa e bloqueia
+/// (`confidence = 0.0`) qualquer padrão que esteja com P&L negativo ou estouro recente na mesa atual,
+/// premiando padrões invictos (`0` estouros e P&L > 0).
+pub fn evaluate_dag_with_history(
+    spin_id: &str,
+    window: &[u8],
+    chronological_history: &[u8],
+    matchers: &[Arc<dyn Matcher>],
+    cfg: &Cfg,
+    state: &State,
+    min_confidence: f64,
+) -> (DagOutput, Option<PatternHistoryStats>) {
+    let start = Instant::now();
+    let regime = classify(window);
+    let raw_aggregates = fan_in(window, matchers);
+
+    let mut adjusted_aggregates = Vec::with_capacity(raw_aggregates.len());
+    let mut best_history: Option<PatternHistoryStats> = None;
+
+    for mut agg in raw_aggregates {
+        if chronological_history.len() >= 25 {
+            if let Some(m) = matchers.iter().find(|m| m.id() == agg.strategy_id) {
+                let stats = evaluate_matcher_walk_forward(m.as_ref(), chronological_history, cfg);
+                agg.confidence = (agg.confidence * stats.confidence_multiplier).min(0.99);
+                if best_history.is_none() && stats.worth_entering && agg.confidence >= min_confidence
+                {
+                    best_history = Some(stats);
+                }
+            }
+        }
+        adjusted_aggregates.push(agg);
+    }
+
+    adjusted_aggregates.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let best = adjusted_aggregates
+        .iter()
+        .find(|agg| agg.confidence >= min_confidence && !agg.cover.is_empty());
+
+    let Some(winner) = best else {
+        return (
+            DagOutput {
+                regime,
+                aggregates: adjusted_aggregates,
+                verdict: None,
+                plan: None,
+                elapsed_us: start.elapsed().as_micros() as u64,
+            },
+            best_history,
+        );
+    };
+
+    if best_history.is_none() && chronological_history.len() >= 25 {
+        if let Some(m) = matchers.iter().find(|m| m.id() == winner.strategy_id) {
+            best_history = Some(evaluate_matcher_walk_forward(
+                m.as_ref(),
+                chronological_history,
+                cfg,
+            ));
+        }
+    }
+
+    let verdict = authorize(cfg, state);
+    let plan = if verdict == Verdict::Place {
+        let ladder_step = state.step.saturating_add(1);
+        let stake_per_cover_cents = stake_cents(ladder_step, cfg.base_cents);
+        let covers: Vec<(Cover, u64)> = winner
+            .cover
+            .iter()
+            .copied()
+            .map(|c| (c, stake_per_cover_cents))
+            .collect();
+        let total_cents = stake_per_cover_cents.saturating_mul(covers.len() as u64);
+        let ev_cents = compute_ev_cents_two_covers(stake_per_cover_cents);
+        let chips_per_cover = decompose(stake_per_cover_cents, &cfg.chip_denoms_cents);
+        Some(Plan {
+            spin_id: spin_id.to_string(),
+            strategy_id: winner.strategy_id.clone(),
+            ladder_step,
+            stake_per_cover_cents,
+            total_cents,
+            ev_cents,
+            confidence: winner.confidence,
+            covers,
+            chips_per_cover,
+        })
+    } else {
+        None
+    };
+
+    (
+        DagOutput {
+            regime,
+            aggregates: adjusted_aggregates,
+            verdict: Some(verdict),
+            plan,
+            elapsed_us: start.elapsed().as_micros() as u64,
+        },
+        best_history,
+    )
+}
 /// `feat.window(30) → matchers → regime.classifier → aggregator.score → gate.edge → gate.risk → slip.compiler`.
 pub fn evaluate_dag(
     spin_id: &str,

@@ -3,13 +3,18 @@
 //! Opera em modo `--dry-run` por padrão e coordena reconciliação pós-spin e kill switch.
 //! Orçamento estrito de latência (<250 ms no DAG) sem chamadas de LLM no caminho crítico.
 
+pub mod backtest;
 pub mod dag;
 pub mod executor;
 pub mod reconciler;
 
+pub use backtest::{
+    evaluate_all_matchers_history, evaluate_matcher_walk_forward, HistoryBuffer,
+    PatternHistoryStats, HISTORY_CAPACITY, REAL_TABLE_479_RECENT_FIRST,
+};
 pub use dag::{
-    classify, compute_ev_cents_two_covers, evaluate_dag, fan_in, Aggregate, DagOutput, Plan,
-    Regime, Window30, WINDOW_CAPACITY,
+    classify, compute_ev_cents_two_covers, evaluate_dag, evaluate_dag_with_history, fan_in,
+    Aggregate, DagOutput, Plan, Regime, Window30, WINDOW_CAPACITY,
 };
 pub use executor::{
     place, Calibration, CdpActuator, CoverAck, DryRunActuator, ExecError, ExecutionMode, Fills,

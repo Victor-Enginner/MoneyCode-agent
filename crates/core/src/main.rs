@@ -5,8 +5,9 @@
 
 use monster_capture::{CaptureSource, SpinBus, StreamClient, DEFAULT_STREAM_ADDR};
 use monster_core::{
-    boot_reconcile, evaluate_dag, place, reconcile_spin, Calibration, CdpActuator, CoverAck,
-    DryRunActuator, ExecutionMode, KillSwitch, LiveHttpActuator, Plan, Window30,
+    boot_reconcile, evaluate_all_matchers_history, evaluate_dag_with_history, place,
+    reconcile_spin, Calibration, CdpActuator, CoverAck, DryRunActuator, ExecutionMode,
+    HistoryBuffer, KillSwitch, LiveHttpActuator, Plan, Window30, REAL_TABLE_479_RECENT_FIRST,
 };
 use monster_risk::{run_monte_carlo, Cfg, McParams, State, Verdict};
 use monster_store::{init_pool, insert_spin, NewSpin, SpinSource, SqlitePool};
@@ -16,6 +17,7 @@ use std::env;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -28,8 +30,15 @@ fn now_unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn spawn_fui_http_server(pool: SqlitePool, fui: FuiController, kill_switch: KillSwitch) {
+fn spawn_fui_http_server(
+    pool: SqlitePool,
+    fui: FuiController,
+    kill_switch: KillSwitch,
+    history: Arc<Mutex<HistoryBuffer>>,
+    cfg: Cfg,
+) {
     thread::spawn(move || {
+        let matchers = default_matchers();
         let Ok(listener) = TcpListener::bind("127.0.0.1:8791") else {
             eprintln!("[FUI-HTTP] porta 127.0.0.1:8791 já em uso");
             return;
@@ -61,6 +70,22 @@ fn spawn_fui_http_server(pool: SqlitePool, fui: FuiController, kill_switch: Kill
                         let _ = stream.write_all(resp.as_bytes());
                         continue;
                     }
+                }
+                let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n");
+            } else if first_line.starts_with("GET /api/patterns") {
+                let chrono = history
+                    .lock()
+                    .map(|h| h.to_chronological_vec())
+                    .unwrap_or_default();
+                let stats = evaluate_all_matchers_history(&matchers, &chrono, &cfg);
+                if let Ok(body) = serde_json::to_string(&stats) {
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    continue;
                 }
                 let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n");
             } else if first_line.starts_with("POST /api/kill") {
@@ -175,10 +200,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let live_actuator = LiveHttpActuator::new(stream_addr.clone());
     let kill_switch = KillSwitch::new();
     let fui = FuiController::new(cfg.clone());
-
-    spawn_fui_http_server(pool.clone(), fui, kill_switch.clone());
+    let boot_instant = std::time::Instant::now();
+    fui.sync_live_metrics(0, bankroll_cents, 0, None, None);
 
     let mut window = Window30::new();
+    let mut initial_hist = HistoryBuffer::new();
+    initial_hist.seed_from_recent_first(&REAL_TABLE_479_RECENT_FIRST);
+    if let Ok(db_spins) = fui.get_spins(&pool) {
+        for sp in db_spins.iter().rev() {
+            initial_hist.push_live(sp.number);
+        }
+    }
+    for n in initial_hist.to_recent_vec(30).into_iter().rev() {
+        window.push(n);
+    }
+
+    let init_chrono = initial_hist.to_chronological_vec();
+    let init_stats = evaluate_all_matchers_history(&matchers, &init_chrono, &cfg);
+    println!(
+        "=== [WALK-FORWARD: {} GIROS DA MESA ANALISADOS] ===",
+        init_chrono.len()
+    );
+    for st in &init_stats {
+        println!("  -> {:<28} | {}", st.strategy_id, st.summary);
+    }
+    println!("====================================================");
+
+    let history = Arc::new(Mutex::new(initial_hist));
+    spawn_fui_http_server(
+        pool.clone(),
+        fui.clone(),
+        kill_switch.clone(),
+        history.clone(),
+        cfg.clone(),
+    );
+
     let mut session_pnl_cents = 0i64;
     let mut spins_since_blow = cfg.cooldown_spins;
     let mut current_step = 0u8;
@@ -259,6 +315,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         window.push(ev.number);
+        let chrono_hist = if let Ok(mut h) = history.lock() {
+            h.push_live(ev.number);
+            h.to_chronological_vec()
+        } else {
+            Vec::new()
+        };
         let recent = window.to_recent_vec();
         let st = State {
             bankroll_cents,
@@ -269,14 +331,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             step: current_step,
         };
 
-        let dag_out = evaluate_dag(&ev.spin_id, &recent, &matchers, &cfg, &st, 0.55);
+        let (dag_out, best_hist) = evaluate_dag_with_history(
+            &ev.spin_id,
+            &recent,
+            &chrono_hist,
+            &matchers,
+            &cfg,
+            &st,
+            0.55,
+        );
         println!(
-            "[DAG] spin={} num={} | regime={:?} | sinais={} | verdict={:?} | {}µs",
+            "[DAG] spin={} num={} | regime={:?} | sinais={} | verdict={:?} | hist={} | {}µs",
             ev.spin_id,
             ev.number,
             dag_out.regime,
             dag_out.aggregates.len(),
             dag_out.verdict,
+            best_hist
+                .as_ref()
+                .map(|h| h.summary.as_str())
+                .unwrap_or("sem-sinal"),
             dag_out.elapsed_us
         );
 
@@ -296,12 +370,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         fills.preview_cents,
                         plan.covers
                     );
+                    let label = format!(
+                        "{} · R$ {},{:02}",
+                        plan.covers
+                            .iter()
+                            .map(|(c, _)| c.canonical_key().to_uppercase())
+                            .collect::<Vec<_>>()
+                            .join(" + "),
+                        plan.stake_per_cover_cents / 100,
+                        plan.stake_per_cover_cents % 100
+                    );
+                    fui.sync_live_metrics(
+                        boot_instant.elapsed().as_secs(),
+                        bankroll_cents,
+                        session_pnl_cents,
+                        Some(label),
+                        Some(plan.total_cents),
+                    );
                     pending_entry = Some((plan, fills.items));
                 }
                 Err(err) => {
                     eprintln!("[EXECUTOR-ABORT] {err}");
                 }
             }
+        } else {
+            fui.sync_live_metrics(
+                boot_instant.elapsed().as_secs(),
+                bankroll_cents,
+                session_pnl_cents,
+                None,
+                None,
+            );
         }
     }
 
