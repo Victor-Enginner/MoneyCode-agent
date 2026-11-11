@@ -31,6 +31,10 @@ const cases = [
   { target: 'chip:10', x: 355, y: 300, how: 'rack' },
   { target: 'chip:5000', x: 635, y: 300, how: 'rack' },
   { target: 'even', x: 320, y: 262, how: 'cloth-text' },
+  // Pleno: cai na casa do número na grade derivada das âncoras 2to1.
+  { target: 'straight:17', x: 335, y: 148, how: 'cloth-number' },
+  { target: 'straight:1', x: 237, y: 186, how: 'cloth-number' },
+  { target: 'straight:36', x: 452, y: 110, how: 'cloth-number' },
 ];
 
 (async () => {
@@ -67,6 +71,12 @@ const cases = [
   const okUnresolved = !got.found;
   if (!okUnresolved) failures++;
   console.log((okUnresolved ? 'ok   ' : 'FAIL ') + 'sem 2to1 -> found=' + got.found + ' how=' + got.how + ' (esperado found=false)');
+
+  // Pleno inexistente no pano (grade sem o 0 neste layout): não resolve, o sidecar recusa.
+  const semZero = await resolve('straight:0');
+  const okZero = !semZero.found;
+  if (!okZero) failures++;
+  console.log((okZero ? 'ok   ' : 'FAIL ') + 'straight:0 -> found=' + semZero.found + ' how=' + semZero.how + ' (esperado found=false)');
 
   console.log(failures === 0 ? '\nRESOLVER_SPEC_OK' : '\nRESOLVER_SPEC_FAILED: ' + failures);
   process.exit(failures === 0 ? 0 : 1);

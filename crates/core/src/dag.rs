@@ -4,8 +4,10 @@
 //! Executa 100% em memória sem alocação pesada e sem LLM no caminho crítico (<250 ms).
 
 use crate::backtest::{evaluate_matcher_walk_forward, PatternHistoryStats};
-use monster_risk::{authorize, decompose, stake_cents, Cfg, State, Verdict};
-use monster_strategy_native::{BetIntent, Cover, Matcher};
+use monster_risk::{
+    authorize, authorize_numbers, decompose, stake_cents, Cfg, NumberLadder, State, Verdict,
+};
+use monster_strategy_native::{number_coverage, BetIntent, Cover, Matcher};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
@@ -160,6 +162,67 @@ pub const fn compute_ev_cents_two_covers(stake_per_cover_cents: u64) -> i64 {
     }
 }
 
+/// EV inteiro em centavos de uma cobertura de `k` números com ficha `x` em cada.
+/// Acerto em `k` casas paga `35x` e a exposição é `k·x`: `EV = −k·x/37` (borda constante).
+pub const fn compute_ev_cents_numbers(numbers: u64, stake_per_number_cents: u64) -> i64 {
+    let num = -((numbers * stake_per_number_cents) as i64);
+    if num >= 0 {
+        num / 37
+    } else {
+        (num - 36) / 37
+    }
+}
+
+/// Gate do §6 aplicado à geometria do vencedor: cobertura de número usa `k·x` de exposição
+/// e ficha por número no limite de mesa; o resto segue a regra de duas colunas (`2x`).
+fn gate_for(winner: &Aggregate, cfg: &Cfg, state: &State) -> Verdict {
+    match number_coverage(&winner.cover) {
+        Some(numbers) => {
+            let nl = NumberLadder::new(numbers.len() as u8, cfg.base_cents);
+            authorize_numbers(cfg, &nl, state)
+        }
+        None => authorize(cfg, state),
+    }
+}
+
+/// Compila o `slip.compiler` para o vencedor do fan-in.
+///
+/// Cobertura de número (`Straight`/`Terminal`) é expandida em um pleno por número, com a ficha
+/// da [`NumberLadder`] (`x = (D+G)/(36−k)`). É isso que faz `Terminal(0)` virar 4 cliques em
+/// `straight:0`, `straight:10`, `straight:20`, `straight:30` — o plano nunca chega ao executor
+/// com um `terminal:` que o pano não sabe resolver. Coluna/dúzia/cor seguem a escada ×3 do §6.
+fn compile_plan(spin_id: &str, winner: &Aggregate, ladder_step: u8, cfg: &Cfg) -> Option<Plan> {
+    let (covers, stake_per_cover_cents, ev_cents): (Vec<(Cover, u64)>, u64, i64) =
+        if let Some(numbers) = number_coverage(&winner.cover) {
+            let nl = NumberLadder::new(numbers.len() as u8, cfg.base_cents);
+            let stake = nl.stake_cents(ladder_step);
+            let covers = numbers
+                .iter()
+                .map(|&n| (Cover::Straight(n), stake))
+                .collect();
+            let ev = compute_ev_cents_numbers(numbers.len() as u64, stake);
+            (covers, stake, ev)
+        } else {
+            let stake = stake_cents(ladder_step, cfg.base_cents);
+            let covers = winner.cover.iter().copied().map(|c| (c, stake)).collect();
+            (covers, stake, compute_ev_cents_two_covers(stake))
+        };
+
+    let total_cents = stake_per_cover_cents.saturating_mul(covers.len() as u64);
+    let chips_per_cover = decompose(stake_per_cover_cents, &cfg.chip_denoms_cents);
+    Some(Plan {
+        spin_id: spin_id.to_string(),
+        strategy_id: winner.strategy_id.clone(),
+        ladder_step,
+        stake_per_cover_cents,
+        total_cents,
+        ev_cents,
+        confidence: winner.confidence,
+        covers,
+        chips_per_cover,
+    })
+}
+
 /// Plano compilado pelo `slip.compiler` pronto para o `executor.place`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
@@ -299,30 +362,9 @@ pub fn evaluate_dag_with_history(
         None => state.step,
     };
     let strategy_state = State { step, ..*state };
-    let verdict = authorize(cfg, &strategy_state);
+    let verdict = gate_for(winner, cfg, &strategy_state);
     let plan = if verdict == Verdict::Place {
-        let ladder_step = step.saturating_add(1);
-        let stake_per_cover_cents = stake_cents(ladder_step, cfg.base_cents);
-        let covers: Vec<(Cover, u64)> = winner
-            .cover
-            .iter()
-            .copied()
-            .map(|c| (c, stake_per_cover_cents))
-            .collect();
-        let total_cents = stake_per_cover_cents.saturating_mul(covers.len() as u64);
-        let ev_cents = compute_ev_cents_two_covers(stake_per_cover_cents);
-        let chips_per_cover = decompose(stake_per_cover_cents, &cfg.chip_denoms_cents);
-        Some(Plan {
-            spin_id: spin_id.to_string(),
-            strategy_id: winner.strategy_id.clone(),
-            ladder_step,
-            stake_per_cover_cents,
-            total_cents,
-            ev_cents,
-            confidence: winner.confidence,
-            covers,
-            chips_per_cover,
-        })
+        compile_plan(spin_id, winner, step.saturating_add(1), cfg)
     } else {
         None
     };
@@ -365,30 +407,9 @@ pub fn evaluate_dag(
         };
     };
 
-    let verdict = authorize(cfg, state);
+    let verdict = gate_for(winner, cfg, state);
     let plan = if verdict == Verdict::Place {
-        let ladder_step = state.step.saturating_add(1);
-        let stake_per_cover_cents = stake_cents(ladder_step, cfg.base_cents);
-        let covers: Vec<(Cover, u64)> = winner
-            .cover
-            .iter()
-            .copied()
-            .map(|c| (c, stake_per_cover_cents))
-            .collect();
-        let total_cents = stake_per_cover_cents.saturating_mul(covers.len() as u64);
-        let ev_cents = compute_ev_cents_two_covers(stake_per_cover_cents);
-        let chips_per_cover = decompose(stake_per_cover_cents, &cfg.chip_denoms_cents);
-        Some(Plan {
-            spin_id: spin_id.to_string(),
-            strategy_id: winner.strategy_id.clone(),
-            ladder_step,
-            stake_per_cover_cents,
-            total_cents,
-            ev_cents,
-            confidence: winner.confidence,
-            covers,
-            chips_per_cover,
-        })
+        compile_plan(spin_id, winner, state.step.saturating_add(1), cfg)
     } else {
         None
     };

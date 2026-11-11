@@ -293,6 +293,30 @@ func (c *Client) RequestTargetCoords(sid string, target string, fallbackX, fallb
       pt = { x: r.x, y: r.y };
       how = '2to1-anchor';
     }
+  } else if (target.startsWith('straight:')) {
+    // Pleno: a casa do número é o próprio rótulo do número dentro da grade 3x12 do pano.
+    // Nenhuma coordenada fixa por número: a grade sai do mesmo retângulo derivado das âncoras 2to1.
+    // Se a grade não estiver completa, o alvo sai found:false e o sidecar responde 409 (nunca clique cego).
+    const num = parseInt(target.split(':')[1], 10);
+    if (cloth && num >= 0 && num <= 36) {
+      const grid = {};
+      for (const n of cloth.nums) {
+        const v = parseInt(n.t, 10);
+        if (!(v >= 0 && v <= 36)) continue;
+        const cur = grid[v];
+        // Folha do texto (menor área) em vez do wrapper que herda o mesmo texto.
+        if (!cur || n.w * n.h < cur.w * cur.h) grid[v] = n;
+      }
+      const distinct = Object.keys(grid).length;
+      const hit = grid[num];
+      if (hit && distinct >= 30) {
+        pt = { x: hit.x, y: hit.y };
+        how = 'cloth-number';
+      } else if (hit) {
+        // Grade parcial: resolveu mas não dá para confiar que a casa é a correta.
+        how = 'cloth-number-partial';
+      }
+    }
   } else if (target === 'low') {
     const hit = findInCloth(['1-18', '1 to 18']);
     if (hit) { pt = { x: hit.x, y: hit.y }; how = 'cloth-text'; }

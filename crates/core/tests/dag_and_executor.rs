@@ -148,7 +148,11 @@ fn fase5_200_entradas_dry_run_com_escada_avancando() {
     let _ = boot_reconcile(&pool, None).expect("boot_reconcile");
 
     let cfg = Cfg::default();
-    let matchers = default_matchers();
+    // Só o Fibonacci lag: este gate prova a escada ×3 e o executor, não o agregador.
+    // (Ele dispara com a sequência 1-4-7-10 semeada e cobre duas colunas; com a lista completa
+    // o `cluster_final` ganharia a disputa e o plano viraria de números, que é o outro teste.)
+    let matchers: Vec<std::sync::Arc<dyn monster_strategy_native::Matcher>> =
+        vec![std::sync::Arc::new(monster_strategy_native::FibonacciLag)];
     let actuator = DryRunActuator::new();
     let cal = Calibration::default();
     let kill_switch = KillSwitch::new();
@@ -175,8 +179,10 @@ fn fase5_200_entradas_dry_run_com_escada_avancando() {
         seed += 1;
     };
 
-    // Semeia Coluna 1 (1, 4, 7, 10) para armar `quebra_permanencia_coluna` (cobre Col 2 + Col 3).
-    for n in [1u8, 4, 7, 10] {
+    // Semeia Coluna 1 (1, 4, 7, 10, 1) para armar o lag de Fibonacci (cobre Col 2 + Col 3).
+    // Cinco casas, e não quatro: o número do resultado empurrado no fim de cada rodada
+    // entra em `w[4]` e precisa continuar sendo Coluna 1.
+    for n in [1u8, 4, 7, 10, 1] {
         push(n, &mut window, &pool, &mut virtual_clock_ms);
     }
 
@@ -188,8 +194,8 @@ fn fase5_200_entradas_dry_run_com_escada_avancando() {
     for entry_idx in 1..=200u32 {
         // Perde 5 seguidas (degraus 1..5, estourando no último) e ganha na 6ª.
         let will_win = entry_idx % 6 == 0;
-        // Rearma a Coluna 1 / Dúzia 1 antes de cada entrada: é o que mantém o matcher disparando.
-        for n in [1u8, 4, 7, 10] {
+        // Rearma a Coluna 1 antes de cada entrada: é o que mantém o matcher disparando.
+        for n in [1u8, 4, 7, 10, 1] {
             push(n, &mut window, &pool, &mut virtual_clock_ms);
         }
 
@@ -295,4 +301,147 @@ fn fase5_200_entradas_dry_run_com_escada_avancando() {
     );
     let orphans = orphan_sweep(&pool).expect("orphan_sweep");
     assert_eq!(orphans, 0, "gate Fase 5: zero orfaos");
+}
+
+/// Fase 5 no caminho de NÚMEROS: o `cluster_final` cobre terminais, o `slip.compiler`
+/// expande em plenos e a escada é `(D+G)/(36−k)` — nunca a ×3 de duas colunas.
+#[test]
+fn fase5_cluster_final_aposta_em_numeros_com_escada_propria() {
+    use monster_risk::NumberLadder;
+    use monster_strategy_native::{ClusterFinal, Cover, Matcher};
+
+    let pool = init_pool(":memory:").expect("init in-memory sqlite");
+    let cfg = Cfg::default();
+    let matchers: Vec<std::sync::Arc<dyn Matcher>> = vec![std::sync::Arc::new(ClusterFinal::default())];
+    let actuator = DryRunActuator::new();
+    let cal = Calibration::default();
+    let kill_switch = KillSwitch::new();
+    let mut window = Window30::new();
+    let mut ladder_steps = monster_core::LadderSteps::new();
+    let mut clock = 1_730_700_000_000i64;
+    let mut seed = 0u32;
+
+    let mut push = |n: u8, window: &mut Window30, clock: &mut i64| {
+        *clock += 45_000;
+        insert_spin(
+            &pool,
+            &NewSpin {
+                spin_id: format!("fase5-num-{seed}-{n}"),
+                number: n,
+                ts: *clock,
+                source: SpinSource::Ws,
+                received_at: *clock + 20,
+                latency_ms: Some(20),
+            },
+        )
+        .expect("insert spin");
+        window.push(n);
+        seed += 1;
+    };
+
+    // Família 1-4-7 persistente (10 giros da mesma família).
+    let family: [u8; 10] = [1, 4, 7, 11, 14, 17, 21, 24, 27, 31];
+    for n in family {
+        push(n, &mut window, &mut clock);
+    }
+
+    let mut losses_cents = 0u64;
+    let mut steps_seen = std::collections::BTreeSet::new();
+    for entry_idx in 1..=3u32 {
+        let will_win = entry_idx == 3;
+        for n in family {
+            push(n, &mut window, &mut clock);
+        }
+
+        let state = State {
+            bankroll_cents: 500_000,
+            exposure_cents: 0,
+            session_pnl_cents: -(losses_cents as i64),
+            remaining_window_ms: 10_000,
+            spins_since_blow: 5,
+            step: 0,
+        };
+        let mut chrono = window.to_recent_vec();
+        chrono.reverse();
+        chrono = chrono[chrono.len().saturating_sub(10)..].to_vec();
+        let (dag_out, _) = monster_core::evaluate_dag_with_history(
+            &format!("fase5-num-entry-{entry_idx}"),
+            &window.to_recent_vec(),
+            &chrono,
+            &matchers,
+            &cfg,
+            &monster_core::GateCtx {
+                state: &state,
+                ladder_steps: &ladder_steps,
+            },
+            0.50,
+        );
+        assert_eq!(dag_out.verdict, Some(Verdict::Place), "entrada {entry_idx}");
+        let plan = dag_out.plan.expect("plano de números");
+
+        // O plano é de PLENOS: 15 números (0, 1, 4, 7 com 4+4+4+3 pockets).
+        assert_eq!(plan.covers.len(), 15, "cluster 1-4-7 + terminal 0 = 15 números");
+        assert!(
+            plan.covers.iter().all(|(c, _)| matches!(c, Cover::Straight(_))),
+            "terminal precisa virar pleno antes de chegar ao executor"
+        );
+        let nums: Vec<u8> = plan.covers.iter().map(|(c, _)| c.numbers()[0]).collect();
+        assert!(nums.contains(&0) && nums.contains(&1) && nums.contains(&4) && nums.contains(&7));
+
+        // Ficha por número segue a escada de números, não a ×3.
+        let nl = NumberLadder::new(15, cfg.base_cents);
+        let expected_stake = nl.stake_cents(plan.ladder_step);
+        assert_eq!(plan.stake_per_cover_cents, expected_stake);
+        assert_eq!(plan.total_cents, 15 * expected_stake);
+        if plan.ladder_step > 1 {
+            assert!(
+                expected_stake < monster_risk::stake_cents(plan.ladder_step, cfg.base_cents),
+                "escada de números não pode crescer ×3 (degrau {})",
+                plan.ladder_step
+            );
+        }
+        steps_seen.insert(plan.ladder_step);
+
+        let fills = place(&pool, &actuator, &plan, &cal, &kill_switch, clock)
+            .expect("place dry-run de números");
+        assert_eq!(fills.preview_cents, plan.total_cents, "preview deve somar os plenos");
+        assert!(!fills.naked);
+
+        // Acerta um número coberto na 3ª entrada; nas outras sai um número fora da cobertura (2).
+        let outcome = if will_win { 11 } else { 2 };
+        let rec = reconcile_spin(
+            &pool,
+            PlayedEntry {
+                strategy_id: &plan.strategy_id,
+                ladder_step: plan.ladder_step,
+                acks: &fills.items,
+            },
+            outcome,
+            &cfg,
+            None,
+            clock + 500,
+        )
+        .expect("reconcile_spin numeros");
+        assert_eq!(rec.won, will_win, "entrada {entry_idx}: resultado divergente");
+
+        if will_win {
+            assert_eq!(rec.next_step, 0, "acerto zera o degrau");
+            // 15 plenos com x cada: acerto paga 35x e os outros 14 custam 14x -> +21x.
+            assert_eq!(rec.expected_delta_cents, 21 * expected_stake as i64);
+            losses_cents = 0;
+        } else {
+            assert_eq!(rec.next_step, plan.ladder_step, "perda avança um degrau");
+            assert_eq!(rec.expected_delta_cents, -(15 * expected_stake as i64));
+            losses_cents = nl.cum_loss_cents(plan.ladder_step);
+        }
+        ladder_steps.insert(rec.strategy_id.clone(), rec.next_step);
+    }
+
+    assert_eq!(
+        steps_seen.iter().copied().collect::<Vec<_>>(),
+        vec![1, 2, 3],
+        "escada de números precisa subir degrau por degrau"
+    );
+    assert_eq!(actuator.cleared_count(), 0, "zero preview-mismatch em números");
+    assert_eq!(orphan_sweep(&pool).expect("orphan_sweep"), 0, "zero órfãos");
 }

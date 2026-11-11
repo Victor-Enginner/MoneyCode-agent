@@ -154,12 +154,20 @@ impl Default for Calibration {
 
 impl Calibration {
     /// Obtém as coordenadas `(x, y)` de uma cobertura.
+    ///
+    /// Pleno e terminal não têm coordenada por número em `calibration.toml`: a casa é
+    /// resolvida no pano pelo sidecar (`straight:N` sai da grade 3×12 derivada das âncoras
+    /// `2to1`). O fallback `(0, 0)` só existe para o sidecar devolver `found:false` e
+    /// responder 409 — aposta nunca sai em coordenada cega.
     pub fn coords(&self, cover: &Cover) -> Result<(i32, i32), ExecError> {
         let key = cover.canonical_key();
-        self.covers
-            .get(&key)
-            .copied()
-            .ok_or(ExecError::MissingCalibration(key))
+        if let Some(p) = self.covers.get(&key) {
+            return Ok(*p);
+        }
+        if matches!(cover, Cover::Straight(_) | Cover::Terminal(_)) {
+            return Ok((0, 0));
+        }
+        Err(ExecError::MissingCalibration(key))
     }
 
     /// Obtém as coordenadas `(x, y)` de uma ficha em centavos.
