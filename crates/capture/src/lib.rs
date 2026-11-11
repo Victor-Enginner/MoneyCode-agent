@@ -340,7 +340,7 @@ impl StreamClient {
     /// Conecta via HTTP em `GET /stream` no sidecar e consome até `max_events` spins válidos.
     pub fn connect_and_consume(&mut self, max_events: Option<usize>) -> Result<usize, CaptureError> {
         let mut stream = TcpStream::connect(&self.addr)?;
-        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+        stream.set_read_timeout(Some(Duration::from_secs(90)))?;
         let req = format!(
             "GET /stream HTTP/1.1\r\nHost: {}\r\nAccept: application/x-ndjson\r\nConnection: keep-alive\r\n\r\n",
             self.addr

@@ -168,10 +168,17 @@ func (h *Hub) handleStream(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	ctx := r.Context()
+	keepalive := time.NewTicker(15 * time.Second)
+	defer keepalive.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-keepalive.C:
+			if _, err := w.Write([]byte("\n")); err != nil {
+				return
+			}
+			flusher.Flush()
 		case payload := <-ch:
 			if _, err := w.Write(payload); err != nil {
 				return
