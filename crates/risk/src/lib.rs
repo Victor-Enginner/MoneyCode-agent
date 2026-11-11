@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::warn;
 
+pub mod mc;
+pub use mc::{run_monte_carlo, McParams, McReport};
+
 /// Probabilidade de perda ao cobrir 2 colunas em roleta single-zero (13/37).
 pub const P_LOSE: f64 = 13.0 / 37.0;
 
@@ -321,6 +324,30 @@ mod tests {
         assert_eq!(
             authorize(&cfg, &st_window),
             Verdict::Skip(Skip::WindowTooShort)
+        );
+    }
+
+    #[test]
+    fn monte_carlo_1h_and_8h_gates_have_p_ruin_below_5_percent() {
+        let params_1h = McParams::default();
+        let report_1h = run_monte_carlo(&params_1h);
+        assert_eq!(report_1h.sessions, 10_000);
+        assert!(
+            report_1h.p_ruin < 0.05,
+            "P(ruína 1h) = {:.4} excede o gate de 5%",
+            report_1h.p_ruin
+        );
+
+        let params_8h = McParams {
+            hours_per_session: 8,
+            ..McParams::default()
+        };
+        let report_8h = run_monte_carlo(&params_8h);
+        assert_eq!(report_8h.sessions, 10_000);
+        assert!(
+            report_8h.p_ruin < 0.05,
+            "P(ruína 8h) = {:.4} excede o gate de 5%",
+            report_8h.p_ruin
         );
     }
 }
