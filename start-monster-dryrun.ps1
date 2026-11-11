@@ -27,9 +27,14 @@ Write-Host "================================================================" -F
 Write-Host " MONSTER (Fases 0-5) - DAG + Risco + Executor --dry-run" -ForegroundColor Cyan
 Write-Host "================================================================" -ForegroundColor Cyan
 
+$ChromeExe = "O:\Archives\Eistein\chromium\chrome.exe"
+if (-not (Test-Path $ChromeExe)) {
+    Write-Error "Chromium dedicado nao encontrado em $ChromeExe"
+}
+
 $CdpAlive = $false
 try {
-    $null = Invoke-RestMethod -Uri "http://127.0.0.1:9222/json/version" -TimeoutSec 1
+    $ver = Invoke-RestMethod -Uri "http://127.0.0.1:9222/json/version" -TimeoutSec 1
     $CdpAlive = $true
 } catch {
     $CdpAlive = $false
@@ -41,16 +46,13 @@ if (-not $CdpAlive) {
         Remove-Item -Force -ErrorAction SilentlyContinue $SingletonLock
     }
 
-    $ChromeCandidates = @(
-        "C:\Program Files\Google\Chrome\Application\chrome.exe",
-        "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
-    )
-    $ChromeExe = $ChromeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
     Start-Process -FilePath $ChromeExe -ArgumentList @(
         "--remote-debugging-port=9222",
         "--user-data-dir=$ProfileDir",
         "--disable-blink-features=AutomationControlled",
+        "--test-type",
+        "--no-first-run",
+        "--no-default-browser-check",
         "--start-maximized",
         $TargetUrl
     )
@@ -75,7 +77,11 @@ if (-not $HealthAlive) {
     Start-Sleep -Seconds 3
 }
 
-Write-Host "[MONSTER] Abrindo painel FUI vivo em http://127.0.0.1:8791 e iniciando monster-core (--dry-run)..." -ForegroundColor Yellow
-Start-Process "http://127.0.0.1:8791"
+Write-Host "[MONSTER] Abrindo painel FUI em modo App Dedicado (http://127.0.0.1:8791) e iniciando monster-core (--dry-run)..." -ForegroundColor Yellow
+Start-Process -FilePath $ChromeExe -ArgumentList @(
+    "--user-data-dir=$ProfileDir",
+    "--app=http://127.0.0.1:8791",
+    "--window-size=1440,900"
+)
 Set-Location $RootDir
 cargo run --offline -p monster-core -- --dry-run

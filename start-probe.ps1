@@ -38,20 +38,18 @@ if ($CdpAlive) {
         Remove-Item -Force -ErrorAction SilentlyContinue $SingletonLock
     }
 
-    $ChromeCandidates = @(
-        "C:\Program Files\Google\Chrome\Application\chrome.exe",
-        "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
-    )
-    $ChromeExe = $ChromeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if (-not $ChromeExe) {
-        Write-Error "Google Chrome nao encontrado nos caminhos padrao."
+    $ChromeExe = "O:\Archives\Eistein\chromium\chrome.exe"
+    if (-not (Test-Path $ChromeExe)) {
+        Write-Error "Chromium dedicado nao encontrado em $ChromeExe"
     }
 
     Start-Process -FilePath $ChromeExe -ArgumentList @(
         "--remote-debugging-port=9222",
         "--user-data-dir=$ProfileDir",
         "--disable-blink-features=AutomationControlled",
+        "--test-type",
+        "--no-first-run",
+        "--no-default-browser-check",
         "--start-maximized",
         $TargetUrl
     )
