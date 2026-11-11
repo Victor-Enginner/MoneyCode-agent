@@ -198,6 +198,19 @@ pub struct DagOutput {
     pub elapsed_us: u64,
 }
 
+/// Degrau de escada por estratégia (§5.3: `ladder_state` é chaveado por `strategy_id`).
+/// A escada é individual: um degrau global fazia a perda da coluna entrar como degrau 2 da dúzia.
+pub type LadderSteps = std::collections::HashMap<String, u8>;
+
+/// Contexto do gate de risco: estado instantâneo da mesa + degrau de cada estratégia (§6 e §8).
+#[derive(Debug, Clone, Copy)]
+pub struct GateCtx<'a> {
+    /// Banca, P&L da sessão, janela restante e cooldown.
+    pub state: &'a State,
+    /// Degrau persistido em `ladder_state` por `strategy_id`.
+    pub ladder_steps: &'a LadderSteps,
+}
+
 /// Executa o pipeline completo do DAG (§8) combinado com validação Walk-Forward histórica (`HistoryBuffer`):
 /// Se `chronological_history.len() >= 25`, simula cada candidato nos giros passados da mesa e bloqueia
 /// (`confidence = 0.0`) qualquer padrão que esteja com P&L negativo ou estouro recente na mesa atual,
@@ -208,9 +221,11 @@ pub fn evaluate_dag_with_history(
     chronological_history: &[u8],
     matchers: &[Arc<dyn Matcher>],
     cfg: &Cfg,
-    state: &State,
+    gate: &GateCtx<'_>,
     min_confidence: f64,
 ) -> (DagOutput, Option<PatternHistoryStats>) {
+    let state = gate.state;
+    let ladder_steps = gate.ladder_steps;
     let start = Instant::now();
     let regime = classify(window);
     let raw_aggregates = fan_in(window, matchers);
@@ -275,9 +290,18 @@ pub fn evaluate_dag_with_history(
         }
     }
 
-    let verdict = authorize(cfg, state);
+    // O degrau é o da estratégia vencedora — nunca o de outra que perdeu antes (§6 e §9).
+    let step = match ladder_steps.get(&winner.strategy_id).copied() {
+        Some(step) => step,
+        // Escada carregada: estratégia sem linha está no degrau 1 e não herda o degrau de outra.
+        None if !ladder_steps.is_empty() => 0,
+        // Escada não carregada (chamador puro/teste): respeita o degrau do estado.
+        None => state.step,
+    };
+    let strategy_state = State { step, ..*state };
+    let verdict = authorize(cfg, &strategy_state);
     let plan = if verdict == Verdict::Place {
-        let ladder_step = state.step.saturating_add(1);
+        let ladder_step = step.saturating_add(1);
         let stake_per_cover_cents = stake_cents(ladder_step, cfg.base_cents);
         let covers: Vec<(Cover, u64)> = winner
             .cover

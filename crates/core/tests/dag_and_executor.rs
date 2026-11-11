@@ -6,6 +6,7 @@
 
 use monster_core::{
     boot_reconcile, evaluate_dag, place, reconcile_spin, Calibration, DryRunActuator, KillSwitch,
+    PlayedEntry,
     Window30,
 };
 use monster_risk::{run_monte_carlo, Cfg, McParams, State, Verdict};
@@ -94,9 +95,12 @@ fn integration_sqlite_virtual_clock_replay_and_200_dryrun_entries() {
 
         let rec = reconcile_spin(
             &pool,
-            &plan.strategy_id,
+            PlayedEntry {
+                strategy_id: &plan.strategy_id,
+                ladder_step: plan.ladder_step,
+                acks: &fills.items,
+            },
             20, // Coluna 2 e Dúzia 2 (vencedora contra streak da Coluna 1 / Dúzia 1)
-            &fills.items,
             &cfg,
             Some(plan.stake_per_cover_cents as i64),
             virtual_clock_ms + 500,

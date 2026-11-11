@@ -26,13 +26,15 @@ pub use brain::{
 };
 pub use dag::{
     classify, compute_ev_cents_two_covers, evaluate_dag, evaluate_dag_with_history, fan_in,
-    Aggregate, DagOutput, Plan, Regime, Window30, WINDOW_CAPACITY,
+    Aggregate, DagOutput, GateCtx, LadderSteps, Plan, Regime, Window30, WINDOW_CAPACITY,
 };
 pub use executor::{
     place, Calibration, CdpActuator, CoverAck, DryRunActuator, ExecError, ExecutionMode, Fills,
     KillSwitch, LiveHttpActuator, LiveTableTelemetry,
 };
-pub use reconciler::{boot_reconcile, reconcile_spin, BootReconcileReport, ReconcileReport};
+pub use reconciler::{
+    boot_reconcile, reconcile_spin, BootReconcileReport, PlayedEntry, ReconcileReport,
+};
 pub use timeline_sync::{
     count_new_spins, has_recent_number, load_chronological_history, read_newest_numbers,
     sanitize_strip, sync_strip_to_db, StripSyncReport, MAX_STRIP,
@@ -150,9 +152,12 @@ mod tests {
 
             let rec = reconcile_spin(
                 &pool,
-                &plan.strategy_id,
+                PlayedEntry {
+                    strategy_id: &plan.strategy_id,
+                    ladder_step: plan.ladder_step,
+                    acks: &fills.items,
+                },
                 19, // Coluna 2 vence (Col(2) e Col(3) cobertas)
-                &fills.items,
                 &cfg,
                 Some(plan.stake_per_cover_cents as i64),
                 now_ms + 500,
@@ -233,5 +238,118 @@ mod tests {
             .expect_err("second entry for same (strategy_id, spin_id) must be blocked");
         assert!(matches!(dup_err, ExecError::AlreadyEntered { .. }));
         assert_eq!(actuator.confirmed_count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod ladder_isolation_tests {
+    use super::*;
+    use monster_risk::{stake_cents, Cfg, State};
+    use monster_strategy_native::default_matchers;
+
+    fn estado_neutro() -> State {
+        State {
+            bankroll_cents: 45_000,
+            exposure_cents: 0,
+            session_pnl_cents: 0,
+            remaining_window_ms: 9000,
+            spins_since_blow: 10,
+            step: 0,
+        }
+    }
+
+    /// O degrau pertence à estratégia: a perda de um padrão não pode aumentar a primeira
+    /// entrada de outro (foi assim que a escada entrou em degrau 2 sem nenhuma perda dele).
+    #[test]
+    fn degrau_da_escada_pertence_a_estrategia_vencedora() {
+        let matchers = default_matchers();
+        let cfg = Cfg::default();
+        let state = estado_neutro();
+        let window = [2u8, 5, 8, 11, 14, 19, 25, 30, 1, 4, 7, 10, 15, 22, 31, 33, 0, 12, 18, 27];
+
+        let (out, _) = evaluate_dag_with_history(
+            "spin-isolado-1",
+            &window,
+            &[],
+            &matchers,
+            &cfg,
+            &GateCtx {
+                state: &state,
+                ladder_steps: &LadderSteps::new(),
+            },
+            0.50,
+        );
+        let base = out.plan.expect("a janela de referência dispara entrada");
+        assert_eq!(base.ladder_step, 1, "primeira entrada do padrão é degrau 1");
+        assert_eq!(base.stake_per_cover_cents, stake_cents(1, cfg.base_cents));
+
+        // Outra estratégia caiu 2 degraus: não pode contaminar a entrada da vencedora.
+        let mut steps = LadderSteps::new();
+        steps.insert("quebra_permanencia_duzia".to_string(), 2);
+        steps.insert("setor_vies".to_string(), 4);
+        let (out2, _) = evaluate_dag_with_history(
+            "spin-isolado-2",
+            &window,
+            &[],
+            &matchers,
+            &cfg,
+            &GateCtx {
+                state: &state,
+                ladder_steps: &steps,
+            },
+            0.50,
+        );
+        let outra = out2.plan.expect("mesma janela, mesma entrada");
+        assert_eq!(
+            outra.ladder_step, 1,
+            "degrau de outra estratégia nunca é aplicado nesta entrada"
+        );
+
+        // A própria estratégia no degrau 2 entra no 3, com a ficha ×3 da escada (§6).
+        let mut propria = LadderSteps::new();
+        propria.insert(base.strategy_id.clone(), 2);
+        let (out3, _) = evaluate_dag_with_history(
+            "spin-isolado-3",
+            &window,
+            &[],
+            &matchers,
+            &cfg,
+            &GateCtx {
+                state: &state,
+                ladder_steps: &propria,
+            },
+            0.50,
+        );
+        let terceiro = out3.plan.expect("entrada da própria estratégia");
+        assert_eq!(terceiro.ladder_step, 3);
+        assert_eq!(terceiro.total_cents, 180);
+
+        // Com a escada carregada, um `step` global alto (resíduo de outra estratégia) é ignorado.
+        let carregado = State { step: 3, ..state };
+        let mut apenas_outra = LadderSteps::new();
+        apenas_outra.insert("quebra_permanencia_duzia".to_string(), 2);
+        let (out4, _) = evaluate_dag_with_history(
+            "spin-isolado-4",
+            &window,
+            &[],
+            &matchers,
+            &cfg,
+            &GateCtx {
+                state: &carregado,
+                ladder_steps: &apenas_outra,
+            },
+            0.50,
+        );
+        assert_eq!(
+            out4.plan.expect("entrada").ladder_step,
+            1,
+            "degrau global residual não pode empurrar a entrada para degrau 4"
+        );
+        assert_eq!(
+            terceiro.stake_per_cover_cents,
+            stake_cents(3, cfg.base_cents),
+            "degrau 3 = 90¢ por cobertura"
+        );
+        assert_eq!(terceiro.total_cents, 180);
     }
 }

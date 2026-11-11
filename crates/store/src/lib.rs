@@ -359,6 +359,25 @@ pub fn upsert_ladder_state(
     .map_err(StoreError::from_sqlx)
 }
 
+/// Lê o degrau de TODAS as estratégias com escada registrada (`ladder_state`).
+/// A escada é por estratégia (§5.3): sem isso o processo reiniciava no degrau 0 e a
+/// primeira entrada de cada padrão herdava o degrau de outra estratégia.
+pub fn all_ladder_steps(pool: &SqlitePool) -> Result<Vec<(String, u8)>, StoreError> {
+    pool.with_conn(|conn| {
+        let mut stmt = conn.prepare("SELECT strategy_id, step FROM ladder_state")?;
+        let rows = stmt.query_map([], |r| {
+            let step = u8::try_from(r.get::<_, i64>(1)?.max(0)).unwrap_or(0);
+            Ok((r.get::<_, String>(0)?, step))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    })
+    .map_err(StoreError::from_sqlx)
+}
+
 /// Lê o estado da escada (`ladder_state`) de uma estratégia, retornando degrau 0 caso ainda não exista.
 pub fn get_ladder_state(pool: &SqlitePool, strategy_id: &str) -> Result<LadderRow, StoreError> {
     pool.with_conn(|conn| {

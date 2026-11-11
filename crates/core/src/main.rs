@@ -8,13 +8,13 @@ use monster_core::{
     boot_reconcile, build_brain_snapshot, evaluate_all_matchers_history,
     evaluate_dag_with_history, has_recent_number, load_chronological_history, place, reconcile_spin,
     sync_strip_to_db, write_gbrain_file, Calibration, CdpActuator, CoverAck, DryRunActuator,
-    ExecutionMode, HistoryBuffer, KillSwitch, LiveHttpActuator, Plan, Window30, HISTORY_CAPACITY,
-    WINDOW_CAPACITY,
+    ExecutionMode, GateCtx, HistoryBuffer, KillSwitch, LadderSteps, LiveHttpActuator, Plan,
+    PlayedEntry, Window30, HISTORY_CAPACITY, WINDOW_CAPACITY,
 };
 use monster_risk::{run_monte_carlo, Cfg, McParams, State, Verdict};
 use monster_store::{
-    init_pool, insert_intent, insert_spin, IntentDecision, NewIntent, NewSpin, SpinSource,
-    SqlitePool,
+    all_ladder_steps, init_pool, insert_intent, insert_spin, IntentDecision, NewIntent, NewSpin,
+    SpinSource, SqlitePool,
 };
 use monster_strategy_native::default_matchers;
 use monster_ui::FuiController;
@@ -388,7 +388,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut spins_since_blow = cfg.cooldown_spins;
-    let mut current_step = 0u8;
+    // A escada vive em `ladder_state`, uma linha por estratégia (§5.3). Carrega o estado persistido
+    // no boot para o reinício retomar o degrau real em vez de voltar ao degrau 1.
+    let mut ladder_steps: LadderSteps = match all_ladder_steps(&pool) {
+        Ok(rows) => rows.into_iter().collect(),
+        Err(err) => {
+            eprintln!("[BOOT] falha ao ler ladder_state ({err}) — escadas começam no degrau 1");
+            LadderSteps::new()
+        }
+    };
     let mut pending_entry: Option<(Plan, Vec<CoverAck>)> = None;
     let mut last_entry_round = String::new();
     let mut last_entry_at_ms: i64 = 0;
@@ -439,12 +447,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Reconcilia entrada pendente do spin anterior, se houver (§9).
-        if let Some((prev_plan, prev_acks)) = pending_entry.take() {
+        // Um evento duplicado da MESMA rodada (WS + fita) não pode mexer na escada: sem esta
+        // guarda a perda era contada duas vezes e a entrada seguinte pulava um degrau.
+        if already_recorded {
+            if pending_entry.is_some() {
+                println!(
+                    "[DEDUPE] rodada repetida (num={}) — reconciliação da entrada pendente ignorada",
+                    ev.number
+                );
+            }
+        } else if let Some((prev_plan, prev_acks)) = pending_entry.take() {
             match reconcile_spin(
                 &pool,
-                &prev_plan.strategy_id,
+                PlayedEntry {
+                    strategy_id: &prev_plan.strategy_id,
+                    ladder_step: prev_plan.ladder_step,
+                    acks: &prev_acks,
+                },
                 ev.number,
-                &prev_acks,
                 &cfg,
                 None,
                 now_ms,
@@ -454,20 +474,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         shared_bankroll_cents.fetch_add(rep.expected_delta_cents, Ordering::Relaxed);
                         shared_pnl_cents.fetch_add(rep.expected_delta_cents, Ordering::Relaxed);
                     }
-                    current_step = rep.next_step;
+                    ladder_steps.insert(rep.strategy_id.clone(), rep.next_step);
                     if rep.ladder_blown {
                         spins_since_blow = 0;
                     } else {
                         spins_since_blow = spins_since_blow.saturating_add(1);
                     }
                     println!(
-                        "[RECONCILE] spin={} num={} | won={} delta={}¢ | pnl={}¢ | prox_degrau={}",
+                        "[RECONCILE] spin={} num={} | estrategia={} | degrau_jogado={} | won={} delta={}¢ | pnl={}¢ | proximo_degrau={}",
                         ev.spin_id,
                         ev.number,
+                        rep.strategy_id,
+                        prev_plan.ladder_step,
                         rep.won,
                         rep.expected_delta_cents,
                         shared_pnl_cents.load(Ordering::Relaxed),
-                        current_step
+                        rep.next_step
                     );
                 }
                 Err(err) => {
@@ -500,7 +522,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             session_pnl_cents: cur_pnl,
             remaining_window_ms: if window_open { 9_000 } else { 0 },
             spins_since_blow,
-            step: current_step,
+            // Neutro: o DAG usa o degrau da própria estratégia vencedora (`ladder_steps`).
+            step: 0,
         };
 
         let (dag_out, best_hist) = evaluate_dag_with_history(
@@ -509,7 +532,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &chrono_hist,
             &matchers,
             &cfg,
-            &st,
+            &GateCtx {
+                state: &st,
+                ladder_steps: &ladder_steps,
+            },
             0.55,
         );
         println!(
@@ -613,7 +639,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ev_cents: 0,
                         decision: IntentDecision::Skipped,
                         reason: Some(pre_reason),
-                        ladder_step: current_step,
+                        ladder_step: ladder_steps.get(&pre.strategy_id).copied().unwrap_or(0),
                         stake_cents: 0,
                         created_at: now_ms,
                     },
