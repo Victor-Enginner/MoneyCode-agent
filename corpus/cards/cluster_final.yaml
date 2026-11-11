@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: Apache-2.0
+# Cartão de estratégia compilado (corpus/cards). Fonte única para o matcher nativo,
+# o plugin Python e o gate de backtest. Sem cartão não há entrada em número.
+
+id: cluster_final
+version: 1
+status: dry-run-authorized      # live só depois dos gates de backtest abaixo
+owner: D-INTEL
+matcher: crates/strategy-native/src/lib.rs::ClusterFinal
+plugin: plugins/cluster_final/strategy.py
+
+# Hipótese: a mesa troca de família de terminais em blocos longos, não a cada giro.
+# Enquanto a família dona continua entregando, a cobertura de número tem P(acerto)
+# acima da frequência histórica da própria cobertura. Isso é uma hipótese de
+# persistência (changepoint raro), não de "número quente".
+hypothesis: |
+  O conjunto de finais de uma família (1-4-7, 2-5-8, 3-6-9) tende a permanecer
+  sobre-representado por blocos de dezenas de giros, e o final 0 aparece dentro de
+  qualquer bloco. A entrada é momentum na família ativa, nunca contra ela.
+
+families:
+  - finals: [1, 4, 7]
+  - finals: [2, 5, 8]
+  - finals: [3, 6, 9]
+wildcard:
+  final: 0
+  numbers: [0, 10, 20, 30]
+  rule: "o 0 não pertence a família nenhuma: entra em toda cobertura e não quebra o streak"
+
+cover:
+  type: terminal_set
+  include_zero: true
+  numbers_at_default: 15        # Terminal(0)=4 + Terminal(f)=4+4+3
+  pockets: [0, 1, 4, 7, 10, 11, 14, 17, 20, 21, 24, 27, 30, 31, 34]
+  p_hit_uniform: 0.4054         # 15/37
+  expansion: "Terminal(t) -> Straight(n) para cada n com n % 10 == t"
+
+entry:
+  window: 20
+  min_streak: 4                 # contando 0 como continuação da família
+  min_share: 0.55               # dominância na janela, sobre spins não-zero
+  regime_penalty: 0.85          # Permanence penaliza matcher com "cluster" no id (§8)
+  confidence: "0.55 + 0.08 * (streak - min_streak), teto 0.95"
+
+staking:
+  mode: number_ladder
+  rule: "x = ceil((D + G) / (36 - k)) arredondado à ficha mínima de 10¢"
+  k: 15
+  implementation: crates/risk::NumberLadder
+  forbidden: "escada ×3 de duas colunas (stake_cents) — superaposta a exposição em número"
+  exposures_cents_default:   # G = 10¢, k = 15, ficha mínima 10¢
+    step_1: 150
+    step_2: 150
+    step_3: 300
+    step_4: 450
+    step_5: 900
+
+exit:
+  win: "degrau zera (ladder_state.step = 0)"
+  loss: "avança exatamente um degrau"
+  blow: "no último degrau a escada reinicia e a sessão marca estouro"
+
+edge:
+  house_edge_per_unit: -0.0270   # 1/37 em qualquer cobertura de roleta single-zero
+  note: "a estratégia entrega disciplina e throughput, não EV positivo"
+
+backtest:
+  min_spins: 500
+  required_metrics:
+    - "taxa de acerto observada da cobertura vs 15/37 (IC 95%)"
+    - "chi² dos 10 finais (df=9, crítico 16.92 a p=0.05)"
+    - "duração média dos blocos por família (troca de regime)"
+    - "EV/h e drawdown p95 com NumberLadder"
+  gates:
+    - "chi² p >= 0.05 em 500 giros: sem desvio de família — não operar só com o streak"
+    - "P(ruína 8h) < 5% no Monte Carlo de 10.000 sessões (§13)"
+    - "zero cover_mismatch e zero órfão no replay de 500 giros"
+
+failure_modes:
+  - "troca de família no meio da escada: perda do degrau inteiro (15 fichas)"
+  - "grade do pano incompleta: straight:N não resolve e o sidecar responde 409"
+  - "limite de mesa por casa: x > limite aborta o degrau (TableLimit)"
+
+sources:
+  - "docs/numeros-e-terminais.md"
+  - "docs/adr/0003-cobertura-de-numero.md"

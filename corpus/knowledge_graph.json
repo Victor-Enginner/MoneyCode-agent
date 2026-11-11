@@ -14,8 +14,8 @@
       "id": "crate:monster-risk",
       "kind": "rust_crate",
       "path": "crates/risk/src/lib.rs",
-      "exports": ["stake_cents", "cum_loss_cents", "authorize", "decompose", "run_monte_carlo"],
-      "invariants": ["integer_cents_only", "ladder_x3_growth", "p_ruin_lt_0_05"]
+      "exports": ["stake_cents", "cum_loss_cents", "authorize", "decompose", "run_monte_carlo", "NumberLadder", "authorize_numbers"],
+      "invariants": ["integer_cents_only", "ladder_x3_growth_2to1_only", "number_ladder_x_eq_DG_over_36_minus_k", "p_ruin_lt_0_05"]
     },
     {
       "id": "crate:monster-strategy-native",
@@ -29,6 +29,7 @@
         { "id": "quebra_alto_baixo_6x", "pre_alert": 5, "entry_streak": 6, "cover_type": "low_high" },
         { "id": "quebra_par_impar_6x", "pre_alert": 5, "entry_streak": 6, "cover_type": "even_odd" },
         { "id": "cluster_terminal", "pre_alert": 3, "entry_streak": 4, "cover_type": "col" },
+        { "id": "cluster_final", "window": 20, "min_streak": 4, "min_share": 0.55, "include_zero": true, "cover_type": "terminal", "card": "corpus/cards/cluster_final.yaml" },
         { "id": "setor_vies", "min_window": 20, "bias_threshold": 0.55, "cover_type": "col" },
         { "id": "fibonacci_lag", "lags": [0, 1, 2, 4], "cover_type": "col" }
       ]

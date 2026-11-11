@@ -102,6 +102,14 @@ impl Cover {
         }
     }
 
+    /// Todos os números `0..=36` que esta cobertura cobre, em ordem crescente.
+    ///
+    /// É a base do cálculo de exposição em cobertura de número: `Terminal(0)` devolve
+    /// `[0, 10, 20, 30]` (4 pockets), `Terminal(7)` devolve `[7, 17, 27]` (3 pockets).
+    pub fn numbers(self) -> Vec<u8> {
+        (0..=36u8).filter(|&n| self.matches_number(n)).collect()
+    }
+
     /// Verifica se o número sorteado (`0..=36`) vence esta cobertura.
     pub const fn matches_number(self, number: u8) -> bool {
         if number > 36 {
@@ -117,7 +125,8 @@ impl Cover {
             Self::Even => number != 0 && number % 2 == 0,
             Self::Odd => number != 0 && number % 2 != 0,
             Self::Straight(n) => number == n,
-            Self::Terminal(t) => number != 0 && (number % 10) == t,
+            // Terminal 0 cobre 0, 10, 20 e 30: o `0` É o final 0, nunca pode ser excluído.
+            Self::Terminal(t) => (number % 10) == t && t <= 9,
         }
     }
 }
@@ -628,6 +637,176 @@ impl Matcher for QuebraParImpar {
     }
 }
 
+/// Família de terminais (`cavalo`) observada na timeline: `1-4-7`, `2-5-8` e `3-6-9`.
+///
+/// A partição vem do resto do dígito por 3, que é como as famílias se separam na grade
+/// (`1,4,7` são as colunas 1/2/3 da mesma classe de resto). O final `0` não pertence a
+/// nenhuma família: ele é **curinga** e entra em todas as coberturas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FinalFamily {
+    /// Finais `1, 4, 7`.
+    OneFourSeven,
+    /// Finais `2, 5, 8`.
+    TwoFiveEight,
+    /// Finais `3, 6, 9`.
+    ThreeSixNine,
+}
+
+impl FinalFamily {
+    /// Os três finais da família, em ordem crescente.
+    pub const fn finals(self) -> [u8; 3] {
+        match self {
+            Self::OneFourSeven => [1, 4, 7],
+            Self::TwoFiveEight => [2, 5, 8],
+            Self::ThreeSixNine => [3, 6, 9],
+        }
+    }
+
+    /// Família do número em `0..=36`, ou `None` para `0` (curinga) e fora de faixa.
+    pub const fn of_number(n: u8) -> Option<Self> {
+        if n > 36 || n % 10 == 0 {
+            return None;
+        }
+        Some(match (n % 10) % 3 {
+            1 => Self::OneFourSeven,
+            2 => Self::TwoFiveEight,
+            _ => Self::ThreeSixNine,
+        })
+    }
+
+    /// Se o número pertence à família (o `0` nunca pertence: ele é curinga).
+    pub const fn contains(self, n: u8) -> bool {
+        matches!(Self::of_number(n), Some(f) if f as u8 == self as u8)
+    }
+
+    /// Rótulo curto para a FUI e para o stream de decisões.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::OneFourSeven => "1-4-7",
+            Self::TwoFiveEight => "2-5-8",
+            Self::ThreeSixNine => "3-6-9",
+        }
+    }
+}
+
+/// `matcher.cluster_final`: momentum de família de terminais (`1-4-7` / `2-5-8` / `3-6-9`).
+///
+/// A mesa fica horas numa família e só troca quando para de entregá-la; por isso a entrada
+/// exige **persistência** (streak) e **dominância na janela** (share), e não um hit isolado.
+/// A cobertura é o terminal `0` (curinga) mais os três finais da família ativa, sempre em
+/// números plenos — nunca em coluna, que é o erro do `cluster_terminal`.
+#[derive(Debug, Clone, Copy)]
+pub struct ClusterFinal {
+    /// Janela usada para medir dominância.
+    pub window: usize,
+    /// Persistência mínima (spins seguidos da família, contando `0` como continuação).
+    pub min_streak: usize,
+    /// Fração mínima dos spins não-zero da janela que a família precisa ter.
+    pub min_share: f64,
+    /// Se inclui `Terminal(0)` em toda entrada (default do operador: sim).
+    pub include_zero: bool,
+}
+
+impl Default for ClusterFinal {
+    fn default() -> Self {
+        Self {
+            window: 20,
+            min_streak: 4,
+            min_share: 0.55,
+            include_zero: true,
+        }
+    }
+}
+
+impl Matcher for ClusterFinal {
+    fn id(&self) -> &'static str {
+        "cluster_final"
+    }
+
+    fn evaluate(&self, w: &[u8]) -> Option<BetIntent> {
+        let latest = *w.first()?;
+        if latest > 36 || w.len() < self.min_streak {
+            return None;
+        }
+
+        let family = w
+            .iter()
+            .copied()
+            .find_map(FinalFamily::of_number)?;
+
+        // `0` é curinga: não quebra a sequência da família dona da mesa.
+        let streak = w
+            .iter()
+            .copied()
+            .take_while(|&n| n <= 36 && (n % 10 == 0 || family.contains(n)))
+            .count();
+        if streak < self.min_streak {
+            return None;
+        }
+
+        let slice = &w[..w.len().min(self.window)];
+        let mut hits = 0usize;
+        let mut non_zero = 0usize;
+        for &n in slice {
+            if n == 0 || n > 36 {
+                continue;
+            }
+            non_zero += 1;
+            if family.contains(n) {
+                hits += 1;
+            }
+        }
+        if non_zero == 0 {
+            return None;
+        }
+        let share = hits as f64 / non_zero as f64;
+        if share < self.min_share {
+            return None;
+        }
+
+        let mut cover = Vec::with_capacity(4);
+        if self.include_zero {
+            cover.push(Cover::Terminal(0));
+        }
+        for f in family.finals() {
+            cover.push(Cover::Terminal(f));
+        }
+
+        let confidence = (0.55 + 0.08 * ((streak - self.min_streak) as f64)).min(0.95);
+        Some(BetIntent {
+            v: 1,
+            strategy_id: self.id().to_string(),
+            cover,
+            confidence,
+        })
+    }
+}
+
+/// Números distintos cobertos por uma lista de coberturas de número (`Straight`/`Terminal`).
+///
+/// Devolve `None` quando a lista mistura número com coluna/dúzia/cor: são geometrias de
+/// pagamento diferentes e o plano precisa ser compilado por um caminho só (§6 vs `36 − k`).
+pub fn number_coverage(covers: &[Cover]) -> Option<Vec<u8>> {
+    if covers.is_empty() {
+        return None;
+    }
+    let mut numbers = Vec::new();
+    for c in covers {
+        match c {
+            Cover::Straight(_) | Cover::Terminal(_) => {
+                for n in c.numbers() {
+                    if !numbers.contains(&n) {
+                        numbers.push(n);
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+    numbers.sort_unstable();
+    Some(numbers)
+}
+
 /// Constrói o conjunto padrão completo de matchers nativos do projeto MONSTER:
 /// - Colunas (`2 to 1`) e Dúzias (`1st/2nd/3rd 12`): pré-alerta em 3x (`0.50`) e entrada imediata a partir de 4x (`>= 0.66`)
 /// - Vermelho/Preto, Baixo/Alto e Par/Ímpar: pré-alerta em 5x (`0.50`) e entrada imediata a partir de 6x (`>= 0.68`)
@@ -643,6 +822,7 @@ pub fn default_matchers() -> Vec<Arc<dyn Matcher>> {
         Arc::new(SetorViesDuzia::default()),
         Arc::new(FibonacciLag),
         Arc::new(ClusterTerminal::default()),
+        Arc::new(ClusterFinal::default()),
     ]
 }
 
@@ -672,6 +852,89 @@ mod tests {
 
         // Streak de 7 excede max=6: não dispara
         assert!(matcher.evaluate(&[2, 5, 8, 11, 14, 17, 20, 1]).is_none());
+    }
+
+    #[test]
+    fn terminal_zero_covers_zero_ten_twenty_thirty() {
+        let t0 = Cover::Terminal(0);
+        assert_eq!(t0.numbers(), vec![0, 10, 20, 30]);
+        assert!(t0.matches_number(0), "o 0 é o próprio final 0");
+        assert_eq!(Cover::Terminal(7).numbers(), vec![7, 17, 27]);
+        assert_eq!(Cover::Terminal(1).numbers(), vec![1, 11, 21, 31]);
+    }
+
+    #[test]
+    fn final_family_partition_matches_operator_clusters() {
+        assert_eq!(FinalFamily::of_number(1), Some(FinalFamily::OneFourSeven));
+        assert_eq!(FinalFamily::of_number(4), Some(FinalFamily::OneFourSeven));
+        assert_eq!(FinalFamily::of_number(7), Some(FinalFamily::OneFourSeven));
+        assert_eq!(FinalFamily::of_number(32), Some(FinalFamily::TwoFiveEight));
+        assert_eq!(FinalFamily::of_number(9), Some(FinalFamily::ThreeSixNine));
+        assert_eq!(FinalFamily::of_number(36), Some(FinalFamily::ThreeSixNine));
+        // 0 e todo número terminado em 0 são curingas, não pertencem a família.
+        assert_eq!(FinalFamily::of_number(0), None);
+        assert_eq!(FinalFamily::of_number(30), None);
+        assert_eq!(FinalFamily::of_number(37), None);
+    }
+
+    #[test]
+    fn cluster_final_triggers_on_family_persistence_and_covers_numbers_not_columns() {
+        let m = ClusterFinal::default();
+        // 1, 7, 4 da família 1-4-7 com um 20 (final 0) no meio: o 0 não quebra a família.
+        // Janela real de 20 spins da timeline, com 1-4-7 dominando.
+        let w = [
+            1, 4, 0, 7, 20, 13, 22, 1, 4, 7, 31, 16, 25, 7, 4, 1, 10, 28, 7, 4,
+        ];
+        let intent = m
+            .evaluate(&w)
+            .expect("cluster 1-4-7 persistente deve disparar");
+        assert_eq!(intent.strategy_id, "cluster_final");
+        assert_eq!(
+            intent.cover,
+            vec![
+                Cover::Terminal(0),
+                Cover::Terminal(1),
+                Cover::Terminal(4),
+                Cover::Terminal(7)
+            ]
+        );
+        // A cobertura é de NÚMEROS: nada de coluna no cover.
+        assert!(intent.cover.iter().all(|c| matches!(c, Cover::Terminal(_))));
+        assert_eq!(number_coverage(&intent.cover).map(|v| v.len()), Some(15));
+        // streak = 5 (1,4,0,7,20) -> 0.55 + 0.08 * (5-4)
+        assert!((intent.confidence - 0.63).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cluster_final_ignores_alternating_families() {
+        let m = ClusterFinal::default();
+        // Troca de família a cada spin: nenhuma recorrência para seguir.
+        assert!(m.evaluate(&[1, 2, 7, 8, 4, 5]).is_none());
+        // Persistência curta (3, sem curinga) não basta.
+        assert!(m.evaluate(&[1, 4, 7, 32, 22, 13]).is_none());
+    }
+
+    #[test]
+    fn cluster_final_requires_dominance_in_the_window() {
+        let m = ClusterFinal::default();
+        // 4 seguidos de 1-4-7, mas a janela de 20 é dominada por 2-5-8 (share baixo).
+        let w = [
+            1, 4, 7, 11, 2, 5, 8, 20, 2, 5, 8, 29, 2, 5, 8, 20, 2, 5, 8, 32,
+        ];
+        assert!(m.evaluate(&w).is_none());
+    }
+
+    #[test]
+    fn number_coverage_rejects_mixed_geometry_and_dedupes() {
+        assert_eq!(number_coverage(&[]), None);
+        assert_eq!(
+            number_coverage(&[Cover::Col(1), Cover::Terminal(3)]),
+            None,
+            "coluna + terminal é geometria de pagamento mista"
+        );
+        let dupes = number_coverage(&[Cover::Terminal(1), Cover::Straight(11)])
+            .expect("terminal 1 + pleno 11");
+        assert_eq!(dupes, vec![1, 11, 21, 31]);
     }
 
     #[test]
