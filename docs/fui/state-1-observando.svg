@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900">
+  <rect width="1440" height="900" fill="#07080c"/>
+  <!-- PAINEL A · BARRA DE ESTADO (36px fixo) -->
+  <rect x="8" y="8" width="1424" height="36" fill="#0d1018" stroke="#1d2433"/>
+  <rect x="16" y="14" width="140" height="24" fill="#0d1018" stroke="#22c55e"/>
+  <text x="26" y="30" fill="#22c55e" font-family="ui-monospace,Consolas,monospace" font-size="11" font-weight="600">● OBSERVANDO</text>
+  <text x="172" y="30" fill="#5f6b80" font-family="Inter,sans-serif" font-size="9">SESSÃO</text>
+  <text x="218" y="30" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="12" font-weight="600">00:13:10</text>
+  <text x="292" y="30" fill="#5f6b80" font-family="Inter,sans-serif" font-size="9">BANCA</text>
+  <text x="336" y="30" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="12" font-weight="600">R$ 70,58</text>
+  <text x="424" y="30" fill="#5f6b80" font-family="Inter,sans-serif" font-size="9">P&amp;L</text>
+  <text x="456" y="30" fill="#22d3ee" font-family="ui-monospace,Consolas,monospace" font-size="12" font-weight="600">+R$ 0,30</text>
+  <text x="544" y="30" fill="#5f6b80" font-family="Inter,sans-serif" font-size="9">DEGRAU</text>
+  <text x="594" y="30" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="12" font-weight="600">0/4</text>
+  <!-- 4 LEDs -->
+  <rect x="1140" y="22" width="8" height="8" fill="#22c55e"/><text x="1152" y="30" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="10">WS</text>
+  <rect x="1184" y="22" width="8" height="8" fill="#22c55e"/><text x="1196" y="30" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="10">MO</text>
+  <rect x="1228" y="22" width="8" height="8" fill="#22c55e"/><text x="1240" y="30" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="10">EXEC</text>
+  <rect x="1280" y="22" width="8" height="8" fill="#22c55e"/><text x="1292" y="30" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="10">DB</text>
+  <!-- Botão KILL sempre em x=1340, y=14 -->
+  <rect x="1340" y="14" width="84" height="24" fill="#ef4444" stroke="#ef4444"/>
+  <text x="1361" y="30" fill="#ffffff" font-family="ui-monospace,Consolas,monospace" font-size="11" font-weight="600">■ KILL</text>
+
+  <!-- PAINEL B · TIMELINE (20) -->
+  <rect x="8" y="52" width="232" height="612" fill="#0d1018" stroke="#1d2433"/>
+  <text x="16" y="70" fill="#5f6b80" font-family="Inter,sans-serif" font-size="10" font-weight="600">TIMELINE (20) · FONTE: SPINS</text>
+  <rect x="16" y="80" width="216" height="24" fill="#1a2236" stroke="#22d3ee"/>
+  <text x="24" y="96" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="11" font-weight="600">31   COL 3         WS</text>
+  <rect x="16" y="108" width="216" height="24" fill="#1a2236"/>
+  <text x="24" y="124" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="11">30   COL 3         WS</text>
+
+  <!-- PAINEL C · MESA E JANELA -->
+  <rect x="248" y="52" width="712" height="612" fill="#0d1018" stroke="#1d2433"/>
+  <text x="256" y="70" fill="#5f6b80" font-family="Inter,sans-serif" font-size="10" font-weight="600">MESA &amp; COBERTURA · FONTE: INTENT.ACTIVE</text>
+  <circle cx="460" cy="340" r="140" fill="#07080c" stroke="#1d2433" stroke-width="24"/>
+  <text x="460" y="345" text-anchor="middle" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="18" font-weight="600">31</text>
+  <rect x="660" y="250" width="260" height="160" fill="#07080c" stroke="#1d2433"/>
+  <text x="676" y="280" fill="#5f6b80" font-family="Inter,sans-serif" font-size="9">COBERTURA ATIVA</text>
+  <text x="676" y="302" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="14" font-weight="600">—</text>
+  <text x="676" y="340" fill="#5f6b80" font-family="Inter,sans-serif" font-size="9">EXPOSIÇÃO TOTAL</text>
+  <text x="676" y="362" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="12" font-weight="600">—</text>
+
+  <!-- PAINEL D · P&L, ESCADA E EXPOSIÇÃO -->
+  <rect x="968" y="52" width="464" height="612" fill="#0d1018" stroke="#1d2433"/>
+  <text x="976" y="70" fill="#5f6b80" font-family="Inter,sans-serif" font-size="10" font-weight="600">CURVA P&amp;L (R$) · ESCADA ×3 (4 DEGRAUS)</text>
+  <rect x="976" y="84" width="152" height="52" fill="#07080c" stroke="#1d2433"/>
+  <line x1="976" y1="110" x2="1128" y2="110" stroke="#3a4459" stroke-width="1"/>
+  <polyline points="980,110 1010,104 1050,100 1090,94 1124,90" fill="none" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="976" y="170" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="11">1   R$ 0,10    R$ 0,20    R$ 0,20</text>
+  <text x="976" y="194" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="11">2   R$ 0,30    R$ 0,60    R$ 0,80</text>
+  <text x="976" y="218" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="11">3   R$ 0,90    R$ 1,80    R$ 2,60</text>
+  <text x="976" y="242" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="11">4   R$ 2,70    R$ 5,40    R$ 8,00</text>
+  <text x="976" y="644" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="11">ESTOURO: R$ 8,00          EXP/BANCA: —</text>
+
+  <!-- PAINEL E · ABAS -->
+  <rect x="8" y="672" width="1424" height="220" fill="#0d1018" stroke="#1d2433"/>
+  <text x="16" y="692" fill="#22d3ee" font-family="ui-monospace,Consolas,monospace" font-size="10" font-weight="600">[1] DECISOES   [2] FILLS   [3] ORFAOS   [4] ERROS</text>
+  <text x="16" y="724" fill="#cfd6e4" font-family="ui-monospace,Consolas,monospace" font-size="11">rid-67   quebra_permanencia_coluna   —      NEUTRAL   —      SKIPPED   streak=2 (&lt;4)</text>
+</svg>

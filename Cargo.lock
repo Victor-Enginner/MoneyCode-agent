@@ -212,7 +212,11 @@ dependencies = [
 name = "monster-ui"
 version = "0.1.0"
 dependencies = [
+ "monster-risk",
+ "monster-store",
  "serde",
+ "serde_json",
+ "sqlx",
  "thiserror",
  "tracing",
 ]
