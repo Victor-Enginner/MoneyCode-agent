@@ -288,7 +288,13 @@ impl CdpActuator for DryRunActuator {
             .inner
             .lock()
             .map_err(|_| ExecError::CdpTransport("mutex poisoned".to_string()))?;
-        let adjusted = (g.staged_total_cents as i64) + g.forced_preview_delta_cents;
+        // O desvio forçado só se materializa depois do primeiro clique (mesa já suja),
+        // simulando a divergência que aparece ao colocar fichas — nunca uma mesa suja antes da entrada.
+        let adjusted = if g.staged_total_cents > 0 {
+            (g.staged_total_cents as i64) + g.forced_preview_delta_cents
+        } else {
+            0
+        };
         Ok(adjusted.max(0) as u64)
     }
 
@@ -334,6 +340,23 @@ impl CdpActuator for DryRunActuator {
     }
 }
 
+/// Telemetria ao vivo da mesa Playtech lida via `GET /act/preview` no sidecar Go.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LiveTableTelemetry {
+    /// Aposta atual acumulada no pano em centavos (`Bet R$...`).
+    pub preview_cents: u64,
+    /// Saldo real lido na mesa em centavos (`Balance R$...`), `None` se ainda não disponível.
+    pub balance_cents: Option<i64>,
+    /// Último ganho exibido na mesa em centavos (`Last Win R$...`).
+    pub last_win_cents: u64,
+    /// `true` quando a janela `PLACE YOUR BETS` está aberta.
+    pub round_open: bool,
+    /// Código da rodada da Playtech (`Game Code: ...`).
+    pub game_code: String,
+    /// Fita ordenada de até 12 números exibidos na barra inferior direita da Playtech (`strip[0]` = mais recente).
+    pub strip: Vec<u8>,
+}
+
 /// Atuador HTTP/CDP real para o modo `--live` (envia `Input.dispatchMouseEvent` + resolução DOM via sidecar Go).
 #[derive(Debug, Clone)]
 pub struct LiveHttpActuator {
@@ -350,6 +373,69 @@ impl LiveHttpActuator {
         }
     }
 
+    /// Consulta a telemetria completa em tempo real da mesa Playtech (`Balance`, `Bet`, `Last Win`, `Game Code` e fita de 12 números).
+    pub fn fetch_telemetry(&self) -> Option<LiveTableTelemetry> {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+
+        let req = format!(
+            "GET /act/preview HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            self.sidecar_addr
+        );
+        let mut stream = TcpStream::connect(&self.sidecar_addr).ok()?;
+        let _ = stream.set_read_timeout(Some( std::time::Duration::from_millis(800)));
+        stream.write_all(req.as_bytes()).ok()?;
+        let mut resp = String::new();
+        stream.read_to_string(&mut resp).ok()?;
+        let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
+        let parsed: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+
+        let preview_cents = parsed
+            .get("preview_cents")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            .max(0) as u64;
+        let bal_raw = parsed
+            .get("balance_cents")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let balance_cents = if bal_raw > 0 { Some(bal_raw) } else { None };
+        let last_win_cents = parsed
+            .get("last_win_cents")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            .max(0) as u64;
+        let round_open = parsed
+            .get("round_open")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let game_code = parsed
+            .get("game_code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let strip = parsed
+            .get("strip")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_u64())
+                    .filter(|&n| n <= 36)
+                    .map(|n| n as u8)
+                    .collect::<Vec<u8>>()
+            })
+            .unwrap_or_default();
+
+        Some(LiveTableTelemetry {
+            preview_cents,
+            balance_cents,
+            last_win_cents,
+            round_open,
+            game_code,
+            strip,
+        })
+    }
+
     fn post_target_click(&self, target: &str, x: i32, y: i32) -> Result<(), ExecError> {
         use std::io::{Read, Write};
         use std::net::TcpStream;
@@ -363,6 +449,7 @@ impl LiveHttpActuator {
         );
         let mut stream = TcpStream::connect(&self.sidecar_addr)
             .map_err(|e| ExecError::CdpTransport(e.to_string()))?;
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(15)));
         stream
             .write_all(req.as_bytes())
             .map_err(|e| ExecError::CdpTransport(e.to_string()))?;
@@ -409,35 +496,29 @@ impl CdpActuator for LiveHttpActuator {
         use std::io::{Read, Write};
         use std::net::TcpStream;
 
-        let staged = self.staged_state.lock().map(|g| g.1).unwrap_or(0);
         let req = format!(
             "GET /act/preview HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
             self.sidecar_addr
         );
-        let Ok(mut stream) = TcpStream::connect(&self.sidecar_addr) else {
-            return Ok(staged);
-        };
-        if stream.write_all(req.as_bytes()).is_err() {
-            return Ok(staged);
-        }
+        let mut stream = TcpStream::connect(&self.sidecar_addr)
+            .map_err(|e| ExecError::CdpTransport(e.to_string()))?;
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+        stream
+            .write_all(req.as_bytes())
+            .map_err(|e| ExecError::CdpTransport(e.to_string()))?;
         let mut resp = String::new();
-        if stream.read_to_string(&mut resp).is_err() {
-            return Ok(staged);
-        }
+        stream
+            .read_to_string(&mut resp)
+            .map_err(|e| ExecError::CdpTransport(e.to_string()))?;
         let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
-        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body.trim()) else {
-            return Ok(staged);
-        };
-        let preview = parsed
+        let parsed: serde_json::Value = serde_json::from_str(body.trim())
+            .map_err(|e| ExecError::CdpTransport(format!("preview inválido: {e}")))?;
+        // Sempre devolve o total REAL da mesa: nunca mascara divergência com o valor que achamos ter apostado.
+        Ok(parsed
             .get("preview_cents")
             .and_then(|v| v.as_i64())
             .unwrap_or(0)
-            .max(0) as u64;
-        if preview == 0 && staged > 0 {
-            Ok(staged)
-        } else {
-            Ok(preview)
-        }
+            .max(0) as u64)
     }
 
     fn clear_bets(&self, cal: &Calibration) -> Result<(), ExecError> {
@@ -445,7 +526,23 @@ impl CdpActuator for LiveHttpActuator {
             g.0 = None;
             g.1 = 0;
         }
-        self.post_target_click("clear", cal.clear_coords.0, cal.clear_coords.1)
+        // A mesa remove uma ficha por clique em UNDO: repete até o preview real ficar zerado.
+        for _ in 0..12 {
+            match self.read_bet_total() {
+                Ok(0) => return Ok(()),
+                Ok(_) => {}
+                Err(err) => return Err(err),
+            }
+            self.post_target_click("clear", cal.clear_coords.0, cal.clear_coords.1)?;
+            std::thread::sleep(std::time::Duration::from_millis(140));
+        }
+        match self.read_bet_total() {
+            Ok(0) => Ok(()),
+            Ok(restante) => Err(ExecError::CdpTransport(format!(
+                "mesa não zerou após 12 UNDO (restante {restante} centavos)"
+            ))),
+            Err(err) => Err(err),
+        }
     }
 
     fn confirm(&self, _cal: &Calibration) -> Result<(), ExecError> {
@@ -471,6 +568,20 @@ impl CdpActuator for LiveHttpActuator {
     }
 }
 
+/// Lê o total real da mesa aguardando o DOM da Playtech refletir os cliques recém-enviados.
+/// Retorna o último valor lido (mesmo divergente) para permitir diagnóstico e `clear_bets()`.
+fn read_settled(cdp: &dyn CdpActuator, expected: u64) -> Result<u64, ExecError> {
+    let mut last = cdp.read_bet_total()?;
+    for _ in 0..3 {
+        if last == expected {
+            return Ok(last);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(90));
+        last = cdp.read_bet_total()?;
+    }
+    Ok(last)
+}
+
 /// Executa o plano de aposta seguindo estritamente o protocolo do §9 e invariantes §1.3, §1.4 e §1.8:
 /// `grava intent → clica cobertura → aplica denominações → lê preview → compara → confirm() → coleta acks`.
 pub fn place(
@@ -483,6 +594,26 @@ pub fn place(
 ) -> Result<Fills, ExecError> {
     if kill_switch.is_tripped() {
         return Err(ExecError::KillSwitchActive);
+    }
+
+    // 0. A mesa precisa estar zerada: aposta residual jamais é empilhada com a entrada nova.
+    let residual = cdp.read_bet_total()?;
+    if residual > 0 {
+        warn!(residual, "aposta residual na mesa: limpando antes da entrada");
+        cdp.clear_bets(cal)?;
+        let after = cdp.read_bet_total()?;
+        if after > 0 {
+            let _ = insert_error(
+                pool,
+                "dirty_table",
+                &format!("preview={after} centavos antes da entrada"),
+                now_ms,
+            );
+            return Err(ExecError::PreviewMismatch {
+                preview: after,
+                expected: 0,
+            });
+        }
     }
 
     // 1. Grava a intent ANTES de qualquer clique (§1.8 e §1.3 UNIQUE(strategy_id, spin_id)).
@@ -518,18 +649,60 @@ pub fn place(
     };
 
     // 2. Aplica as denominações de fichas em cada cobertura via coordenadas calibradas / resolução DOM.
+    // Seleciona a ficha no chip-rack apenas quando a denominação muda, evitando cliques redundantes entre as coberturas.
+    let mut last_denom: Option<u64> = None;
+    let mut cumulative_expected: u64 = 0;
+    let mut verified_so_far: u64 = 0;
     for (cover, cents) in &plan.covers {
         let _ = cal.coords(cover)?;
         for (denom, n) in decompose(*cents, &cal.denoms) {
-            cdp.click_chip(denom, cal)?;
+            if last_denom != Some(denom) {
+                cdp.click_chip(denom, cal)?;
+                last_denom = Some(denom);
+            }
             for _ in 0..n {
                 cdp.click_cover(cover, cal)?;
             }
         }
+
+        // 2.1 Confere o acumulado APÓS CADA cobertura: é assim que uma dúzia de 40¢ ao lado de uma de 20¢
+        // é detectada antes de confirmar, em vez de escondida atrás de um total que fecha por coincidência.
+        cumulative_expected += *cents;
+        let seen = read_settled(cdp, cumulative_expected)?;
+        if seen == cumulative_expected {
+            verified_so_far = seen;
+            continue;
+        }
+        // Preview ainda não reagiu a esta cobertura (mesa lenta): validação fica para o total final.
+        if seen == verified_so_far {
+            continue;
+        }
+        error!(
+            cover = %cover.canonical_key(),
+            seen,
+            expected = cumulative_expected,
+            intent_id,
+            "cobertura com valor divergente: limpando a mesa e abortando"
+        );
+        let _ = cdp.clear_bets(cal);
+        update_intent_decision(pool, intent_id, IntentDecision::Aborted, Some("cover_mismatch"))?;
+        let _ = insert_error(
+            pool,
+            "cover_mismatch",
+            &format!(
+                "intent={intent_id} cover={} lido={seen} esperado={cumulative_expected}",
+                cover.canonical_key()
+            ),
+            now_ms,
+        );
+        return Err(ExecError::PreviewMismatch {
+            preview: seen,
+            expected: cumulative_expected,
+        });
     }
 
     // 3. Lê o preview no bet slip ANTES de confirmar (§1.4).
-    let preview = cdp.read_bet_total()?;
+    let preview = read_settled(cdp, plan.total_cents)?;
     if (preview as i64 - plan.total_cents as i64).abs() > 1 {
         error!(
             preview,

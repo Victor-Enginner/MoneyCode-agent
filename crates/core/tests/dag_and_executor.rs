@@ -38,7 +38,7 @@ fn integration_sqlite_virtual_clock_replay_and_200_dryrun_entries() {
 
     // Semeia 20 números iniciais com relógio virtual para ativar o classificador de regime.
     let seed_numbers = [
-        14u8, 22, 31, 5, 18, 27, 9, 16, 29, 2, 19, 33, 7, 15, 28, 11, 3, 6, 9, 12,
+        14u8, 22, 31, 5, 18, 27, 9, 16, 29, 2, 19, 33, 7, 15, 28, 11, 25, 1, 4, 7,
     ];
     let mut virtual_clock_ms = 1_730_500_000_000i64;
     for (idx, &num) in seed_numbers.iter().enumerate() {
@@ -61,8 +61,8 @@ fn integration_sqlite_virtual_clock_replay_and_200_dryrun_entries() {
     // Executa 200 entradas em --dry-run sobre relógio virtual
     for entry_idx in 1..=200u32 {
         virtual_clock_ms += 45_000;
-        // Garante que os últimos 4 giros estejam na mesma coluna (1..=12) para acionar QuebraColuna
-        let trigger_num = ((entry_idx % 12) + 1) as u8;
+        // Garante que os últimos 4 giros estejam na Coluna 1 e Dúzia 1 (1, 4, 7, 10) para acionar QuebraColuna/QuebraDuzia
+        let trigger_num = 10u8;
         window.push(trigger_num);
         let recent = window.to_recent_vec();
 
@@ -95,7 +95,7 @@ fn integration_sqlite_virtual_clock_replay_and_200_dryrun_entries() {
         let rec = reconcile_spin(
             &pool,
             &plan.strategy_id,
-            20, // Coluna 2 (vencedora contra streak da Coluna 1)
+            20, // Coluna 2 e Dúzia 2 (vencedora contra streak da Coluna 1 / Dúzia 1)
             &fills.items,
             &cfg,
             Some(plan.stake_per_cover_cents as i64),
@@ -105,11 +105,11 @@ fn integration_sqlite_virtual_clock_replay_and_200_dryrun_entries() {
         assert!(rec.won);
         assert!(!rec.session_suspicious);
 
-        // Reinicia a sequência de 3 giros na coluna 1 para a próxima iteração do teste
+        // Reinicia a sequência de 3 giros na Coluna 1 / Dúzia 1 (1, 4, 7) para a próxima iteração do teste
         window.push(25);
-        window.push(2);
-        window.push(5);
-        window.push(8);
+        window.push(1);
+        window.push(4);
+        window.push(7);
     }
 
     assert_eq!(actuator.confirmed_count(), 200);

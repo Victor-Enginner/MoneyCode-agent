@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Ponto de entrada do sidecar de captura do projeto MONSTER.
 // Implementa whitelist estrita de sockets Playtech (eurolive-frontend primário / ielive-gateway standby),
-// filtro de frames de controle (len > 8), --strict, --freeze, --dump-frames e --dump-op (FrameSent).
+// filtro de frames de controle (len > 8), telemetria ao vivo (fita de 12 números, saldo, aposta, game code) e clique CDP síncrono.
 
 package main
 
@@ -59,27 +59,44 @@ func (e SpinEvent) Validate() error {
 	return nil
 }
 
-// Hub gerencia deduplicação canônica, estado de atuação CDP e fanout NDJSON para assinantes de GET /stream.
+// Hub gerencia deduplicação canônica, telemetria da mesa, atuação CDP síncrona e fanout NDJSON para GET /stream.
 type Hub struct {
-	mu             sync.Mutex
-	seenSpinID     map[string]struct{}
-	seenBucket     map[string]struct{}
-	subs           map[chan []byte]struct{}
-	totalSpins     atomic.Uint64
-	lastEventAt    atomic.Int64
-	degraded       atomic.Bool
-	cdpClient      *cdp.Client
-	playtechSid    string
-	lastBetCents   atomic.Int64
-	lastBalCents   atomic.Int64
+	mu              sync.Mutex
+	actMu           sync.Mutex
+	seenSpinID      map[string]struct{}
+	seenBucket      map[string]struct{}
+	subs            map[chan []byte]struct{}
+	totalSpins      atomic.Uint64
+	lastEventAt     atomic.Int64
+	degraded        atomic.Bool
+	cdpClient       *cdp.Client
+	playtechSid     string
+	lastBetCents    atomic.Int64
+	lastBalCents    atomic.Int64
+	lastWinCents    atomic.Int64
+	roundOpen       atomic.Bool
+	lastGameCode    string
+	lastStrip       []int
+	recentSpins     []recentSpin
+	clickResolvedCh chan moBindingPayload
+	slipResolvedCh  chan moBindingPayload
 }
 
-// NewHub inicializa o hub de eventos de spin.
+// recentSpin guarda o último número publicado para deduplicar as fontes WS e MutationObserver
+// do MESMO giro (timestamps diferentes), sem bloquear números repetidos em giros distintos.
+type recentSpin struct {
+	Number int
+	Ts     int64
+}
+
+// NewHub inicializa o hub de eventos de spin e canais de sincronização CDP.
 func NewHub() *Hub {
 	return &Hub{
-		seenSpinID: make(map[string]struct{}),
-		seenBucket: make(map[string]struct{}),
-		subs:       make(map[chan []byte]struct{}),
+		seenSpinID:      make(map[string]struct{}),
+		seenBucket:      make(map[string]struct{}),
+		subs:            make(map[chan []byte]struct{}),
+		clickResolvedCh: make(chan moBindingPayload, 16),
+		slipResolvedCh:  make(chan moBindingPayload, 16),
 	}
 }
 
@@ -98,6 +115,19 @@ func (h *Hub) Publish(ev SpinEvent) (bool, error) {
 	if _, exists := h.seenBucket[bucketKey]; exists {
 		h.mu.Unlock()
 		return false, nil
+	}
+	// Duas fontes (WS primário e observer) podem entregar o mesmo número com timestamps distintos:
+	// publicar só o primeiro evita giro duplicado na TIMELINE. Giros repetidos de verdade
+	// ficam separados por dezenas de segundos, muito acima da janela de 2 s.
+	for _, r := range h.recentSpins {
+		if r.Number == ev.Number && absInt64(ev.Ts-r.Ts) <= 2000 {
+			h.mu.Unlock()
+			return false, nil
+		}
+	}
+	h.recentSpins = append(h.recentSpins, recentSpin{Number: ev.Number, Ts: ev.Ts})
+	if len(h.recentSpins) > 12 {
+		h.recentSpins = h.recentSpins[len(h.recentSpins)-12:]
 	}
 	h.seenSpinID[ev.SpinID] = struct{}{}
 	h.seenBucket[bucketKey] = struct{}{}
@@ -223,6 +253,10 @@ func (h *Hub) handleActClick(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Serializa rigorosamente todos os cliques para impedir corrida ou duplo clique
+	h.actMu.Lock()
+	defer h.actMu.Unlock()
+
 	h.mu.Lock()
 	client := h.cdpClient
 	sid := h.playtechSid
@@ -232,13 +266,53 @@ func (h *Hub) handleActClick(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "playtech cdp session not ready", http.StatusServiceUnavailable)
 		return
 	}
-	if err := client.DispatchTargetClick(sid, req.Target, req.X, req.Y); err != nil {
+
+	// Drena respostas antigas do canal antes de solicitar nova resolução de coordenadas
+	for {
+		select {
+		case <-h.clickResolvedCh:
+		default:
+			goto drained
+		}
+	}
+drained:
+
+	finalX, finalY := req.X, req.Y
+	if req.Target != "" {
+		if err := client.RequestTargetCoords(sid, req.Target, req.X, req.Y); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		select {
+		case res := <-h.clickResolvedCh:
+			if res.X > 0 && res.Y > 0 {
+				finalX = res.X
+				finalY = res.Y
+			}
+		case <-time.After(12 * time.Second):
+			log.Printf("[click-cdp] timeout aguardando click_resolved para target=%s, usando fallback (%d,%d)", req.Target, finalX, finalY)
+		}
+	}
+
+	if err := client.DispatchClick(sid, finalX, finalY); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	// Pausa curta após o clique físico único para o canvas/DOM da Playtech atualizar o estado da ficha/aposta
+	time.Sleep(120 * time.Millisecond)
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"ok":true}` + "\n"))
+	_, _ = fmt.Fprintf(w, `{"ok":true,"x":%d,"y":%d}`+"\n", finalX, finalY)
+}
+
+type previewResponse struct {
+	PreviewCents int64  `json:"preview_cents"`
+	BalanceCents int64  `json:"balance_cents"`
+	LastWinCents int64  `json:"last_win_cents"`
+	RoundOpen    bool   `json:"round_open"`
+	GameCode     string `json:"game_code"`
+	Strip        []int  `json:"strip"`
 }
 
 func (h *Hub) handleActPreview(w http.ResponseWriter, _ *http.Request) {
@@ -248,17 +322,38 @@ func (h *Hub) handleActPreview(w http.ResponseWriter, _ *http.Request) {
 	h.mu.Unlock()
 
 	if client != nil && sid != "" {
+		for {
+			select {
+			case <-h.slipResolvedCh:
+			default:
+				goto drainedSlip
+			}
+		}
+	drainedSlip:
 		_ = client.RequestSlipRead(sid)
-		time.Sleep(35 * time.Millisecond)
+		select {
+		case <-h.slipResolvedCh:
+		case <-time.After(140 * time.Millisecond):
+		}
+	}
+
+	h.mu.Lock()
+	stripCopy := make([]int, len(h.lastStrip))
+	copy(stripCopy, h.lastStrip)
+	gc := h.lastGameCode
+	h.mu.Unlock()
+
+	resp := previewResponse{
+		PreviewCents: h.lastBetCents.Load(),
+		BalanceCents: h.lastBalCents.Load(),
+		LastWinCents: h.lastWinCents.Load(),
+		RoundOpen:    h.roundOpen.Load(),
+		GameCode:     gc,
+		Strip:        stripCopy,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = fmt.Fprintf(
-		w,
-		`{"preview_cents":%d,"balance_cents":%d}`+"\n",
-		h.lastBetCents.Load(),
-		h.lastBalCents.Load(),
-	)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // classifyPlaytechSocket decodifica a URL (incluindo túnel ?u=wss%3A%2F%2F...) e aplica a whitelist estrita.
@@ -359,12 +454,43 @@ type moBindingPayload struct {
 	At           int64  `json:"at"`
 	B64          string `json:"b64"`
 	URL          string `json:"url"`
+	Nums         []int  `json:"nums"`
 	BetCents     *int64 `json:"bet_cents"`
 	BalanceCents *int64 `json:"balance_cents"`
+	LastWinCents *int64 `json:"last_win_cents"`
+	GameCode     string `json:"game_code"`
+	RoundOpen    *bool  `json:"round_open"`
 	Target       string `json:"target"`
 	X            int    `json:"x"`
 	Y            int    `json:"y"`
 	Found        bool   `json:"found"`
+}
+
+func (h *Hub) updateTelemetryFromPayload(sid string, mo moBindingPayload) {
+	if mo.BetCents != nil {
+		h.lastBetCents.Store(*mo.BetCents)
+	}
+	if mo.BalanceCents != nil && *mo.BalanceCents > 0 {
+		h.lastBalCents.Store(*mo.BalanceCents)
+	}
+	if mo.LastWinCents != nil {
+		h.lastWinCents.Store(*mo.LastWinCents)
+	}
+	if mo.RoundOpen != nil {
+		h.roundOpen.Store(*mo.RoundOpen)
+	}
+	h.mu.Lock()
+	if sid != "" && (len(mo.Nums) >= 4 || (mo.BalanceCents != nil && *mo.BalanceCents > 0)) {
+		h.playtechSid = sid
+	}
+	if mo.GameCode != "" {
+		h.lastGameCode = mo.GameCode
+	}
+	if len(mo.Nums) >= 4 {
+		h.lastStrip = make([]int, len(mo.Nums))
+		copy(h.lastStrip, mo.Nums)
+	}
+	h.mu.Unlock()
 }
 
 type captureOptions struct {
@@ -493,7 +619,6 @@ func runCaptureLoop(ctx context.Context, opts captureOptions, corr *wsdecap.Corr
 					continue
 				}
 				raw, err := decodeFramePayload(payloadB64)
-				// Ignora frames de controle (ping/close <= 8 bytes) para não sujar a correlação
 				if err != nil || len(raw) <= wsdecap.MinFramePayloadLen {
 					continue
 				}
@@ -536,25 +661,21 @@ func runCaptureLoop(ctx context.Context, opts captureOptions, corr *wsdecap.Corr
 				}
 				if mo.T == "click_resolved" {
 					log.Printf("[click-cdp] target=%s -> (%d, %d) dom_found=%v", mo.Target, mo.X, mo.Y, mo.Found)
-					if ev.SessionID != "" && mo.X > 0 && mo.Y > 0 {
-						_ = client.DispatchClick(ev.SessionID, mo.X, mo.Y)
+					select {
+					case hub.clickResolvedCh <- mo:
+					default:
 					}
 					continue
 				}
 				if mo.T == "slip" {
-					if mo.BetCents != nil {
-						hub.lastBetCents.Store(*mo.BetCents)
-					}
-					if mo.BalanceCents != nil {
-						hub.lastBalCents.Store(*mo.BalanceCents)
+					hub.updateTelemetryFromPayload(ev.SessionID, mo)
+					select {
+					case hub.slipResolvedCh <- mo:
+					default:
 					}
 					continue
 				}
-				if ev.SessionID != "" {
-					hub.mu.Lock()
-					hub.playtechSid = ev.SessionID
-					hub.mu.Unlock()
-				}
+				hub.updateTelemetryFromPayload(ev.SessionID, mo)
 				if mo.N < 0 || mo.N > 36 {
 					continue
 				}
@@ -570,10 +691,12 @@ func runCaptureLoop(ctx context.Context, opts captureOptions, corr *wsdecap.Corr
 				dualFeed, dualHits := corr.DualFeedStats()
 				if len(top) > 0 {
 					log.Printf(
-						"[spin #%d] spin_id=%s numero=%d | lider=%s (%d/%d distinct=%d host=%s dual_feed=%v/%d)",
+						"[spin #%d] spin_id=%s numero=%d | fita=%v | saldo=%d¢ | lider=%s (%d/%d distinct=%d host=%s dual_feed=%v/%d)",
 						id,
 						spinID,
 						mo.N,
+						mo.Nums,
+						hub.lastBalCents.Load(),
 						top[0].Path,
 						top[0].Hits,
 						top[0].Spins,
@@ -583,7 +706,7 @@ func runCaptureLoop(ctx context.Context, opts captureOptions, corr *wsdecap.Corr
 						dualHits,
 					)
 				} else {
-					log.Printf("[spin #%d] spin_id=%s numero=%d ts=%d", id, spinID, mo.N, mo.At)
+					log.Printf("[spin #%d] spin_id=%s numero=%d fita=%v saldo=%d¢ ts=%d", id, spinID, mo.N, mo.Nums, hub.lastBalCents.Load(), mo.At)
 				}
 				spinEv := SpinEvent{
 					V:         1,
@@ -614,6 +737,13 @@ func maxInt64(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+func absInt64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func main() {

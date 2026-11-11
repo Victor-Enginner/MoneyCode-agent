@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Binário principal do orquestrador `monster-core` (DAG + Risco + Executor + Reconciliador + FUI Server).
-//! Opera em `--dry-run` por padrão (§1.5), valida Monte Carlo no boot (§13), consome o sidecar em `127.0.0.1:8787`
-//! e serve o painel FUI em tempo real (`4 Hz`) em `http://127.0.0.1:8791`.
+//! Sincroniza 100% ao vivo o Saldo real (`Balance`), P&L real, Aposta na mesa (`Bet`) e a fita de 12 números da Playtech,
+//! garantindo coerência total entre Colunas (`2to1`) e Dúzias (`1st/2nd/3rd 12`) na FUI (`http://127.0.0.1:8791`).
 
 use monster_capture::{CaptureSource, SpinBus, StreamClient, DEFAULT_STREAM_ADDR};
 use monster_core::{
     boot_reconcile, build_brain_snapshot, evaluate_all_matchers_history,
-    evaluate_dag_with_history, place, reconcile_spin, write_gbrain_file, Calibration, CdpActuator,
-    CoverAck, DryRunActuator, ExecutionMode, HistoryBuffer, KillSwitch, LiveHttpActuator, Plan,
-    Window30, REAL_TABLE_479_RECENT_FIRST,
+    evaluate_dag_with_history, has_recent_number, load_chronological_history, place, reconcile_spin,
+    sync_strip_to_db, write_gbrain_file, Calibration, CdpActuator, CoverAck, DryRunActuator,
+    ExecutionMode, HistoryBuffer, KillSwitch, LiveHttpActuator, Plan, Window30, HISTORY_CAPACITY,
+    WINDOW_CAPACITY,
 };
 use monster_risk::{run_monte_carlo, Cfg, McParams, State, Verdict};
 use monster_store::{
@@ -20,6 +21,7 @@ use monster_ui::FuiController;
 use std::env;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -31,6 +33,45 @@ fn now_unix_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Remove apenas os spins legados gravados com `spin_id` do formato antigo `rid-<número>`,
+/// que colapsavam giros diferentes no mesmo identificador e corrompiam a TIMELINE.
+/// Preserva `intents`/`fills`: registro financeiro nunca é apagado por rotina de higiene.
+fn cleanup_legacy_rid_spins(pool: &SqlitePool) -> u64 {
+    pool.with_conn(|conn| {
+        let deleted = conn.execute(
+            "DELETE FROM spins WHERE spin_id GLOB 'rid-[0-9]' OR spin_id GLOB 'rid-[0-9][0-9]'",
+            [],
+        )?;
+        Ok(deleted as u64)
+    })
+    .unwrap_or(0)
+}
+
+/// Recarrega `Window30` e `HistoryBuffer` a partir do banco para que DAG, walk-forward e TIMELINE
+/// enxerguem exatamente a mesma sequência de giros que a mesa da Playtech está exibindo.
+fn reload_live_history(
+    pool: &SqlitePool,
+    window: &Arc<Mutex<Window30>>,
+    history: &Arc<Mutex<HistoryBuffer>>,
+) {
+    let chrono = load_chronological_history(pool, HISTORY_CAPACITY);
+    if let Ok(mut h) = history.lock() {
+        let mut fresh = HistoryBuffer::new();
+        for &n in &chrono {
+            fresh.push_live(n);
+        }
+        *h = fresh;
+    }
+    if let Ok(mut w) = window.lock() {
+        let mut fresh = Window30::new();
+        let start = chrono.len().saturating_sub(WINDOW_CAPACITY);
+        for &n in &chrono[start..] {
+            fresh.push(n);
+        }
+        *w = fresh;
+    }
 }
 
 fn spawn_fui_http_server(
@@ -139,7 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut mode = ExecutionMode::DryRun;
     let mut stream_addr = DEFAULT_STREAM_ADDR.to_string();
     let mut db_uri = "O:/Archives/Eistein/FUI AGENT ROULLET/monster.db".to_string();
-    let mut bankroll_cents: i64 = 7_058;
+    let mut bankroll_cents: i64 = 5_088;
     let mut cfg = Cfg {
         base_cents: 10,
         max_steps: 4,
@@ -205,8 +246,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mc_report.ev_per_hour_cents
     );
 
-    // 2. Inicializa SQLite WAL e reconcilia órfãos no boot (§9).
+    // 2. Inicializa SQLite WAL, remove registros inválidos antigos e reconcilia órfãos no boot (§9).
     let pool = init_pool(&db_uri)?;
+    let legacy_removed = cleanup_legacy_rid_spins(&pool);
+    if legacy_removed > 0 {
+        println!("[MONSTER-CORE] {legacy_removed} spins legados (spin_id rid-<n>) removidos da TIMELINE");
+    }
     let boot = boot_reconcile(&pool, None)?;
     println!(
         "[MONSTER-CORE] Boot reconciliado | modo={:?} | orphans_swept={} | singleton_lock_removed={}",
@@ -220,19 +265,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kill_switch = KillSwitch::new();
     let fui = FuiController::new(cfg.clone());
     let boot_instant = std::time::Instant::now();
-    fui.sync_live_metrics(0, bankroll_cents, 0, None, None);
 
-    let mut window = Window30::new();
+    // Histórico inicial exclusivamente do banco (sincronizado com a fita da mesa): nada de números inventados.
+    let initial_chrono = load_chronological_history(&pool, HISTORY_CAPACITY);
     let mut initial_hist = HistoryBuffer::new();
-    initial_hist.seed_from_recent_first(&REAL_TABLE_479_RECENT_FIRST);
-    if let Ok(db_spins) = fui.get_spins(&pool) {
-        for sp in db_spins.iter().rev() {
-            initial_hist.push_live(sp.number);
+    for &n in &initial_chrono {
+        initial_hist.push_live(n);
+    }
+    let window = Arc::new(Mutex::new({
+        let mut w = Window30::new();
+        let start = initial_chrono.len().saturating_sub(WINDOW_CAPACITY);
+        for &n in &initial_chrono[start..] {
+            w.push(n);
         }
-    }
-    for n in initial_hist.to_recent_vec(30).into_iter().rev() {
-        window.push(n);
-    }
+        w
+    }));
 
     let init_chrono = initial_hist.to_chronological_vec();
     let init_snap = build_brain_snapshot(&matchers, &init_chrono, &cfg);
@@ -251,6 +298,87 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("====================================================");
 
     let history = Arc::new(Mutex::new(initial_hist));
+    let shared_bankroll_cents = Arc::new(AtomicI64::new(0));
+    let shared_pnl_cents = Arc::new(AtomicI64::new(0));
+    let initial_table_balance = Arc::new(AtomicI64::new(0));
+    let table_round_open = Arc::new(AtomicBool::new(false));
+    // `Game Code` da rodada exibida pela Playtech: chave de "uma entrada por rodada".
+    let table_round = Arc::new(Mutex::new(String::new()));
+
+    // Thread de sincronização contínua (500 ms) com o DOM da Playtech:
+    // saldo real, P&L real, aposta na mesa, último ganho e fita de 12 números -> SQLite -> FUI.
+    {
+        let live_act_poll = live_actuator.clone();
+        let fui_poll = fui.clone();
+        let pool_poll = pool.clone();
+        let win_poll = window.clone();
+        let hist_poll = history.clone();
+        let bank_atom = shared_bankroll_cents.clone();
+        let pnl_atom = shared_pnl_cents.clone();
+        let init_bal_atom = initial_table_balance.clone();
+        let round_open_atom = table_round_open.clone();
+        let round_key_atom = table_round.clone();
+
+        thread::spawn(move || loop {
+            if let Some(tel) = live_act_poll.fetch_telemetry() {
+                round_open_atom.store(tel.round_open, Ordering::Relaxed);
+                if !tel.game_code.is_empty() {
+                    if let Ok(mut g) = round_key_atom.lock() {
+                        g.clone_from(&tel.game_code);
+                    }
+                }
+
+                if let Some(real_bal) = tel.balance_cents {
+                    let prev_init = init_bal_atom.load(Ordering::Relaxed);
+                    let base_bal = if prev_init <= 0 {
+                        init_bal_atom.store(real_bal, Ordering::Relaxed);
+                        real_bal
+                    } else {
+                        prev_init
+                    };
+                    bank_atom.store(real_bal, Ordering::Relaxed);
+                    pnl_atom.store(real_bal - base_bal, Ordering::Relaxed);
+                }
+
+                // A fita da Playtech é a autoridade da TIMELINE: grava só os giros ausentes e recarrega os buffers.
+                if tel.strip.len() >= 4 {
+                    match sync_strip_to_db(&pool_poll, &tel.strip, &tel.game_code, now_unix_ms()) {
+                        Ok(report) if report.inserted > 0 => {
+                            reload_live_history(&pool_poll, &win_poll, &hist_poll);
+                            println!(
+                                "[TELEMETRIA-LIVE] fita={:?} | {} giro(s) novo(s){} | saldo=R$ {:.2} | aposta=R$ {:.2}",
+                                tel.strip,
+                                report.inserted,
+                                if report.rebuilt { " (baseline regravada)" } else { "" },
+                                (bank_atom.load(Ordering::Relaxed) as f64) / 100.0,
+                                (tel.preview_cents as f64) / 100.0
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(err) => eprintln!("[TELEMETRIA-LIVE] falha ao sincronizar fita: {err}"),
+                    }
+                }
+
+                let balance = match bank_atom.load(Ordering::Relaxed) {
+                    0 => None,
+                    v => Some(v),
+                };
+                let pnl = if balance.is_some() {
+                    Some(pnl_atom.load(Ordering::Relaxed))
+                } else {
+                    None
+                };
+                fui_poll.sync_table_telemetry(
+                    balance,
+                    pnl,
+                    Some(tel.preview_cents),
+                    Some(tel.last_win_cents),
+                );
+            }
+            thread::sleep(Duration::from_millis(500));
+        });
+    }
+
     spawn_fui_http_server(
         pool.clone(),
         fui.clone(),
@@ -259,10 +387,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg.clone(),
     );
 
-    let mut session_pnl_cents = 0i64;
     let mut spins_since_blow = cfg.cooldown_spins;
     let mut current_step = 0u8;
     let mut pending_entry: Option<(Plan, Vec<CoverAck>)> = None;
+    let mut last_entry_round = String::new();
+    let mut last_entry_at_ms: i64 = 0;
 
     let bus = SpinBus::new();
     let rx = bus.subscribe();
@@ -288,17 +417,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             CaptureSource::Ext => SpinSource::Ext,
             CaptureSource::Ocr => SpinSource::Ocr,
         };
-        let _ = insert_spin(
-            &pool,
-            &NewSpin {
-                spin_id: ev.spin_id.clone(),
-                number: ev.number,
-                ts: ev.ts,
-                source: src,
-                received_at: now_ms,
-                latency_ms: Some(ev.latency_ms),
-            },
-        );
+        // A mesma rodada pode chegar pelo WS e pela fita DOM: grava uma única vez.
+        let already_recorded = has_recent_number(&pool, ev.number, ev.ts, 3_000).unwrap_or(false);
+        if already_recorded {
+            println!(
+                "[DEDUPE] spin={} num={} já registrado nos últimos 3s (WS/fita) — ignorado",
+                ev.spin_id, ev.number
+            );
+        } else {
+            let _ = insert_spin(
+                &pool,
+                &NewSpin {
+                    spin_id: ev.spin_id.clone(),
+                    number: ev.number,
+                    ts: ev.ts,
+                    source: src,
+                    received_at: now_ms,
+                    latency_ms: Some(ev.latency_ms),
+                },
+            );
+        }
 
         // Reconcilia entrada pendente do spin anterior, se houver (§9).
         if let Some((prev_plan, prev_acks)) = pending_entry.take() {
@@ -312,8 +450,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 now_ms,
             ) {
                 Ok(rep) => {
-                    bankroll_cents += rep.expected_delta_cents;
-                    session_pnl_cents += rep.expected_delta_cents;
+                    if initial_table_balance.load(Ordering::Relaxed) <= 0 {
+                        shared_bankroll_cents.fetch_add(rep.expected_delta_cents, Ordering::Relaxed);
+                        shared_pnl_cents.fetch_add(rep.expected_delta_cents, Ordering::Relaxed);
+                    }
                     current_step = rep.next_step;
                     if rep.ladder_blown {
                         spins_since_blow = 0;
@@ -326,7 +466,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ev.number,
                         rep.won,
                         rep.expected_delta_cents,
-                        session_pnl_cents,
+                        shared_pnl_cents.load(Ordering::Relaxed),
                         current_step
                     );
                 }
@@ -338,19 +478,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             spins_since_blow = spins_since_blow.saturating_add(1);
         }
 
-        window.push(ev.number);
-        let chrono_hist = if let Ok(mut h) = history.lock() {
-            h.push_live(ev.number);
-            h.to_chronological_vec()
-        } else {
-            Vec::new()
-        };
-        let recent = window.to_recent_vec();
+        // Buffers reconstruídos do banco (já sincronizado com a fita da Playtech):
+        // DAG e TIMELINE nunca divergem nem duplicam o mesmo giro.
+        reload_live_history(&pool, &window, &history);
+        let recent = window
+            .lock()
+            .map(|w| w.to_recent_vec())
+            .unwrap_or_default();
+        let chrono_hist = history
+            .lock()
+            .map(|h| h.to_chronological_vec())
+            .unwrap_or_default();
+
+        let cur_bank = shared_bankroll_cents.load(Ordering::Relaxed);
+        let cur_pnl = shared_pnl_cents.load(Ordering::Relaxed);
+        // Só tenta entrar com a mesa em `PLACE YOUR BETS`; fora disso a janela é zero e o gate dá Skip.
+        let window_open = table_round_open.load(Ordering::Relaxed);
         let st = State {
-            bankroll_cents,
+            bankroll_cents: if cur_bank > 0 { cur_bank } else { bankroll_cents },
             exposure_cents: 0,
-            session_pnl_cents,
-            remaining_window_ms: 9000,
+            session_pnl_cents: cur_pnl,
+            remaining_window_ms: if window_open { 9_000 } else { 0 },
             spins_since_blow,
             step: current_step,
         };
@@ -379,35 +527,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         if let (Some(Verdict::Place), Some(plan)) = (dag_out.verdict, dag_out.plan) {
+            // Regra dura: no máximo UMA entrada por rodada da Playtech, mesmo que a rodada chegue
+            // por duas fontes (WS + fita DOM) ou o DAG emita o sinal mais de uma vez.
+            let round_key = table_round.lock().map(|g| g.clone()).unwrap_or_default();
+            let same_round = (!round_key.is_empty() && last_entry_round == round_key)
+                || (last_entry_at_ms > 0 && (now_ms - last_entry_at_ms) < 15_000);
+            if same_round {
+                println!(
+                    "[EXECUTOR] rodada {} já possui entrada (última em {}ms) — sinal duplicado ignorado",
+                    if round_key.is_empty() { "—" } else { round_key.as_str() },
+                    now_ms - last_entry_at_ms
+                );
+                continue;
+            }
             let actuator: &dyn CdpActuator = match mode {
                 ExecutionMode::DryRun => &dry_actuator,
                 ExecutionMode::Live => &live_actuator,
             };
             match place(&pool, actuator, &plan, &cal, &kill_switch, now_ms) {
                 Ok(fills) => {
+                    last_entry_at_ms = now_ms;
+                    last_entry_round = round_key;
+                    let cover_names = plan
+                        .covers
+                        .iter()
+                        .map(|(c, _)| c.display_label())
+                        .collect::<Vec<_>>()
+                        .join(" + ");
                     println!(
-                        "[EXECUTOR {:?}] ENTRADA CONFIRMADA | strategy={} | degrau={} | total={}¢ | preview={}¢ | covers={:?}",
+                        "[EXECUTOR {:?}] ENTRADA CONFIRMADA | strategy={} | degrau={} | coberturas={} | total={}¢ | preview={}¢",
                         mode,
                         plan.strategy_id,
                         plan.ladder_step,
+                        cover_names,
                         plan.total_cents,
                         fills.preview_cents,
-                        plan.covers
                     );
                     let label = format!(
                         "{} · R$ {},{:02}",
-                        plan.covers
-                            .iter()
-                            .map(|(c, _)| c.canonical_key().to_uppercase())
-                            .collect::<Vec<_>>()
-                            .join(" + "),
+                        cover_names,
                         plan.stake_per_cover_cents / 100,
                         plan.stake_per_cover_cents % 100
                     );
+                    let live_bank = shared_bankroll_cents.load(Ordering::Relaxed);
                     fui.sync_live_metrics(
                         boot_instant.elapsed().as_secs(),
-                        bankroll_cents,
-                        session_pnl_cents,
+                        if live_bank > 0 { Some(live_bank) } else { None },
+                        Some(shared_pnl_cents.load(Ordering::Relaxed)),
                         Some(label),
                         Some(plan.total_cents),
                     );
@@ -427,7 +593,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let covers_str = pre
                     .cover
                     .iter()
-                    .map(|c| c.canonical_key().to_uppercase())
+                    .map(|c| c.display_label())
                     .collect::<Vec<_>>()
                     .join(" + ");
                 let pre_reason = format!(
@@ -453,10 +619,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                 );
             }
+            let live_bank = shared_bankroll_cents.load(Ordering::Relaxed);
             fui.sync_live_metrics(
                 boot_instant.elapsed().as_secs(),
-                bankroll_cents,
-                session_pnl_cents,
+                if live_bank > 0 { Some(live_bank) } else { None },
+                Some(shared_pnl_cents.load(Ordering::Relaxed)),
                 None,
                 None,
             );

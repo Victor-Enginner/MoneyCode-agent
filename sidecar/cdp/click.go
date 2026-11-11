@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Despachante de cliques reais em coordenadas do canvas/SVG via Input.dispatchMouseEvent + resolução dinâmica DOM.
-// Localiza fichas (0.1, 0.2, 0.5, 1, 5, 10, 20, 50) e casas do pano (2to1, 1st/2nd/3rd 12, 1-18, EVEN, RED, BLACK, ODD, 19-36)
-// diretamente via getBoundingClientRect() no iframe da Playtech e envia eventos físicos CDP.
+// Localiza fichas exclusivamente no chip-rack (inferior direito) e separa rigorosamente Colunas (2to1) de Dúzias (1st/2nd/3rd 12).
+// Envia estritamente UM evento físico CDP por chamada, após aguardar a abertura da janela "PLACE YOUR BETS".
 
 package cdp
 
@@ -9,19 +9,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"math/rand"
 	"time"
 )
 
 // DispatchClick envia o par mousePressed + mouseReleased via CDP na sessão do iframe Playtech
-// com micro-jitter humano (8–22 ms entre press e release, ±2 px) conforme M6.
+// com micro-jitter humano (12–28 ms entre press e release, ±1 px) conforme M6.
 func (c *Client) DispatchClick(sid string, x, y int) error {
 	if sid == "" {
 		return errors.New("empty sessionId for DispatchClick")
 	}
-	jx := x + (rand.Intn(5) - 2)
-	jy := y + (rand.Intn(5) - 2)
+	jx := x + (rand.Intn(3) - 1)
+	jy := y + (rand.Intn(3) - 1)
 	if jx < 1 {
 		jx = x
 	}
@@ -51,7 +50,7 @@ func (c *Client) DispatchClick(sid string, x, y int) error {
 		return fmt.Errorf("mousePressed (%d,%d): %w", jx, jy, err)
 	}
 
-	time.Sleep(time.Duration(12+rand.Intn(18)) * time.Millisecond)
+	time.Sleep(time.Duration(14+rand.Intn(14)) * time.Millisecond)
 
 	if err := c.Send(sid, "Input.dispatchMouseEvent", map[string]any{
 		"type":       "mouseReleased",
@@ -66,11 +65,12 @@ func (c *Client) DispatchClick(sid string, x, y int) error {
 	return nil
 }
 
-// DispatchTargetClick resolve a posição exata do elemento na mesa da Playtech (ficha ou cobertura)
-// via getBoundingClientRect() + eventos Pointer/Mouse no elemento alvo + Input.dispatchMouseEvent via CDP.
-func (c *Client) DispatchTargetClick(sid string, target string, fallbackX, fallbackY int) error {
+// RequestTargetCoords aguarda a abertura da janela de apostas (caso ainda esteja em WAIT FOR THE NEXT ROUND)
+// e resolve a coordenada exata (x, y) do elemento via getBoundingClientRect(), emitindo `click_resolved`
+// sem disparar eventos sintéticos duplicados em JS.
+func (c *Client) RequestTargetCoords(sid string, target string, fallbackX, fallbackY int) error {
 	if sid == "" {
-		return errors.New("empty sessionId for DispatchTargetClick")
+		return errors.New("empty sessionId for RequestTargetCoords")
 	}
 
 	targetJSON, _ := json.Marshal(target)
@@ -79,86 +79,137 @@ func (c *Client) DispatchTargetClick(sid string, target string, fallbackX, fallb
 	  const fbX = %d, fbY = %d;
 	  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-	  // Aguarda até 6s pela abertura da janela "PLACE YOUR BETS" / "FAÇA SUAS APOSTAS" após o giro
-	  for (let wait = 0; wait < 24; wait++) {
+	  const isRoundOpenNow = () => {
 	    const bodyTxt = (document.body && document.body.innerText) || '';
 	    if (/PLACE YOUR BETS|FA[CÇ]A SUAS APOSTAS|FA[CÇ]AM SUAS APOSTAS/i.test(bodyTxt)) {
-	      break;
+	      return true;
 	    }
-	    await sleep(250);
+	    if (/WAIT FOR THE NEXT ROUND|NO MORE BETS|AGUARDE A PR[OÓ]XIMA|N[AÃ]O H[AÁ] MAIS APOSTAS|SEM MAIS APOSTAS/i.test(bodyTxt)) {
+	      return false;
+	    }
+	    return true;
+	  };
+
+	  if (target !== 'clear') {
+	    let waited = false;
+	    for (let wait = 0; wait < 75; wait++) {
+	      if (isRoundOpenNow()) break;
+	      waited = true;
+	      await sleep(150);
+	    }
+	    if (waited) {
+	      // Aguarda a transição de câmera da Playtech estabilizar o layout do pano antes de ler getBoundingClientRect()
+	      await sleep(280);
+	    }
 	  }
 
 	  const centerOf = (el) => {
 	    if (!el || !el.getBoundingClientRect) return null;
 	    const r = el.getBoundingClientRect();
 	    if (r.width < 2 || r.height < 2) return null;
-	    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), el };
+	    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), w: r.width, h: r.height, el };
 	  };
+
 	  const findByText = (exactList) => {
-	    const all = document.querySelectorAll('text, span, div, button, g, [data-automation-locator]');
+	    const all = document.querySelectorAll('text, tspan, span, div, button, g, [data-automation-locator]');
 	    const matches = [];
 	    for (let i = 0; i < all.length; i++) {
 	      const el = all[i];
+	      if (el.children && el.children.length > 2) continue;
 	      const t = (el.textContent || '').trim();
 	      if (exactList.includes(t)) {
 	        const c = centerOf(el);
-	        if (c && c.y > 100) matches.push(c);
+	        if (c && c.y > 120) matches.push(c);
 	      }
 	    }
 	    return matches;
+	  };
+
+	  // Localiza uma casa numérica (1..36) especificamente dentro do pano central de apostas (x entre 30%% e 73%% da tela)
+	  const findClothNumber = (numStr) => {
+	    const m = findByText([numStr]);
+	    const cloth = m.filter(p =>
+	      p.x > window.innerWidth * 0.34 &&
+	      p.x < window.innerWidth * 0.72 &&
+	      p.y > window.innerHeight * 0.65 &&
+	      p.y < window.innerHeight * 0.86
+	    );
+	    return cloth.length > 0 ? cloth[0] : null;
 	  };
 
 	  let pt = null;
 	  if (target.startsWith('chip:')) {
 	    const cents = parseInt(target.split(':')[1], 10);
 	    const label = (cents < 100) ? ('0.' + (cents / 10)) : String(cents / 100);
-	    const chipLoc = document.querySelector('[data-automation-locator*="chip-' + label + '"], [data-automation-locator*="chip_' + label + '"], [data-automation-locator*="chip"][data-automation-locator*="' + cents + '"]');
-	    if (chipLoc) pt = centerOf(chipLoc);
-	    if (!pt) {
-	      const m = findByText([label, 'R$' + label, label.replace('.', ',')]);
-	      // Fichas ficam na metade inferior direita da tela (y > window.innerHeight * 0.65)
-	      const lower = m.filter(p => p.y > window.innerHeight * 0.65 && p.x > window.innerWidth * 0.55);
-	      if (lower.length > 0) pt = lower[lower.length - 1];
-	      else if (m.length > 0) pt = m[m.length - 1];
+	    // Busca exclusivamente no chip-rack (canto inferior direito: x > 72%% da largura e y > 84%% da altura),
+	    // jamais clicando em fichas que já estejam posicionadas sobre o pano de apostas.
+	    const m = findByText([label, 'R$' + label, label.replace('.', ',')]);
+	    const rack = m.filter(p => p.x > window.innerWidth * 0.72 && p.y > window.innerHeight * 0.84);
+	    if (rack.length > 0) {
+	      pt = rack[rack.length - 1];
+	    } else {
+	      const chipLoc = document.querySelector('[data-automation-locator*="chip-' + label + '"], [data-automation-locator*="chip_' + label + '"]');
+	      if (chipLoc) pt = centerOf(chipLoc);
 	    }
-	  } else if (target === 'dozen:1' || target === 'col:1') {
-	    const m = findByText(['1st 12', '1ª 12', '1-12']);
+	  } else if (target === 'dozen:1') {
+	    const m = findByText(['1st 12', '1ª 12', '1-12']).filter(p => p.x < window.innerWidth * 0.72);
 	    if (m.length > 0) pt = m[0];
-	  } else if (target === 'dozen:2' || target === 'col:2') {
-	    const m = findByText(['2nd 12', '2ª 12', '13-24']);
+	  } else if (target === 'dozen:2') {
+	    const m = findByText(['2nd 12', '2ª 12', '13-24']).filter(p => p.x < window.innerWidth * 0.72);
 	    if (m.length > 0) pt = m[0];
-	  } else if (target === 'dozen:3' || target === 'col:3') {
-	    const m = findByText(['3rd 12', '3ª 12', '25-36']);
+	  } else if (target === 'dozen:3') {
+	    const m = findByText(['3rd 12', '3ª 12', '25-36']).filter(p => p.x < window.innerWidth * 0.72);
 	    if (m.length > 0) pt = m[0];
-	  } else if (target.startsWith('col2to1:')) {
-	    const rowIdx = parseInt(target.split(':')[1], 10); // 1=bottom(1..34), 2=middle(2..35), 3=top(3..36)
-	    const m = findByText(['2to1', '2 to 1', '2:1']);
+	  } else if (target.startsWith('col:') || target.startsWith('col2to1:')) {
+	    // Colunas reais (2to1 à direita do pano):
+	    // col:1 = fileira inferior (1, 4, 7 ... 31, 34)
+	    // col:2 = fileira do meio  (2, 5, 8 ... 32, 35)
+	    // col:3 = fileira superior (3, 6, 9 ... 33, 36)
+	    const rowIdx = parseInt(target.split(':')[1], 10);
+	    const m = findByText(['2to1', '2 to 1', '2:1']).filter(p =>
+	      p.x > window.innerWidth * 0.55 &&
+	      p.x < window.innerWidth * 0.76 &&
+	      p.y > window.innerHeight * 0.65 &&
+	      p.y < window.innerHeight * 0.86
+	    );
 	    if (m.length >= 3) {
-	      m.sort((a, b) => b.y - a.y); // ordena de baixo (maior Y = col 1) para cima (menor Y = col 3)
-	      pt = m[Math.min(Math.max(rowIdx - 1, 0), m.length - 1)];
+	      m.sort((a, b) => b.y - a.y); // ordena de baixo (maior Y = col:1) para cima (menor Y = col:3)
+	      pt = m[Math.min(Math.max(rowIdx - 1, 0), 2)];
+	    }
+	    if (!pt) {
+	      // Fallback geométrico exato a partir das duas últimas casas da fileira (31->34, 32->35, 33->36)
+	      const pair = rowIdx === 1 ? ['31', '34'] : (rowIdx === 2 ? ['32', '35'] : ['33', '36']);
+	      const cPrev = findClothNumber(pair[0]);
+	      const cLast = findClothNumber(pair[1]);
+	      if (cPrev && cLast && cLast.x > cPrev.x) {
+	        const stepX = cLast.x - cPrev.x;
+	        pt = { x: Math.round(cLast.x + stepX * 0.85), y: cLast.y };
+	      } else if (cLast) {
+	        pt = { x: Math.round(cLast.x + cLast.w * 0.95), y: cLast.y };
+	      }
 	    }
 	  } else if (target === 'low') {
-	    const m = findByText(['1-18', '1 to 18']);
+	    const m = findByText(['1-18', '1 to 18']).filter(p => p.x < window.innerWidth * 0.72);
 	    if (m.length > 0) pt = m[0];
 	  } else if (target === 'high') {
-	    const m = findByText(['19-36', '19 to 36']);
+	    const m = findByText(['19-36', '19 to 36']).filter(p => p.x < window.innerWidth * 0.72);
 	    if (m.length > 0) pt = m[0];
 	  } else if (target === 'even') {
-	    const m = findByText(['EVEN', 'PAR', 'Par']);
+	    const m = findByText(['EVEN', 'PAR', 'Par']).filter(p => p.x < window.innerWidth * 0.72);
 	    if (m.length > 0) pt = m[0];
 	  } else if (target === 'odd') {
-	    const m = findByText(['ODD', 'ÍMPAR', 'IMPAR', 'Ímpar']);
+	    const m = findByText(['ODD', 'ÍMPAR', 'IMPAR', 'Ímpar']).filter(p => p.x < window.innerWidth * 0.72);
 	    if (m.length > 0) pt = m[0];
 	  } else if (target === 'red' || target === 'black') {
 	    const loc = document.querySelector('[data-automation-locator*="' + target + '"], [class*="betSpot-' + target + '"], [class*="' + target + '-diamond"]');
 	    if (loc) pt = centerOf(loc);
 	    if (!pt) {
-	      const ev = findByText(['EVEN', 'PAR'])[0];
-	      const od = findByText(['ODD', 'ÍMPAR', 'IMPAR'])[0];
+	      const ev = findByText(['EVEN', 'PAR']).filter(p => p.x < window.innerWidth * 0.72)[0];
+	      const od = findByText(['ODD', 'ÍMPAR', 'IMPAR']).filter(p => p.x < window.innerWidth * 0.72)[0];
 	      if (ev && od) {
 	        const step = (od.x - ev.x) / 3;
 	        const x = Math.round(target === 'red' ? (ev.x + step) : (ev.x + step * 2));
-	        pt = { x, y: ev.y, el: document.elementFromPoint(x, ev.y) };
+	        pt = { x, y: ev.y };
 	      }
 	    }
 	  } else if (target === 'clear') {
@@ -168,70 +219,90 @@ func (c *Client) DispatchTargetClick(sid string, target string, fallbackX, fallb
 
 	  const finalX = pt ? pt.x : fbX;
 	  const finalY = pt ? pt.y : fbY;
-	  const hitEl = document.elementFromPoint(finalX, finalY) || (pt && pt.el);
-	  if (hitEl) {
-	    const opts = { bubbles: true, cancelable: true, view: window, clientX: finalX, clientY: finalY, button: 0, buttons: 1 };
-	    try {
-	      hitEl.dispatchEvent(new PointerEvent('pointerdown', opts));
-	      hitEl.dispatchEvent(new MouseEvent('mousedown', opts));
-	      hitEl.dispatchEvent(new PointerEvent('pointerup', opts));
-	      hitEl.dispatchEvent(new MouseEvent('mouseup', opts));
-	      hitEl.dispatchEvent(new MouseEvent('click', opts));
-	    } catch (_) {}
-	  }
 	  if (typeof window.__emit === 'function') {
 	    window.__emit(JSON.stringify({ t: 'click_resolved', target, x: finalX, y: finalY, found: !!pt, at: Date.now() }));
 	  }
 	})()`, string(targetJSON), fallbackX, fallbackY)
 
-	if target == "" {
-		return c.DispatchClick(sid, fallbackX, fallbackY)
-	}
-	if err := c.Send(sid, "Runtime.evaluate", map[string]any{
+	return c.Send(sid, "Runtime.evaluate", map[string]any{
 		"expression":   js,
 		"awaitPromise": true,
-	}); err != nil {
-		log.Printf("[click] erro em Runtime.evaluate para target=%s: %v", target, err)
-		return c.DispatchClick(sid, fallbackX, fallbackY)
-	}
-	time.Sleep(90 * time.Millisecond)
-	return nil
+	})
 }
 
-// BetReaderJS injeta no iframe da Playtech um leitor que publica via __emit o valor atual de Bet e Balance.
+// BetReaderJS injeta no iframe da Playtech um leitor imediato de Bet, Balance, Last Win, Game Code e fita de 12 números.
 const BetReaderJS = `(() => {
   try {
-    const parseBrlCents = (txt) => {
-      if (!txt) return null;
-      const cleaned = txt.replace(/[^\d.,]/g, '').trim();
-      if (!cleaned) return null;
-      const normalized = cleaned.replace(/\./g, '').replace(',', '.');
-      const val = parseFloat(normalized);
+    const parseMoneyCents = (raw) => {
+      if (!raw) return null;
+      const m = String(raw).match(/(\d[\d.,]*)/);
+      if (!m) return null;
+      let s = m[1];
+      const lastDot = s.lastIndexOf('.');
+      const lastComma = s.lastIndexOf(',');
+      if (lastDot !== -1 && lastComma !== -1) {
+        if (lastDot > lastComma) s = s.replace(/,/g, '');
+        else s = s.replace(/\./g, '').replace(',', '.');
+      } else if (lastComma !== -1) {
+        s = s.replace(',', '.');
+      } else if (lastDot !== -1) {
+        const parts = s.split('.');
+        if (parts.length > 2) s = parts.slice(0, -1).join('') + '.' + parts[parts.length - 1];
+      }
+      const val = parseFloat(s);
       if (Number.isNaN(val)) return null;
       return Math.round(val * 100);
     };
-    let betCents = 0;
+
+    const bodyTxt = (document.body && document.body.innerText) || '';
     let balCents = null;
-    const all = document.querySelectorAll('[class*="balance"], [class*="bet"], [data-automation-locator*="bet"], [data-automation-locator*="balance"], span, div');
-    for (let i = 0; i < all.length; i++) {
-      const el = all[i];
-      if (el.children.length > 2) continue;
-      const t = (el.textContent || '').trim();
-      if (/^Bet\s*R\$/i.test(t) || /^Aposta\s*R\$/i.test(t)) {
-        const c = parseBrlCents(t);
-        if (c !== null) betCents = c;
-      } else if (/^Balance\s*R\$/i.test(t) || /^Saldo\s*R\$/i.test(t)) {
-        const c = parseBrlCents(t);
-        if (c !== null) balCents = c;
-      }
+    const balMatch = bodyTxt.match(/(?:Balance|Saldo)\s*[:\r\n\s]*R?\$\s*([\d.,]+)/i);
+    if (balMatch) balCents = parseMoneyCents(balMatch[1]);
+
+    let betCents = 0;
+    const betMatch = bodyTxt.match(/\b(?:Bet|Aposta|Total Bet)\s*[:\r\n\s]*R?\$\s*([\d.,]+)/i);
+    if (betMatch) {
+      const c = parseMoneyCents(betMatch[1]);
+      if (c !== null) betCents = c;
     }
+
+    let lastWinCents = 0;
+    const winMatch = bodyTxt.match(/(?:Last Win|[UÚ]ltimo Ganho)\s*[:\r\n\s]*R?\$\s*([\d.,]+)/i);
+    if (winMatch) {
+      const c = parseMoneyCents(winMatch[1]);
+      if (c !== null) lastWinCents = c;
+    }
+
+    let gameCode = '';
+    const gcMatch = bodyTxt.match(/(?:Game Code|C[oó]digo do Jogo)\s*[:\s]*(\d{5,16})/i);
+    if (gcMatch) gameCode = gcMatch[1];
+
+    let roundOpen = false;
+    if (/PLACE YOUR BETS|FA[CÇ]A SUAS APOSTAS|FA[CÇ]AM SUAS APOSTAS/i.test(bodyTxt)) {
+      roundOpen = true;
+    } else if (/WAIT FOR THE NEXT ROUND|NO MORE BETS|AGUARDE A PR[OÓ]XIMA|N[AÃ]O H[AÁ] MAIS APOSTAS|SEM MAIS APOSTAS/i.test(bodyTxt)) {
+      roundOpen = false;
+    } else if (balCents !== null) {
+      roundOpen = true;
+    }
+
+    const nums = Array.isArray(window.__monster_last_nums) ? window.__monster_last_nums : [];
     if (typeof window.__emit === 'function') {
-      window.__emit(JSON.stringify({ t: 'slip', bet_cents: betCents, balance_cents: balCents, at: Date.now() }));
+      window.__emit(JSON.stringify({
+        t: 'slip',
+        nums,
+        bet_cents: betCents,
+        balance_cents: balCents,
+        last_win_cents: lastWinCents,
+        game_code: gameCode,
+        round_open: roundOpen,
+        at: Date.now()
+      }));
     }
   } catch (_) {}
 })();`
 
-// RequestSlipRead solicita ao iframe da Playtech a leitura imediata do Bet Slip e Saldo via __emit.
+// RequestSlipRead solicita ao iframe da Playtech a leitura imediata do Bet Slip, Saldo e fita via __emit.
 func (c *Client) RequestSlipRead(sid string) error {
 	if sid == "" {
 		return errors.New("empty sessionId for RequestSlipRead")

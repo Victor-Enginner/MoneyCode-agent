@@ -152,6 +152,10 @@ pub struct SessionDto {
     pub bankroll_cents: Option<i64>,
     /// P&L acumulado da sessão em centavos inteiros (`None` -> `"—"`).
     pub pnl_cents: Option<i64>,
+    /// Aposta atualmente aceita na mesa em centavos (`Bet R$...` da Playtech; `None` -> `"—"`).
+    pub table_bet_cents: Option<u64>,
+    /// Último ganho pago pela mesa em centavos (`Last Win R$...`; `None` -> `"—"`).
+    pub last_win_cents: Option<u64>,
     /// Pontos da curva P&L da sessão em centavos inteiros.
     pub pnl_history_cents: Vec<i64>,
     /// Rótulo da cobertura ativa (ex.: `"COL 2+3 · R$ 0,20"` ou `None` -> `"—"`).
@@ -186,8 +190,10 @@ pub struct SpinItemDto {
     pub spin_id: String,
     /// Número sorteado (`0..=36`).
     pub number: u8,
-    /// Coluna (`0` para zero, `1..=3` para colunas).
+    /// Coluna real `2 to 1` (`0` para zero, `1..=3` para `(n-1)%3 + 1`).
     pub column: u8,
+    /// Dúzia real `1st/2nd/3rd 12` (`0` para zero, `1..=3` para `(n-1)/12 + 1`).
+    pub dozen: u8,
     /// Timestamp em milissegundos.
     pub ts: i64,
     /// Fonte (`ws`, `mo`, `ext`, `ocr`).
@@ -366,6 +372,8 @@ impl FuiController {
                     uptime_sec: None,
                     bankroll_cents: None,
                     pnl_cents: None,
+                    table_bet_cents: None,
+                    last_win_cents: None,
                     pnl_history_cents: Vec::new(),
                     active_cover_label: None,
                     exposure_cents: None,
@@ -390,23 +398,51 @@ impl FuiController {
         CloseDisposition::HideWindowKeepAlive
     }
 
+    /// Atualiza banca, P&L, aposta na mesa e último ganho com os valores lidos do DOM da Playtech.
+    pub fn sync_table_telemetry(
+        &self,
+        bankroll_cents: Option<i64>,
+        pnl_cents: Option<i64>,
+        table_bet_cents: Option<u64>,
+        last_win_cents: Option<u64>,
+    ) {
+        if let Ok(mut g) = self.inner.lock() {
+            if let Some(b) = bankroll_cents {
+                g.session.bankroll_cents = Some(b);
+            }
+            if let Some(p) = pnl_cents {
+                g.session.pnl_cents = Some(p);
+            }
+            if let Some(bet) = table_bet_cents {
+                g.session.table_bet_cents = Some(bet);
+            }
+            if let Some(win) = last_win_cents {
+                g.session.last_win_cents = Some(win);
+            }
+        }
+    }
+
     /// Sincroniza métricas vivas do `monster-core` (banca, P&L, relógio de sessão e cobertura ativa) com a FUI.
     pub fn sync_live_metrics(
         &self,
         uptime_sec: u64,
-        bankroll_cents: i64,
-        pnl_cents: i64,
+        bankroll_cents: Option<i64>,
+        pnl_cents: Option<i64>,
         active_cover_label: Option<String>,
         exposure_cents: Option<u64>,
     ) {
         if let Ok(mut g) = self.inner.lock() {
             g.session.uptime_sec = Some(uptime_sec);
-            g.session.bankroll_cents = Some(bankroll_cents);
-            g.session.pnl_cents = Some(pnl_cents);
-            g.session.pnl_history_cents.push(pnl_cents);
-            if g.session.pnl_history_cents.len() > 60 {
-                let drop_n = g.session.pnl_history_cents.len() - 60;
-                g.session.pnl_history_cents.drain(0..drop_n);
+            if bankroll_cents.is_some() {
+                g.session.bankroll_cents = bankroll_cents;
+            }
+            if let Some(pnl) = pnl_cents {
+                g.session.pnl_cents = Some(pnl);
+                g.session.pnl_history_cents.push(pnl);
+                if g.session.pnl_history_cents.len() > 60 {
+                    let drop_n = g.session.pnl_history_cents.len() - 60;
+                    g.session.pnl_history_cents.drain(0..drop_n);
+                }
             }
             g.session.active_cover_label = active_cover_label;
             g.session.exposure_cents = exposure_cents;
@@ -445,37 +481,51 @@ impl FuiController {
         Ok(g.cfg.clone())
     }
 
-    /// Comando IPC de leitura: `get_spins` — lê os 20 últimos spins do SQLite (§5.B e §7).
+    /// Comando IPC de leitura: `get_spins` — lê os 20 últimos spins do SQLite, que é a fonte de verdade
+    /// sincronizada com a fita de números da Playtech por `timeline_sync` (§5.B e §7).
     pub fn get_spins(&self, pool: &SqlitePool) -> Result<Vec<SpinItemDto>, UiError> {
-        pool.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT s.spin_id, s.number, s.ts, s.source,
-                        EXISTS(SELECT 1 FROM intents i WHERE i.spin_id = s.spin_id) AS triggered
-                 FROM spins s
-                 ORDER BY s.ts DESC, s.id DESC
-                 LIMIT 20",
-            )?;
-            let rows = stmt.query_map([], |r| {
-                let number_i64: i64 = r.get(1)?;
-                let number = u8::try_from(number_i64.clamp(0, 36)).unwrap_or(0);
-                let column = if number == 0 { 0 } else { (number - 1) / 12 + 1 };
-                let triggered_int: i64 = r.get(4)?;
-                Ok(SpinItemDto {
-                    spin_id: r.get(0)?,
-                    number,
-                    column,
-                    ts: r.get(2)?,
-                    source: r.get(3)?,
-                    triggered_matcher: triggered_int != 0,
-                })
-            })?;
-            let mut list = Vec::with_capacity(20);
-            for item in rows {
-                list.push(item?);
-            }
-            Ok(list)
-        })
-        .map_err(|e| UiError::Store(StoreError::Database(e)))
+        let list = pool
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT s.spin_id, s.number, s.ts, s.source,
+                            EXISTS(SELECT 1 FROM intents i WHERE i.spin_id = s.spin_id) AS triggered
+                     FROM spins s
+                     ORDER BY s.ts DESC, s.id DESC
+                     LIMIT 20",
+                )?;
+                let rows = stmt.query_map([], |r| {
+                    let number_i64: i64 = r.get(1)?;
+                    let number = u8::try_from(number_i64.clamp(0, 36)).unwrap_or(0);
+                    let column = if number == 0 {
+                        0
+                    } else {
+                        (number - 1) % 3 + 1
+                    };
+                    let dozen = if number == 0 {
+                        0
+                    } else {
+                        (number - 1) / 12 + 1
+                    };
+                    let triggered_int: i64 = r.get(4)?;
+                    Ok(SpinItemDto {
+                        spin_id: r.get(0)?,
+                        number,
+                        column,
+                        dozen,
+                        ts: r.get(2)?,
+                        source: r.get(3)?,
+                        triggered_matcher: triggered_int != 0,
+                    })
+                })?;
+                let mut out = Vec::with_capacity(20);
+                for item in rows {
+                    out.push(item?);
+                }
+                Ok(out)
+            })
+            .map_err(|e| UiError::Store(StoreError::Database(e)))?;
+
+        Ok(list)
     }
 
     /// Comando IPC de leitura: `get_ladder` — monta a tabela da escada ×3 a partir de `ladder_state` e `Cfg` (§5.D e §7).
@@ -658,7 +708,7 @@ impl FuiController {
 
     /// Comando IPC de escrita: `set_base` (§7).
     pub fn set_base(&self, base_cents: u64) -> Result<Cfg, UiError> {
-        if base_cents < 10 || !base_cents.is_multiple_of(10) {
+        if base_cents < 10 || base_cents % 10 != 0 {
             return Err(UiError::InvalidParam(
                 "base_cents deve ser múltiplo de 10 >= 10".to_string(),
             ));

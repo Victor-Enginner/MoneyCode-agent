@@ -133,8 +133,8 @@ pub const fn cover_wins_real_roulette(cover: Cover, number: u8) -> bool {
         Cover::Black => !monster_strategy_native::is_red_number(number),
         Cover::Low => number <= 18,
         Cover::High => number >= 19,
-        Cover::Even => number.is_multiple_of(2),
-        Cover::Odd => !number.is_multiple_of(2),
+        Cover::Even => number % 2 == 0,
+        Cover::Odd => number % 2 != 0,
         Cover::Straight(n) => number == n,
         Cover::Terminal(t) => (number % 10) == t,
     }
@@ -373,8 +373,8 @@ mod tests {
             );
         }
         assert!(!report.is_empty());
-        // Garante que os dois padrões invictos (setor_vies e quebra_coluna_real_2to1) estão aprovados (worth_entering = true)
-        // e que os padrões que estouraram nessa mesa estão bloqueados (worth_entering = false)!
+        // Garante que os padrões invictos nessa mesa estão aprovados (worth_entering = true)
+        // e que os que estouraram estão bloqueados (worth_entering = false)!
         let setor = report
             .iter()
             .find(|r| r.strategy_id == "setor_vies")
@@ -382,12 +382,19 @@ mod tests {
         assert!(setor.worth_entering);
         assert_eq!(setor.busts, 0);
 
-        let col2to1 = report
+        // Coluna real (`2to1`) e Dúzia são matchers distintos, cada um com seu `strategy_id`.
+        let coluna = report
             .iter()
-            .find(|r| r.strategy_id == "quebra_coluna_real_2to1")
-            .expect("quebra_coluna_real_2to1 present");
-        assert!(col2to1.worth_entering);
-        assert_eq!(col2to1.busts, 0);
+            .find(|r| r.strategy_id == "quebra_permanencia_coluna")
+            .expect("quebra_permanencia_coluna present");
+        assert!(coluna.worth_entering);
+        assert_eq!(coluna.busts, 0);
+
+        let duzia = report
+            .iter()
+            .find(|r| r.strategy_id == "quebra_permanencia_duzia")
+            .expect("quebra_permanencia_duzia present");
+        assert!(!duzia.worth_entering);
 
         let cluster = report
             .iter()

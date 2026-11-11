@@ -175,8 +175,10 @@ mod tests {
         };
         let matchers = default_matchers();
         let snap = build_brain_snapshot(&matchers, &chrono, &cfg);
-        assert_eq!(snap.tier1_count, 5);
-        assert_eq!(snap.tier1_combined_pnl_cents, 590); // 290 + 120 + 110 + 50 + 20 = +590c (R$ 5,90 invicto!)
+        // Recalculado após a separação estrita Coluna (`2to1`) x Dúzia (`1st/2nd/3rd 12`):
+        // cluster 290 + setor 190 + setor_duzia 120 + coluna 110 + fib 90 + cor 50 + alto_baixo 20.
+        assert_eq!(snap.tier1_count, 7);
+        assert_eq!(snap.tier1_combined_pnl_cents, 870);
         let md = render_gbrain_markdown(&snap);
         println!("{md}");
         assert!(md.contains("Tier1Invicto"));

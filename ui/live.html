@@ -24,7 +24,7 @@
     }
     .panel-a {
       grid-column: 1 / -1; height: 36px; display: grid;
-      grid-template-columns: 156px 110px 132px 132px 92px 1fr 220px 92px;
+      grid-template-columns: 156px 110px 132px 132px 92px 132px 132px 1fr 220px 92px;
       align-items: center; gap: 8px; padding: 0 8px;
       background: var(--panel); border: 1px solid var(--line);
     }
@@ -82,7 +82,8 @@
       <div class="metric-cell"><span class="metric-label">BANCA</span><span id="m-bank" class="metric-val num">—</span></div>
       <div class="metric-cell"><span class="metric-label">P&amp;L</span><span id="m-pnl" class="metric-val num">—</span></div>
       <div class="metric-cell"><span class="metric-label">DEGRAU</span><span id="m-step" class="metric-val num">—</span></div>
-      <div></div>
+      <div class="metric-cell"><span class="metric-label">APOSTA MESA</span><span id="m-bet" class="metric-val num">—</span></div>
+      <div class="metric-cell"><span class="metric-label">ÚLT. GANHO</span><span id="m-win" class="metric-val num">—</span></div>
       <div class="led-group num">
         <span class="led-item"><span id="led-ws" class="led-dot led-ok"></span>WS</span>
         <span class="led-item"><span id="led-mo" class="led-dot led-ok"></span>MO</span>
@@ -173,6 +174,8 @@
       document.getElementById('m-bank').textContent = fmtCents(t.session?.bankroll_cents);
       document.getElementById('m-pnl').textContent = fmtCents(t.session?.pnl_cents);
       document.getElementById('m-step').textContent = (t.ladder?.current_step !== null && t.ladder?.max_steps !== null) ? `${t.ladder.current_step}/${t.ladder.max_steps}` : '—';
+      document.getElementById('m-bet').textContent = fmtCents(t.session?.table_bet_cents);
+      document.getElementById('m-win').textContent = fmtCents(t.session?.last_win_cents);
       document.getElementById('c-cover').textContent = fmtVal(t.session?.active_cover_label);
       document.getElementById('c-exp').textContent = fmtCents(t.session?.exposure_cents);
       document.getElementById('d-blow').textContent = 'ESTOURO: ' + fmtCents(t.ladder?.blow_cost_cents);
@@ -192,7 +195,7 @@
         const s = spins[i];
         const d = document.createElement('div');
         d.className = 'spin-pill' + (s ? (' col-' + s.column + (i===0?' latest':'') + (s.triggered_matcher?' triggered':'')) : '');
-        d.innerHTML = s ? `<strong>${s.number}</strong><span>${s.column===0?'ZERO':'COL '+s.column}</span><span>${s.source.toUpperCase()}</span>` : '<span>—</span><span>—</span><span>—</span>';
+        d.innerHTML = s ? `<strong>${s.number}</strong><span>${s.column===0?'ZERO':('C'+s.column+' · D'+(s.dozen||Math.floor((s.number-1)/12)+1))}</span><span>${s.source.toUpperCase()}</span>` : '<span>—</span><span>—</span><span>—</span>';
         tl.appendChild(d);
       }
       const lb = document.getElementById('ladder-body');

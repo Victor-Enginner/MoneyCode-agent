@@ -9,6 +9,7 @@ pub mod brain;
 pub mod dag;
 pub mod executor;
 pub mod reconciler;
+pub mod timeline_sync;
 
 pub use analytics::{
     analyze_table_systemic, compute_chi_square_37, compute_chi_square_cols,
@@ -29,9 +30,13 @@ pub use dag::{
 };
 pub use executor::{
     place, Calibration, CdpActuator, CoverAck, DryRunActuator, ExecError, ExecutionMode, Fills,
-    KillSwitch, LiveHttpActuator,
+    KillSwitch, LiveHttpActuator, LiveTableTelemetry,
 };
 pub use reconciler::{boot_reconcile, reconcile_spin, BootReconcileReport, ReconcileReport};
+pub use timeline_sync::{
+    count_new_spins, has_recent_number, load_chronological_history, read_newest_numbers,
+    sanitize_strip, sync_strip_to_db, StripSyncReport, MAX_STRIP,
+};
 
 /// Versão do módulo core.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -186,11 +191,13 @@ mod tests {
 
         let err = place(&pool, &actuator, &plan, &cal, &kill_switch, 1_730_000_010_000)
             .expect_err("preview mismatch must abort");
+        // A divergência é detectada já na primeira cobertura (10¢ esperados, 20¢ na mesa),
+        // antes de empilhar a segunda cobertura.
         assert!(matches!(
             err,
             ExecError::PreviewMismatch {
-                preview: 30,
-                expected: 20
+                preview: 20,
+                expected: 10
             }
         ));
         assert_eq!(actuator.confirmed_count(), 0, "nunca deve chamar confirm() se preview divergir");
