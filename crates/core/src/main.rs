@@ -427,7 +427,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         strategy_id: pre.strategy_id.clone(),
                         confidence: pre.confidence,
                         ev_cents: 0,
-                        decision: IntentDecision::Skip,
+                        decision: IntentDecision::Skipped,
                         reason: Some(pre_reason),
                         ladder_step: current_step,
                         stake_cents: 0,
