@@ -162,6 +162,19 @@ pub struct RetentionReport {
     pub deleted_errors: u64,
 }
 
+/// Estado persistido da escada por estratégia (`ladder_state`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LadderRow {
+    /// Identificador da estratégia.
+    pub strategy_id: String,
+    /// Degrau atual (`0..=max_steps`).
+    pub step: u8,
+    /// Perda acumulada atual na escada em centavos inteiros.
+    pub loss_cents: u64,
+    /// Timestamp do último reset da escada em milissegundos.
+    pub reset_at: Option<i64>,
+}
+
 /// Inicializa um `SqlitePool` em modo WAL e aplica a migração inicial no boot.
 pub fn init_pool(uri: &str) -> Result<SqlitePool, StoreError> {
     let pool = SqlitePool::connect_sync(uri).map_err(StoreError::from_sqlx)?;
@@ -299,6 +312,94 @@ pub fn retention_job(pool: &SqlitePool, now_ms: i64) -> Result<RetentionReport, 
             deleted_spins: deleted_spins as u64,
             deleted_errors: deleted_errors as u64,
         })
+    })
+    .map_err(StoreError::from_sqlx)
+}
+
+/// Atualiza a decisão e justificativa de uma intenção existente (ex.: `aborted` por `preview_mismatch`).
+pub fn update_intent_decision(
+    pool: &SqlitePool,
+    intent_id: i64,
+    decision: IntentDecision,
+    reason: Option<&str>,
+) -> Result<(), StoreError> {
+    pool.with_conn(|conn| {
+        conn.execute(
+            "UPDATE intents SET decision = ?1, reason = ?2 WHERE id = ?3",
+            params![decision.as_str(), reason, intent_id],
+        )?;
+        Ok(())
+    })
+    .map_err(StoreError::from_sqlx)
+}
+
+/// Persiste ou atualiza o estado da escada (`ladder_state`) de uma estratégia.
+pub fn upsert_ladder_state(
+    pool: &SqlitePool,
+    strategy_id: &str,
+    step: u8,
+    loss_cents: u64,
+    reset_at: Option<i64>,
+) -> Result<(), StoreError> {
+    let loss_i64 = i64::try_from(loss_cents).map_err(|_| {
+        StoreError::ConstraintViolation("loss_cents excede i64::MAX".to_string())
+    })?;
+    pool.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO ladder_state (strategy_id, step, loss_cents, reset_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(strategy_id) DO UPDATE SET
+               step = excluded.step,
+               loss_cents = excluded.loss_cents,
+               reset_at = excluded.reset_at",
+            params![strategy_id, i64::from(step), loss_i64, reset_at],
+        )?;
+        Ok(())
+    })
+    .map_err(StoreError::from_sqlx)
+}
+
+/// Lê o estado da escada (`ladder_state`) de uma estratégia, retornando degrau 0 caso ainda não exista.
+pub fn get_ladder_state(pool: &SqlitePool, strategy_id: &str) -> Result<LadderRow, StoreError> {
+    pool.with_conn(|conn| {
+        let row: Option<(i64, i64, Option<i64>)> = conn
+            .query_row(
+                "SELECT step, loss_cents, reset_at FROM ladder_state WHERE strategy_id = ?1",
+                params![strategy_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        match row {
+            Some((step, loss, reset_at)) => Ok(LadderRow {
+                strategy_id: strategy_id.to_string(),
+                step: u8::try_from(step.max(0)).unwrap_or(0),
+                loss_cents: u64::try_from(loss.max(0)).unwrap_or(0),
+                reset_at,
+            }),
+            None => Ok(LadderRow {
+                strategy_id: strategy_id.to_string(),
+                step: 0,
+                loss_cents: 0,
+                reset_at: None,
+            }),
+        }
+    })
+    .map_err(StoreError::from_sqlx)
+}
+
+/// Registra um evento na tabela `errors`.
+pub fn insert_error(
+    pool: &SqlitePool,
+    kind: &str,
+    detail: &str,
+    ts: i64,
+) -> Result<i64, StoreError> {
+    pool.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO errors (kind, detail, ts) VALUES (?1, ?2, ?3)",
+            params![kind, detail, ts],
+        )?;
+        Ok(conn.last_insert_rowid())
     })
     .map_err(StoreError::from_sqlx)
 }

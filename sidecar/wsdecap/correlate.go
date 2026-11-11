@@ -13,8 +13,8 @@ import (
 	"sync"
 )
 
-// MaxCorrelationWindowMs define a janela máxima (±1500 ms) entre frame WS e evento __emit.
-const MaxCorrelationWindowMs int64 = 1500
+// MaxCorrelationWindowMs define a janela máxima (até 4500 ms antes / 1500 ms depois) entre frame WS e evento __emit.
+const MaxCorrelationWindowMs int64 = 4500
 
 type recordedFrame struct {
 	tsMs  int64
@@ -66,37 +66,28 @@ func (c *Correlator) RecordFrame(tsMs int64, payload []byte) {
 		tsMs:  tsMs,
 		cands: cands,
 	})
-	if len(c.frames) > 512 {
-		c.frames = c.frames[len(c.frames)-256:]
+	if len(c.frames) > 2048 {
+		c.frames = c.frames[len(c.frames)-1024:]
 	}
 }
 
-// OnConfirmedSpin correlaciona um número confirmado (0..=36) em emitTsMs com o frame mais próximo em ±1500 ms.
+// OnConfirmedSpin correlaciona um número confirmado (0..=36) em emitTsMs com os frames na janela de correlação.
 func (c *Correlator) OnConfirmedSpin(number uint64, emitTsMs int64) []RankedPath {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.spins++
-	bestIdx := -1
-	bestDiff := MaxCorrelationWindowMs + 1
+	seenInSpin := make(map[string]struct{})
 
-	for i, f := range c.frames {
+	for _, f := range c.frames {
 		diff := emitTsMs - f.tsMs
-		if diff < 0 {
-			diff = -diff
+		if diff < -1500 || diff > MaxCorrelationWindowMs {
+			continue
 		}
-		if diff <= MaxCorrelationWindowMs && diff < bestDiff {
-			bestDiff = diff
-			bestIdx = i
-		}
-	}
-
-	if bestIdx >= 0 {
-		seenInFrame := make(map[string]struct{})
-		for _, cand := range c.frames[bestIdx].cands {
+		for _, cand := range f.cands {
 			if cand.Val == number {
-				if _, dup := seenInFrame[cand.Path]; !dup {
-					seenInFrame[cand.Path] = struct{}{}
+				if _, dup := seenInSpin[cand.Path]; !dup {
+					seenInSpin[cand.Path] = struct{}{}
 					c.counts[cand.Path]++
 				}
 			}

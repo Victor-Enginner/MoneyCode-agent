@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# Coordenadas calibradas para o canvas da Roleta Brasileira (Playtech 1920x1080).
+# Usado exclusivamente via Input.dispatchMouseEvent (mousePressed + mouseReleased).
+
+[buttons]
+confirm_x = 1045
+confirm_y = 940
+clear_x = 835
+clear_y = 940
+
+[covers]
+"col:1" = [875, 760]
+"col:2" = [875, 710]
+"col:3" = [875, 660]
+"dozen:1" = [520, 815]
+"dozen:2" = [670, 815]
+"dozen:3" = [815, 815]
+
+[chips]
+10 = [955, 945]
+50 = [1045, 945]
+100 = [1090, 945]
+500 = [1135, 945]
+1000 = [1180, 945]
+2500 = [1225, 945]

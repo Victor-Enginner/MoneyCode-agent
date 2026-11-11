@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Walker protobuf genérico sem necessidade de arquivo .proto prévio.
 // Percorre wire types varint (0) e length-delimited (2) até profundidade 8.
-// Coleta candidatos cujo valor inteiro esteja no intervalo válido da roleta (0..=36).
+// Coleta candidatos diretos (0..=36) e também codificados com offset-100 (100..=136 da Playtech).
 
 package wsdecap
 
 import "strconv"
+
+// PlaytechNumberOffset é o offset confirmado em gameRoundOver (#3.16.3.1.2) e GameEventRequest (#3.118.1).
+const PlaytechNumberOffset uint64 = 100
 
 // Cand representa um candidato (caminho de campo protobuf, valor 0..=36).
 type Cand struct {
@@ -44,6 +47,8 @@ func walk(b []byte, path string, out *[]Cand, depth int) {
 			b = b[m:]
 			if v <= 36 {
 				*out = append(*out, Cand{Path: p, Val: v})
+			} else if v >= PlaytechNumberOffset && v <= PlaytechNumberOffset+36 {
+				*out = append(*out, Cand{Path: p + "[offset100]", Val: v - PlaytechNumberOffset})
 			}
 		case 2: // length-delimited
 			ln, m := uvarint(b)

@@ -194,10 +194,13 @@ type moBindingPayload struct {
 	N   int    `json:"n"`
 	Src string `json:"src"`
 	At  int64  `json:"at"`
+	B64 string `json:"b64"`
+	URL string `json:"url"`
 }
 
 func runCaptureLoop(ctx context.Context, cdpURL string, corr *wsdecap.Correlator, hub *Hub) {
 	var seq atomic.Uint64
+	var wsFramesLogged atomic.Uint64
 	errLogger := func(kind, detail string) {
 		log.Printf("[errors] kind=%s detail=%s", kind, detail)
 	}
@@ -224,6 +227,13 @@ func runCaptureLoop(ctx context.Context, cdpURL string, corr *wsdecap.Correlator
 				if err := client.HandleAttached(ev); err != nil {
 					errLogger("attach_target", err.Error())
 				}
+			case "Page.frameNavigated", "Page.loadEventFired":
+				client.ReEvaluateObserver(ev.SessionID)
+			case "Network.webSocketCreated":
+				wsURL, _ := ev.Params["url"].(string)
+				if wsURL != "" {
+					log.Printf("[ws] conectado: %s", wsURL)
+				}
 			case "Network.webSocketFrameReceived":
 				resp, ok := ev.Params["response"].(map[string]any)
 				if !ok {
@@ -235,7 +245,13 @@ func runCaptureLoop(ctx context.Context, cdpURL string, corr *wsdecap.Correlator
 				}
 				raw, err := base64.StdEncoding.DecodeString(payloadB64)
 				if err != nil {
-					continue
+					raw, err = base64.RawStdEncoding.DecodeString(payloadB64)
+					if err != nil {
+						raw = []byte(payloadB64)
+					}
+				}
+				if wsFramesLogged.Add(1) == 1 {
+					log.Printf("[ws] 1º frame binário recebido via CDP (%d bytes)", len(raw))
 				}
 				corr.RecordFrame(time.Now().UnixMilli(), raw)
 			case "Runtime.bindingCalled":
@@ -248,15 +264,34 @@ func runCaptureLoop(ctx context.Context, cdpURL string, corr *wsdecap.Correlator
 				if err := json.Unmarshal([]byte(payloadStr), &mo); err != nil {
 					continue
 				}
+				nowMs := time.Now().UnixMilli()
+				if mo.T == "ws" && mo.B64 != "" {
+					raw, err := base64.StdEncoding.DecodeString(mo.B64)
+					if err == nil && len(raw) > 0 {
+						if wsFramesLogged.Add(1) == 1 {
+							log.Printf("[ws] 1º frame binário recebido via hook JS (%d bytes) url=%s", len(raw), mo.URL)
+						}
+						ts := mo.At
+						if ts <= 0 {
+							ts = nowMs
+						}
+						corr.RecordFrame(ts, raw)
+					}
+					continue
+				}
 				if mo.N < 0 || mo.N > 36 {
 					continue
 				}
-				nowMs := time.Now().UnixMilli()
 				if mo.At <= 0 {
 					mo.At = nowMs
 				}
-				corr.OnConfirmedSpin(uint64(mo.N), mo.At)
+				top := corr.OnConfirmedSpin(uint64(mo.N), mo.At)
 				id := seq.Add(1)
+				if len(top) > 0 {
+					log.Printf("[spin #%d] confirmado via observer: numero=%d | lider=%s (%d/%d)", id, mo.N, top[0].Path, top[0].Hits, top[0].Spins)
+				} else {
+					log.Printf("[spin #%d] confirmado via observer: numero=%d ts=%d", id, mo.N, mo.At)
+				}
 				spinEv := SpinEvent{
 					V:         1,
 					SpinID:    fmt.Sprintf("mo-%d-%d", mo.At, id),
@@ -308,6 +343,13 @@ func main() {
 		Handler:           healthMux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+
+	log.Printf(
+		"[monster-sidecar] iniciando | stream=http://127.0.0.1:%d/stream | health=http://127.0.0.1:8790/health | cdp=%s | ws-probe=%v",
+		*portFlag,
+		*cdpFlag,
+		*wsProbeFlag,
+	)
 
 	go func() {
 		if err := healthServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

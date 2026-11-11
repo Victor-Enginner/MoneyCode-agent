@@ -6,7 +6,12 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
+monster-capture = { path = "../capture" }
+monster-risk = { path = "../risk" }
+monster-store = { path = "../store" }
+monster-strategy-native = { path = "../strategy-native" }
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
