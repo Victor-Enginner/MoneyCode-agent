@@ -160,6 +160,10 @@ pub struct SessionDto {
     pub pnl_history_cents: Vec<i64>,
     /// Rótulo da cobertura ativa (ex.: `"COL 2+3 · R$ 0,20"` ou `None` -> `"—"`).
     pub active_cover_label: Option<String>,
+    /// Números cobertos na entrada aberta (`0..=36`). Vem do plano já expandido: uma aposta do
+    /// cluster 1-4-7+0 chega aqui como 15 plenos, então o overlay do pano é sempre por número.
+    #[serde(default)]
+    pub cover_numbers: Vec<u8>,
     /// Exposição total aberta na rodada em centavos inteiros (`None` -> `"—"`).
     pub exposure_cents: Option<u64>,
     /// Janela restante em milissegundos (`None` -> `"—"`).
@@ -376,6 +380,7 @@ impl FuiController {
                     last_win_cents: None,
                     pnl_history_cents: Vec::new(),
                     active_cover_label: None,
+                    cover_numbers: Vec::new(),
                     exposure_cents: None,
                     remaining_window_ms: None,
                     banner_detail: None,
@@ -453,6 +458,15 @@ impl FuiController {
                     GlobalState::Observando
                 };
             }
+        }
+    }
+
+    /// Publica os números cobertos pela entrada aberta (overlay do pano por número).
+    ///
+    /// Lista vazia limpa o overlay — é o que acontece quando a entrada é reconciliada.
+    pub fn set_cover_numbers(&self, numbers: Vec<u8>) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.session.cover_numbers = numbers;
         }
     }
 

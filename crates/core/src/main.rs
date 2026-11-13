@@ -486,6 +486,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         } else if let Some((prev_plan, prev_acks)) = pending_entry.take() {
+            // Rodada resolvida: o overlay sai do pano junto com a entrada.
+            fui.set_cover_numbers(Vec::new());
             match reconcile_spin(
                 &pool,
                 PlayedEntry {
@@ -634,6 +636,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Some(label),
                         Some(plan.total_cents),
                     );
+                    // Overlay do pano por número: o cluster chega aqui já expandido em plenos.
+                    let mut covered: Vec<u8> = plan
+                        .covers
+                        .iter()
+                        .flat_map(|(cover, _)| cover.numbers())
+                        .collect();
+                    covered.sort_unstable();
+                    covered.dedup();
+                    fui.set_cover_numbers(covered);
                     pending_entry = Some((plan, fills.items));
                 }
                 Err(err) => {
