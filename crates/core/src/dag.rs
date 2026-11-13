@@ -229,6 +229,38 @@ fn compile_plan(spin_id: &str, winner: &Aggregate, ladder_step: u8, cfg: &Cfg) -
     })
 }
 
+/// Família dos matchers "de fora" (quebra de permanência), dona da prioridade de entrada.
+fn is_permanence_family(id: &str) -> bool {
+    id.starts_with("quebra_")
+}
+
+/// Prioridade fixa do operador: padrão de fora manda, entrada por número espera.
+///
+/// Cobertura de número (`Straight`/`Terminal` — `cluster_final`, `terminal_quente`) só entra
+/// quando **nenhuma** quebra de permanência está disparada neste giro e **nenhuma** escada de
+/// fora está aberta. Sem isso os dois sinais opostos competem por confiança e o número ganha
+/// por ter confiança mais alta, que é o bug de projeto do §8.
+///
+/// Devolve quantos sinais de número foram descartados (o `sinais=` do log já sai filtrado).
+fn apply_permanence_priority(
+    aggregates: &mut Vec<Aggregate>,
+    ladder_steps: &LadderSteps,
+    min_confidence: f64,
+) -> usize {
+    let ladder_open = ladder_steps
+        .iter()
+        .any(|(id, step)| *step > 0 && is_permanence_family(id));
+    let firing = aggregates
+        .iter()
+        .any(|a| is_permanence_family(&a.strategy_id) && a.confidence >= min_confidence);
+    if !ladder_open && !firing {
+        return 0;
+    }
+    let before = aggregates.len();
+    aggregates.retain(|a| number_coverage(&a.cover).is_none());
+    before - aggregates.len()
+}
+
 /// Família de finais que a cobertura de número pretende cobrir (`final % 3`).
 ///
 /// `Terminal(0)` é o curinga e não define família; cobertura sem terminal (coluna, dúzia, cor)
@@ -338,7 +370,8 @@ pub fn evaluate_dag_with_history(
     let ladder_steps = gate.ladder_steps;
     let start = Instant::now();
     let regime = classify(window);
-    let raw_aggregates = fan_in(window, matchers);
+    let mut raw_aggregates = fan_in(window, matchers);
+    apply_permanence_priority(&mut raw_aggregates, gate.ladder_steps, min_confidence);
 
     let bocpd_cfg = BocpdCfg::default();
     let bocpd = if chronological_history.len() >= 2 {
@@ -452,6 +485,7 @@ pub fn evaluate_dag(
     let start = Instant::now();
     let regime = classify(window);
     let mut aggregates = fan_in(window, matchers);
+    apply_permanence_priority(&mut aggregates, &LadderSteps::new(), min_confidence);
 
     let bocpd_cfg = BocpdCfg::default();
     let mut oldest_first = window.to_vec();
@@ -519,6 +553,57 @@ mod tests {
         assert_eq!(cover_family(&[Cover::Terminal(3)]), Some(0));
         assert_eq!(cover_family(&[Cover::Terminal(0)]), None);
         assert_eq!(cover_family(&[Cover::Col(2), Cover::Col(3)]), None);
+    }
+
+    fn number_signal() -> Aggregate {
+        Aggregate {
+            strategy_id: "terminal_quente".to_string(),
+            confidence: 0.90,
+            cover: vec![Cover::Terminal(2), Cover::Terminal(3)],
+            regime_veto: false,
+        }
+    }
+
+    fn permanence_signal(confidence: f64) -> Aggregate {
+        Aggregate {
+            strategy_id: "quebra_permanencia_coluna".to_string(),
+            confidence,
+            cover: vec![Cover::Col(2), Cover::Col(3)],
+            regime_veto: false,
+        }
+    }
+
+    #[test]
+    fn numero_cede_a_permanencia_de_fora() {
+        // Permanência disparada (0.68 >= 0.55): o terminal, mesmo com 0.90, sai do fan-in.
+        let mut aggs = vec![number_signal(), permanence_signal(0.68)];
+        assert_eq!(apply_permanence_priority(&mut aggs, &LadderSteps::new(), 0.55), 1);
+        assert_eq!(aggs.len(), 1);
+        assert_eq!(aggs[0].strategy_id, "quebra_permanencia_coluna");
+    }
+
+    #[test]
+    fn numero_entra_quando_so_ha_pre_alerta_de_permanencia() {
+        // Pré-alerta (0.50) não é entrada: o número continua elegível.
+        let mut aggs = vec![number_signal(), permanence_signal(0.50)];
+        assert_eq!(apply_permanence_priority(&mut aggs, &LadderSteps::new(), 0.55), 0);
+        assert_eq!(aggs.len(), 2);
+    }
+
+    #[test]
+    fn escada_de_fora_aberta_tambem_bloqueia_numero() {
+        // Escada de coluna no degrau 2: recuperar a perda manda mais que abrir número.
+        let mut steps = LadderSteps::new();
+        steps.insert("quebra_permanencia_duzia".to_string(), 2);
+        let mut aggs = vec![number_signal()];
+        assert_eq!(apply_permanence_priority(&mut aggs, &steps, 0.55), 1);
+        assert!(aggs.is_empty());
+
+        // Escada de número aberta não bloqueia número.
+        let mut own = LadderSteps::new();
+        own.insert("terminal_quente".to_string(), 1);
+        let mut aggs = vec![number_signal()];
+        assert_eq!(apply_permanence_priority(&mut aggs, &own, 0.55), 0);
     }
 
     #[test]

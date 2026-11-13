@@ -783,6 +783,141 @@ impl Matcher for ClusterFinal {
     }
 }
 
+/// `matcher.quebra_numero_repetido`: o mesmo número pleno duas vezes seguidas quebra nas
+/// colunas que **não** o contêm.
+///
+/// Regra do operador, medida na base real: em 21 repetições exatas, 15 quebraram fora da coluna
+/// do número repetido (71% contra os 65% que duas colunas já entregam por si). É gatilho de
+/// permanência — mesma geometria de fora (2 colunas), mesma escada ×3 do §6.
+#[derive(Debug, Clone, Copy)]
+pub struct QuebraNumeroRepetido {
+    /// Repetições exatas exigidas para disparar (`2`).
+    pub min_repeat: usize,
+}
+
+impl Default for QuebraNumeroRepetido {
+    fn default() -> Self {
+        Self { min_repeat: 2 }
+    }
+}
+
+impl Matcher for QuebraNumeroRepetido {
+    fn id(&self) -> &'static str {
+        "quebra_numero_repetido"
+    }
+
+    fn evaluate(&self, w: &[u8]) -> Option<BetIntent> {
+        let latest = *w.first()?;
+        let col = column_of(latest);
+        // `0` não pertence a coluna nenhuma: não existe "coluna do número" para quebrar.
+        if col == 0 {
+            return None;
+        }
+        let repeats = w.iter().copied().take_while(|&n| n == latest).count();
+        if repeats < self.min_repeat.max(2) {
+            return None;
+        }
+        let confidence = (0.60 + 0.05 * ((repeats - self.min_repeat) as f64)).min(0.80);
+        Some(BetIntent {
+            v: 1,
+            strategy_id: self.id().to_string(),
+            cover: other_two_cols(col),
+            confidence,
+        })
+    }
+}
+
+/// `matcher.terminal_quente`: entrada **por número** nos finais que o operador segue (`2,3,6,9`).
+///
+/// Diferente do `cluster_final`, que cobre a família inteira (`0` + 3 finais = 15 números), aqui
+/// a cobertura é limitada aos `max_terminals` finais mais frequentes da janela: no máximo 8
+/// plenos. A mesa tem ficha mínima de 10¢ e 15 plenos custam 150¢ por rodada — três vezes a
+/// entrada de fora — então a cobertura precisa ser estreita para a escada caber no §6.
+#[derive(Debug, Clone, Copy)]
+pub struct TerminalQuente {
+    /// Janela de dominância (`20`).
+    pub window: usize,
+    /// Finais que o operador opera (`2,3,6,9`).
+    pub terminals: [u8; 4],
+    /// Quantos finais cobrir por entrada (`2` → até 8 plenos).
+    pub max_terminals: usize,
+    /// Persistência mínima da família, contando `0` como curinga (`3`).
+    pub min_streak: usize,
+    /// Fração mínima de `2,3,6,9` entre os giros não-zero da janela (`0.44`).
+    pub min_share: f64,
+}
+
+impl Default for TerminalQuente {
+    fn default() -> Self {
+        Self {
+            window: 20,
+            terminals: [2, 3, 6, 9],
+            max_terminals: 2,
+            min_streak: 3,
+            min_share: 0.44,
+        }
+    }
+}
+
+impl Matcher for TerminalQuente {
+    fn id(&self) -> &'static str {
+        "terminal_quente"
+    }
+
+    fn evaluate(&self, w: &[u8]) -> Option<BetIntent> {
+        let latest = *w.first()?;
+        if latest > 36 || w.len() < self.min_streak {
+            return None;
+        }
+        let in_set = |n: u8| n <= 36 && self.terminals.contains(&(n % 10));
+        // `0` não tem final definido: conta como continuação, nunca como quebra.
+        let streak = w
+            .iter()
+            .copied()
+            .take_while(|&n| n % 10 == 0 || in_set(n))
+            .count();
+        if streak < self.min_streak {
+            return None;
+        }
+
+        let slice = &w[..w.len().min(self.window)];
+        let mut counts = [0usize; 10];
+        let mut non_zero = 0usize;
+        let mut hits = 0usize;
+        for &n in slice {
+            if n == 0 || n > 36 {
+                continue;
+            }
+            non_zero += 1;
+            if in_set(n) {
+                hits += 1;
+                counts[(n % 10) as usize] += 1;
+            }
+        }
+        if non_zero == 0 {
+            return None;
+        }
+        let share = hits as f64 / non_zero as f64;
+        if share < self.min_share {
+            return None;
+        }
+
+        // Finais mais frequentes da janela; empate resolve pelo menor final (determinístico).
+        let mut ranked = self.terminals.to_vec();
+        ranked.sort_by_key(|&t| (std::cmp::Reverse(counts[t as usize]), t));
+        ranked.truncate(self.max_terminals.clamp(1, self.terminals.len()));
+        let cover = ranked.into_iter().map(Cover::Terminal).collect();
+
+        let confidence = (0.55 + 0.07 * ((streak - self.min_streak) as f64)).min(0.95);
+        Some(BetIntent {
+            v: 1,
+            strategy_id: self.id().to_string(),
+            cover,
+            confidence,
+        })
+    }
+}
+
 /// Números distintos cobertos por uma lista de coberturas de número (`Straight`/`Terminal`).
 ///
 /// Devolve `None` quando a lista mistura número com coluna/dúzia/cor: são geometrias de
@@ -917,6 +1052,8 @@ impl SequenceTuning {
             Arc::new(FibonacciLag),
             Arc::new(ClusterTerminal::default()),
             Arc::new(ClusterFinal::default()),
+            Arc::new(QuebraNumeroRepetido::default()),
+            Arc::new(TerminalQuente::default()),
         ]
     }
 }
@@ -925,7 +1062,7 @@ impl SequenceTuning {
 ///
 /// É a allowlist do interruptor da dashboard: desligar exige conhecer o nome
 /// exato, então erro de digitação vira rejeição e não matcher silenciosamente ligado.
-pub const MATCHER_IDS: [&str; 10] = [
+pub const MATCHER_IDS: [&str; 12] = [
     "quebra_permanencia_coluna",
     "quebra_permanencia_duzia",
     "quebra_cor_6x",
@@ -936,6 +1073,8 @@ pub const MATCHER_IDS: [&str; 10] = [
     "fibonacci_lag",
     "cluster_terminal",
     "cluster_final",
+    "quebra_numero_repetido",
+    "terminal_quente",
 ];
 
 /// Ajuste completo da leitura de padrões: faixas de repetição + interruptores.
@@ -1199,6 +1338,57 @@ mod tests {
         let dupes = number_coverage(&[Cover::Terminal(1), Cover::Straight(11)])
             .expect("terminal 1 + pleno 11");
         assert_eq!(dupes, vec![1, 11, 21, 31]);
+    }
+
+    #[test]
+    fn numero_repetido_quebra_nas_colunas_que_nao_o_contem() {
+        let m = QuebraNumeroRepetido::default();
+        // 8 é coluna 2 (2,5,8...): a cobertura é coluna 1 + coluna 3.
+        let intent = m.evaluate(&[8, 8, 5, 11]).expect("8 duas vezes dispara");
+        assert_eq!(intent.strategy_id, "quebra_numero_repetido");
+        assert_eq!(intent.cover, vec![Cover::Col(1), Cover::Col(3)]);
+        assert!((intent.confidence - 0.60).abs() < 1e-9);
+
+        // 34 é coluna 1: cobre 2 e 3. Três repetições sobem a confiança.
+        let tri = m.evaluate(&[34, 34, 34, 1]).expect("34 três vezes dispara");
+        assert_eq!(tri.cover, vec![Cover::Col(2), Cover::Col(3)]);
+        assert!((tri.confidence - 0.65).abs() < 1e-9);
+
+        // Número diferente e zero não disparam: 0 não pertence a coluna nenhuma.
+        assert!(m.evaluate(&[8, 23, 5]).is_none());
+        assert!(m.evaluate(&[0, 0, 5]).is_none());
+        assert!(m.evaluate(&[]).is_none());
+    }
+
+    #[test]
+    fn terminal_quente_cobre_no_maximo_dois_finais_em_plenos() {
+        let m = TerminalQuente::default();
+        // Janela real de 20 giros com 2,3,6,9 dominando (15 de 20 não-zero).
+        let w = [
+            23, 32, 9, 26, 13, 6, 12, 16, 2, 33, 19, 9, 22, 30, 4, 13, 36, 8, 27, 5,
+        ];
+        let intent = m.evaluate(&w).expect("terminais em série devem disparar");
+        assert_eq!(intent.strategy_id, "terminal_quente");
+        assert_eq!(intent.cover.len(), 2, "cobertura estreita: 2 finais");
+        assert!(intent.cover.iter().all(|c| matches!(c, Cover::Terminal(_))));
+        let numbers = number_coverage(&intent.cover).expect("cobertura de número");
+        assert!(numbers.len() <= 8, "nunca 15 plenos: {}", numbers.len());
+        assert_eq!(intent.cover, vec![Cover::Terminal(2), Cover::Terminal(3)]);
+        // streak 14 -> 0.55 + 0.07*11 satura em 0.95
+        assert!((intent.confidence - 0.95).abs() < 1e-9);
+    }
+
+    #[test]
+    fn terminal_quente_exige_persistencia_e_dominancia() {
+        let m = TerminalQuente::default();
+        // Um único final da família no giro mais novo não arma nada.
+        assert!(m.evaluate(&[2, 5, 8, 11, 4, 7]).is_none());
+        // Streak de 3, mas a janela é dominada por 5-8-11: share abaixo do mínimo.
+        let mut w = vec![3u8, 6, 9];
+        for _ in 0..6 {
+            w.extend_from_slice(&[5, 8, 11]);
+        }
+        assert!(m.evaluate(&w).is_none());
     }
 
     #[test]
