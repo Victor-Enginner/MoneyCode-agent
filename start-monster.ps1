@@ -15,14 +15,17 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$TargetUrl   = "https://www.jogatudo.com/pt-BR/game/playtech-brasileira.roleta-brasileira"
-$ProfileDir  = "O:\Archives\Eistein\chromium-profile"
-$RootDir     = "O:\Archives\Eistein\FUI AGENT ROULLET"
+$RootDir     = $PSScriptRoot
+# Caminhos desta maquina: config\paths.ps1 (fora do Git). Sem ele, valem os padroes abaixo.
+$ChromeExe  = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+$ProfileDir = Join-Path $RootDir "chrome-profile"
+$TargetUrl  = "https://www.jogatudo.com/pt-BR/game/playtech-brasileira.roleta-brasileira"
+$PathsFile  = Join-Path $RootDir "config\paths.ps1"
+if (Test-Path $PathsFile) { . $PathsFile }
 $LogsDir     = "$RootDir\logs"
 $GoCacheDir  = "$RootDir\target\go-cache"
 $GoTmpDir    = "$RootDir\target\go-tmp"
 $CargoTarget = "$RootDir\target"
-$ChromeExe   = "O:\Archives\Eistein\chromium\chrome.exe"
 
 # Parada limpa: o kill switch do core bloqueia NOVAS apostas na hora; a que ja estiver em
 # andamento termina (cliques + conferencia + confirmacao). So depois os processos sao mortos.
@@ -56,11 +59,21 @@ Write-Host "================================================================" -F
 Write-Host " MONSTER - Roleta Brasileira" -ForegroundColor Cyan
 Write-Host " Modo: $ModeLabel" -ForegroundColor $(if ($Live) { "Red" } else { "Cyan" })
 Write-Host "================================================================" -ForegroundColor Cyan
-if (-not (Test-Path $ChromeExe)) { Fail "Chromium dedicado nao encontrado em $ChromeExe" }
+if (-not (Test-Path $ChromeExe)) { Fail "Chrome nao encontrado em $ChromeExe. Ajuste `$ChromeExe em config\paths.ps1 (modelo: config\paths.example.ps1)." }
 
 # 1. Para o que estiver rodando (watchdog, core, captura), para nunca existirem dois cores.
 Write-Host "[MONSTER] Parando instancias anteriores (sem cortar aposta em andamento)..." -ForegroundColor DarkGray
 Stop-MonsterSafely "restart"
+# Janelas antigas do MONSTER LIVE (so mostravam o log): fecha para nao acumular. Matar o
+# processo nao passa pelo finally do Ctrl+C, entao nada alem da janela e afetado.
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -eq 'powershell.exe' -and $_.ProcessId -ne $PID -and $_.CommandLine -like '*start-monster.ps1*' } |
+    ForEach-Object {
+        $parent = $_.ParentProcessId
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        $pp = Get-CimInstance Win32_Process -Filter "ProcessId=$parent" -ErrorAction SilentlyContinue
+        if ($pp -and $pp.Name -eq 'cmd.exe' -and $pp.CommandLine -like '*start-monster*') { Stop-Process -Id $parent -Force -ErrorAction SilentlyContinue }
+    }
 $deadline = (Get-Date).AddSeconds(15)
 while ((Test-Path "$LogsDir\watchdog.lock") -and (Get-Date) -lt $deadline) {
     $wpid = Get-Content "$LogsDir\watchdog.lock" -ErrorAction SilentlyContinue
@@ -81,12 +94,13 @@ Remove-Item "$LogsDir\watchdog.lock" -ErrorAction SilentlyContinue
 Set-Location $RootDir
 Write-Host "[MONSTER] Compilando o core (Rust)..." -ForegroundColor Cyan
 $ErrorActionPreference = "Continue"
-cargo build --offline -p monster-core
+cargo build -p monster-core
 if ($LASTEXITCODE -ne 0) { Fail "cargo build do monster-core falhou (veja as mensagens acima)" }
 Write-Host "[MONSTER] Compilando a captura (Go)..." -ForegroundColor Cyan
 Push-Location "$RootDir\sidecar"
 go build -o "$CargoTarget\monster-capture.exe" ./cmd/capture
 $goExit = $LASTEXITCODE
+if ($goExit -eq 0) { go build -o "$CargoTarget\monster-telegram.exe" ./telegram; $goExit = $LASTEXITCODE }
 Pop-Location
 if ($goExit -ne 0) { Fail "go build da captura falhou (veja as mensagens acima)" }
 $ErrorActionPreference = "Stop"

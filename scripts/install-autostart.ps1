@@ -2,7 +2,7 @@
 # Registra o watchdog do MONSTER no Agendador de Tarefas do usuario (sem admin):
 # sobe no logon e, se o proprio watchdog morrer, o Windows o reinicia a cada 1 min.
 # Remover:  Unregister-ScheduledTask -TaskName 'MONSTER Watchdog' -Confirm:$false
-$root = 'O:\Archives\Eistein\FUI AGENT ROULLET'
+$root = Split-Path -Parent $PSScriptRoot
 # conhost --headless: o watchdog roda SEM janela. Com janela, fechar o console preto matava o
 # watchdog (codigo 0xC000013A) sem nenhum log.
 $action = New-ScheduledTaskAction -Execute 'conhost.exe' `

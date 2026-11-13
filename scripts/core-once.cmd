@@ -4,7 +4,7 @@ rem Sobe o core uma vez; o watchdog reinicia se cair.
 rem   core-once.cmd <banca_centavos> <dry-run|live>
 rem Sem o segundo argumento = --dry-run (dinheiro real so com "live" explicito, regra 1.5).
 setlocal
-cd /d "O:\Archives\Eistein\FUI AGENT ROULLET"
+cd /d "%~dp0.."
 set BANK=%~1
 if "%BANK%"=="" set BANK=4000
 set MODE=--dry-run

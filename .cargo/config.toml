@@ -1,3 +1,3 @@
 # SPDX-License-Identifier: Apache-2.0
+# Sem target-dir fixo: o build vai para ./target do proprio projeto.
 [build]
-target-dir = "O:/Archives/Eistein/FUI AGENT ROULLET/target"

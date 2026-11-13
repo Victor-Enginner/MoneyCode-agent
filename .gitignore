@@ -21,3 +21,9 @@ Thumbs.db
 config/tuning.json
 config/telegram.json
 config/stake.json
+config/paths.ps1
+/chrome-profile/
+*.lnk
+monster.db.bak*
+/logs/
+*.bak

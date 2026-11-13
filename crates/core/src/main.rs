@@ -34,7 +34,22 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const LIVE_FUI_HTML: &str = include_str!("../../../ui/live.html");
 
 /// Ajuste das sequências editado na dashboard: vive em disco para sobreviver ao restart.
-const TUNING_PATH: &str = "O:/Archives/Eistein/FUI AGENT ROULLET/config/tuning.json";
+/// Raiz do projeto: `MONSTER_ROOT` se definido, senão a pasta atual (os scripts entram nela).
+/// Nada de caminho fixo de máquina: o projeto roda de qualquer pasta, em qualquer PC.
+fn monster_root() -> std::path::PathBuf {
+    env::var("MONSTER_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
+}
+
+/// Caminho de um arquivo do projeto como `String` (relativo à raiz).
+fn project_path(rel: &str) -> String {
+    monster_root().join(rel).to_string_lossy().into_owned()
+}
+
+fn tuning_path() -> String {
+    project_path("config/tuning.json")
+}
 
 /// Lê o ajuste salvo; qualquer arquivo corrompido ou fora de faixa volta ao padrão do §8
 /// em vez de derrubar o boot com matcher inválido.
@@ -89,7 +104,9 @@ fn matchers_now(shared: &Arc<Mutex<MatcherTuning>>) -> Vec<Arc<dyn Matcher>> {
 }
 
 /// Ficha de entrada escolhida na dashboard: o valor sobrevive ao restart.
-const STAKE_PATH: &str = "O:/Archives/Eistein/FUI AGENT ROULLET/config/stake.json";
+fn stake_path() -> String {
+    project_path("config/stake.json")
+}
 
 /// Fichas que o operador pode escolher na FUI (centavos). Fora desta lista é recusado:
 /// cada valor muda a escada e precisa passar pelo Monte Carlo do §13.
@@ -466,7 +483,7 @@ fn spawn_fui_http_server(deps: FuiServerDeps) {
                                 g.base_cents = base;
                             }
                             let _ = fui.set_base(base);
-                            if let Err(err) = save_stake_base(STAKE_PATH, base) {
+                            if let Err(err) = save_stake_base(&stake_path(), base) {
                                 eprintln!("[STAKE] aplicada em memória, não salva: {err}");
                             }
                             println!(
@@ -516,7 +533,7 @@ fn spawn_fui_http_server(deps: FuiServerDeps) {
                 let _ = fui.resume();
                 let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}");
             } else {
-                let disk_html = std::fs::read("O:/Archives/Eistein/FUI AGENT ROULLET/ui/live.html")
+                let disk_html = std::fs::read(project_path("ui/live.html"))
                     .unwrap_or_else(|_| LIVE_FUI_HTML.as_bytes().to_vec());
                 let hdr = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -533,14 +550,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let mut mode = ExecutionMode::DryRun;
     let mut stream_addr = DEFAULT_STREAM_ADDR.to_string();
-    let mut db_uri = "O:/Archives/Eistein/FUI AGENT ROULLET/monster.db".to_string();
+    let mut db_uri = project_path("monster.db");
     let mut bankroll_cents: i64 = 4_000;
-    // Banca de teste R$ 40: base 10¢ e 5 degraus ×3 (10/30/90/270/810 por coluna).
+    // Inicio padrao R$ 40: coluna 20¢ e 5 degraus ×3 (20/60/180/540/1620 por coluna); numeros com lucro alvo 10¢.
     // Perda máxima de um estouro = 2420¢. Exposição do degrau 5 = 1620¢, que é ~51% da banca
     // depois de 4 perdas (3200¢) — por isso o teto de exposição sobe para 0,55.
     // Stop loss desligado a pedido do operador: o limite é a própria banca (4000¢).
     let mut cfg = Cfg {
-        base_cents: 10,
+        base_cents: 20,
         number_base_cents: 10,
         max_steps: 5,
         max_bet_per_cover_cents: 100_000,
@@ -600,8 +617,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Ficha salva pela dashboard vence o padrão do binário; o MC abaixo já roda com ela.
-    cfg.base_cents = load_stake_base(STAKE_PATH, cfg.base_cents);
-    cfg.number_base_cents = load_number_base(STAKE_PATH, cfg.number_base_cents);
+    cfg.base_cents = load_stake_base(&stake_path(), cfg.base_cents);
+    cfg.number_base_cents = load_number_base(&stake_path(), cfg.number_base_cents);
     println!(
         "[STAKE] ficha de fora: {}¢ por cobertura · números: lucro alvo {}¢/ciclo, máx {} casas",
         cfg.base_cents,
@@ -646,7 +663,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if lab_only {
         let pool = init_pool(&db_uri)?;
-        let tuning = Arc::new(Mutex::new(load_sequence_tuning(TUNING_PATH)));
+        let tuning = Arc::new(Mutex::new(load_sequence_tuning(&tuning_path())));
         let matchers = matchers_now(&tuning);
         let (raw, spins) = monster_core::lab::load_clean_spins(&pool)?;
         let r = monster_core::lab::run_lab(raw, &spins, &monster_core::lab::default_hypotheses(&matchers));
@@ -676,7 +693,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mode, boot.orphans_swept, boot.singleton_lock_removed
     );
 
-    let tuning = Arc::new(Mutex::new(load_sequence_tuning(TUNING_PATH)));
+    let tuning = Arc::new(Mutex::new(load_sequence_tuning(&tuning_path())));
     let matchers = matchers_now(&tuning);
     let boot_tuning = tuning_snapshot(&tuning);
     println!(
@@ -716,7 +733,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let init_chrono = initial_hist.to_chronological_vec();
     let init_snap = build_brain_snapshot(&matchers, &init_chrono, &cfg);
     let _ = write_gbrain_file(
-        std::path::Path::new("O:/Archives/Eistein/FUI AGENT ROULLET/docs/memory/BRAIN_STATE.md"),
+        std::path::Path::new(&project_path("docs/memory/BRAIN_STATE.md")),
         &init_snap,
     );
     let init_stats = evaluate_all_matchers_history(&matchers, &init_chrono, &cfg);
@@ -819,7 +836,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         live_cfg: live_cfg.clone(),
         bankroll: shared_bankroll_cents.clone(),
         tuning: tuning.clone(),
-        tuning_path: TUNING_PATH.to_string(),
+        tuning_path: tuning_path(),
     });
 
     let mut spins_since_blow = cfg.cooldown_spins;

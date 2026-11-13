@@ -4,16 +4,23 @@
 # Nao clica na mesa. Para parar de vez: crie logs\monster-stop.flag.
 
 $ErrorActionPreference = 'Continue'
-$root = 'O:\Archives\Eistein\FUI AGENT ROULLET'
+$root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 $log      = Join-Path $root 'logs\watchdog.log'
 $lock     = Join-Path $root 'logs\watchdog.lock'
 $stopFlag = Join-Path $root 'logs\monster-stop.flag'
 $modeFile = Join-Path $root 'logs\monster-mode.txt'
-$chrome   = 'O:\Archives\Eistein\chromium\chrome.exe'
-$profile  = 'O:\Archives\Eistein\chromium-profile'
-$url      = 'https://www.jogatudo.com/pt-BR/game/playtech-brasileira.roleta-brasileira'
+$RootDir = $root
+# Caminhos desta maquina: config\paths.ps1 (fora do Git). Sem ele, valem os padroes abaixo.
+$ChromeExe  = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+$ProfileDir = Join-Path $RootDir "chrome-profile"
+$TargetUrl  = "https://www.jogatudo.com/pt-BR/game/playtech-brasileira.roleta-brasileira"
+$PathsFile  = Join-Path $RootDir "config\paths.ps1"
+if (Test-Path $PathsFile) { . $PathsFile }
+$chrome  = $ChromeExe
+$profile = $ProfileDir
+$url     = $TargetUrl
 
 # Mesa gira a cada ~45-60 s. Sem giro novo por STALE_MIN minutos = mesa travada.
 $STALE_MIN        = 5
@@ -205,7 +212,8 @@ while ($true) {
     }
 
     # 5. Telegram (opcional)
-    if (-not (Get-Process monster-telegram -ErrorAction SilentlyContinue) -and (Can-Try 'telegram')) {
+    $tgOn = Test-Path (Join-Path $root 'config\telegram.json')
+    if ($tgOn -and -not (Get-Process monster-telegram -ErrorAction SilentlyContinue) -and (Can-Try 'telegram')) {
         $s = Failed 'telegram'
         Write-Log "telegram fora do ar - reiniciando (proxima tentativa em ${s}s)"
         Start-Component 'telegram-once.cmd' ''
