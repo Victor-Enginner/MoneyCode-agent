@@ -114,6 +114,7 @@ Write-Log "watchdog iniciado (pid $PID, modo $(Get-Mode))"
 
 $lastChromeWarn = (Get-Date).AddMinutes(-10)
 $tabReloads = 0
+$staleRestarts = 0
 $staleGraceUntil = (Get-Date).AddMinutes($STALE_MIN)
 $loop = 0
 while ($true) {
@@ -183,17 +184,23 @@ while ($true) {
                     Get-Process monster-capture -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
                 }
             } else {
-                Write-Log "mesa parada ha $age min - fechando e reabrindo o Chrome dedicado + captura"
+                Write-Log "mesa parada ha $age min - fechando e reabrindo o Chrome dedicado + captura (reinicio $($staleRestarts + 1))"
                 Get-DedicatedChrome | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
                 Get-Process monster-capture -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 3
                 Remove-Item (Join-Path $profile 'SingletonLock') -Force -ErrorAction SilentlyContinue
                 $tabReloads = 0
+                $staleRestarts++
             }
-            $staleGraceUntil = (Get-Date).AddMinutes($STALE_MIN)
+            # Mesa real so para em manutencao (aviso na tela + dealers): se reiniciar nao trouxe giro,
+            # espera cada vez mais (5 -> 10 -> 20 -> 30 min) em vez de reiniciar a cada 5 min.
+            $graceMin = @(5, 10, 20, 30)[[Math]::Min($staleRestarts, 3)]
+            $staleGraceUntil = (Get-Date).AddMinutes($graceMin)
+            if ($staleRestarts -gt 1) { Write-Log "sem giro apos reinicio - provavel manutencao da mesa; proxima checagem em $graceMin min" }
         } elseif ($age -ne $null -and $age -lt 2) {
-            if ($tabReloads -gt 0) { Write-Log "mesa voltou a girar (ultimo giro ha $age min)" }
+            if ($tabReloads -gt 0 -or $staleRestarts -gt 0) { Write-Log "mesa voltou a girar (ultimo giro ha $age min)" }
             $tabReloads = 0
+            $staleRestarts = 0
         }
     }
 
