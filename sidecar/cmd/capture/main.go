@@ -246,6 +246,10 @@ type clickRequest struct {
 	Target string `json:"target"`
 	X      int    `json:"x"`
 	Y      int    `json:"y"`
+	// Repeat despacha N cliques na MESMA coordenada resolvida. Uma cobertura que precisa de
+	// 5 fichas resolvia o alvo 5 vezes (varredura de DOM + espera de janela + 280 ms cada) e
+	// estourava a janela de aposta no meio, deixando o total menor que o esperado.
+	Repeat int `json:"repeat"`
 }
 
 func (h *Hub) handleActClick(w http.ResponseWriter, r *http.Request) {
@@ -317,16 +321,26 @@ drained:
 		}
 	}
 
-	if err := client.DispatchClick(sid, finalX, finalY); err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
+	clicks := req.Repeat
+	if clicks < 1 {
+		clicks = 1
 	}
-	// Pausa curta após o clique físico único para o canvas/DOM da Playtech atualizar o estado da ficha/aposta
-	time.Sleep(120 * time.Millisecond)
+	// Teto de sanidade: uma cobertura do §6 não passa de 40 fichas na menor denominação.
+	if clicks > 40 {
+		clicks = 40
+	}
+	for i := 0; i < clicks; i++ {
+		if err := client.DispatchClick(sid, finalX, finalY); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		// Pausa curta após cada clique físico para o canvas/DOM da Playtech atualizar o estado da ficha/aposta
+		time.Sleep(120 * time.Millisecond)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = fmt.Fprintf(w, `{"ok":true,"x":%d,"y":%d}`+"\n", finalX, finalY)
+	_, _ = fmt.Fprintf(w, `{"ok":true,"x":%d,"y":%d,"clicks":%d}`+"\n", finalX, finalY, clicks)
 }
 
 type previewResponse struct {
