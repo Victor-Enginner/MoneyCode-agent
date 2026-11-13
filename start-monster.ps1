@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-# Iniciador unico do MONSTER: Chrome dedicado + sidecar Go + core Rust.
+# Iniciador unico do MONSTER. O watchdog (scripts\monster-watch.ps1) e o UNICO supervisor de
+# captura e core: este script so compila, abre a mesa, grava o modo e liga o watchdog.
+# (Antes ele subia captura/core por conta propria e brigava com o watchdog pela mesma porta.)
 #
 #   start-monster                  observa a mesa (--dry-run, default, NAO aposta)
 #   start-monster -Live            executa de verdade (aposta dinheiro real)
 #   start-monster -Probe           so o sidecar em --ws-probe (diagnostico de WS, sem core)
 #
-# Tudo gravado estritamente no disco O: (zero escrita no disco C:).
+# Fechar esta janela NAO para o MONSTER. Para parar: stop-monster.bat
 
 param(
     [switch]$Live,
@@ -16,132 +18,127 @@ $ErrorActionPreference = "Stop"
 $TargetUrl   = "https://www.jogatudo.com/pt-BR/game/playtech-brasileira.roleta-brasileira"
 $ProfileDir  = "O:\Archives\Eistein\chromium-profile"
 $RootDir     = "O:\Archives\Eistein\FUI AGENT ROULLET"
+$LogsDir     = "$RootDir\logs"
 $GoCacheDir  = "$RootDir\target\go-cache"
 $GoTmpDir    = "$RootDir\target\go-tmp"
 $CargoTarget = "$RootDir\target"
 $ChromeExe   = "O:\Archives\Eistein\chromium\chrome.exe"
 
-# `-Probe` nao sobe o core, entao `-Live` nao tem efeito nenhum ali.
-if ($Probe) { $Live = $false }
-
-foreach ($dir in @($ProfileDir, $GoCacheDir, $GoTmpDir, $CargoTarget)) {
-    if (-not (Test-Path $dir)) {
-        New-Item -ItemType Directory -Force -Path $dir | Out-Null
-    }
+function Fail([string]$msg) {
+    Write-Host ""
+    Write-Host "[MONSTER] ERRO: $msg" -ForegroundColor Red
+    Write-Host "[MONSTER] Nada foi iniciado. Corrija e rode de novo." -ForegroundColor Red
+    Read-Host "Enter para fechar"
+    exit 1
 }
 
+if ($Probe) { $Live = $false }
+foreach ($dir in @($ProfileDir, $GoCacheDir, $GoTmpDir, $CargoTarget, $LogsDir)) {
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+}
 $env:GOCACHE          = $GoCacheDir
 $env:GOTMPDIR         = $GoTmpDir
 $env:CARGO_TARGET_DIR = $CargoTarget
 $env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-msvc"
-$env:TEMP             = $GoTmpDir
-$env:TMP              = $GoTmpDir
 
 $ModeLabel = if ($Probe) { "WS-PROBE (diagnostico, sem core)" } elseif ($Live) { "LIVE (DINHEIRO REAL)" } else { "DRY-RUN (observa, nao aposta)" }
 Write-Host "================================================================" -ForegroundColor Cyan
 Write-Host " MONSTER - Roleta Brasileira" -ForegroundColor Cyan
 Write-Host " Modo: $ModeLabel" -ForegroundColor $(if ($Live) { "Red" } else { "Cyan" })
 Write-Host "================================================================" -ForegroundColor Cyan
+if (-not (Test-Path $ChromeExe)) { Fail "Chromium dedicado nao encontrado em $ChromeExe" }
 
-if (-not (Test-Path $ChromeExe)) {
-    Write-Error "Chromium dedicado nao encontrado em $ChromeExe"
+# 1. Para o que estiver rodando (watchdog, core, captura), para nunca existirem dois cores.
+Write-Host "[MONSTER] Parando instancias anteriores..." -ForegroundColor DarkGray
+Set-Content -Path "$LogsDir\monster-stop.flag" -Value "restart"
+$deadline = (Get-Date).AddSeconds(15)
+while ((Test-Path "$LogsDir\watchdog.lock") -and (Get-Date) -lt $deadline) {
+    $wpid = Get-Content "$LogsDir\watchdog.lock" -ErrorAction SilentlyContinue
+    if (-not ($wpid -and (Get-Process -Id $wpid -ErrorAction SilentlyContinue))) { break }
+    Start-Sleep -Milliseconds 500
 }
+Get-Process monster-core, monster-capture -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+# Captura do iniciador antigo ("go run ./cmd/capture" vira capture.exe no go-cache): fora do watchdog.
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { ($_.Name -eq 'capture.exe' -and $_.ExecutablePath -like "$GoCacheDir*") -or
+                   ($_.Name -eq 'go.exe' -and $_.CommandLine -like '*cmd/capture*') } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Sleep -Seconds 1
+if (Get-Process monster-core -ErrorAction SilentlyContinue) { Fail "nao consegui encerrar o monster-core anterior" }
+Remove-Item "$LogsDir\watchdog.lock" -ErrorAction SilentlyContinue
 
-# Um segundo core brigaria pela porta 8791 e gravaria decisoes em paralelo.
-if (-not $Probe) {
-    $RunningCore = Get-Process monster-core -ErrorAction SilentlyContinue
-    if ($RunningCore) {
-        Write-Host "[MONSTER] ja existe um monster-core rodando (PID $($RunningCore[0].Id))." -ForegroundColor Red
-        Write-Host "[MONSTER] feche antes de iniciar outro:  taskkill /PID $($RunningCore[0].Id) /F" -ForegroundColor Red
-        exit 1
-    }
-}
+# 2. Compila core e captura ANTES de abrir qualquer coisa: erro de build aparece aqui e para.
+Set-Location $RootDir
+Write-Host "[MONSTER] Compilando o core (Rust)..." -ForegroundColor Cyan
+$ErrorActionPreference = "Continue"
+cargo build --offline -p monster-core
+if ($LASTEXITCODE -ne 0) { Fail "cargo build do monster-core falhou (veja as mensagens acima)" }
+Write-Host "[MONSTER] Compilando a captura (Go)..." -ForegroundColor Cyan
+Push-Location "$RootDir\sidecar"
+go build -o "$CargoTarget\monster-capture.exe" ./cmd/capture
+$goExit = $LASTEXITCODE
+Pop-Location
+if ($goExit -ne 0) { Fail "go build da captura falhou (veja as mensagens acima)" }
+$ErrorActionPreference = "Stop"
 
+# 3. Chrome dedicado com CDP.
 $CdpAlive = $false
 try {
-    $ver = Invoke-RestMethod -Uri "http://127.0.0.1:9222/json/version" -TimeoutSec 1
-    if ($ver.Browser -match "131\.") {
-        $CdpAlive = $true
-        Write-Host "[MONSTER] Chromium dedicado ja esta na porta 9222 - conectando na mesa." -ForegroundColor Green
-    } else {
-        $Port9222 = Get-NetTCPConnection -LocalPort 9222 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($Port9222) {
-            Stop-Process -Id $Port9222.OwningProcess -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 1
-        }
-    }
-} catch {
-    $CdpAlive = $false
-}
-
+    $null = Invoke-RestMethod -Uri "http://127.0.0.1:9222/json/version" -TimeoutSec 2
+    $CdpAlive = $true
+    Write-Host "[MONSTER] Chromium dedicado ja esta na porta 9222 - reaproveitando a sessao logada." -ForegroundColor Green
+} catch { $CdpAlive = $false }
 if (-not $CdpAlive) {
-    $SingletonLock = Join-Path $ProfileDir "SingletonLock"
-    if (Test-Path $SingletonLock) {
-        Remove-Item -Force -ErrorAction SilentlyContinue $SingletonLock
-    }
-
-    Write-Host "[MONSTER] Abrindo a mesa no Chromium dedicado ($ChromeExe)..." -ForegroundColor Cyan
+    Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $ProfileDir "SingletonLock")
+    Write-Host "[MONSTER] Abrindo a mesa no Chromium dedicado..." -ForegroundColor Cyan
     Start-Process -FilePath $ChromeExe -ArgumentList @(
-        "--remote-debugging-port=9222",
-        "--user-data-dir=$ProfileDir",
-        "--no-sandbox",
-        "--disable-features=RendererCodeIntegrity",
-        "--disable-blink-features=AutomationControlled",
-        "--test-type",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--start-maximized",
-        $TargetUrl
+        "--remote-debugging-port=9222", "--user-data-dir=$ProfileDir", "--no-sandbox",
+        "--disable-features=RendererCodeIntegrity", "--disable-blink-features=AutomationControlled",
+        "--test-type", "--no-first-run", "--no-default-browser-check", "--start-maximized", $TargetUrl
     )
     Start-Sleep -Seconds 3
 }
 
 if ($Probe) {
     Write-Host "[MONSTER] Sidecar em --ws-probe --strict --dump-frames=3 --dump-op (Ctrl+C encerra)." -ForegroundColor Yellow
-    Set-Location "$RootDir\sidecar"
-    go run ./cmd/capture --ws-probe --strict --dump-frames=3 --dump-op
+    Remove-Item "$LogsDir\monster-stop.flag" -ErrorAction SilentlyContinue
+    & "$CargoTarget\monster-capture.exe" --ws-probe --strict --dump-frames=3 --dump-op
     exit 0
 }
 
-$HealthAlive = $false
-try {
-    $null = Invoke-RestMethod -Uri "http://127.0.0.1:8790/health" -TimeoutSec 1
-    $HealthAlive = $true
-    Write-Host "[MONSTER] Sidecar ja esta vivo na porta 8787 - reaproveitando." -ForegroundColor Green
-} catch {
-    $HealthAlive = $false
-}
-
-if (-not $HealthAlive) {
-    Write-Host "[MONSTER] Iniciando sidecar Go em segundo plano (porta 8787)..." -ForegroundColor Green
-    Start-Process powershell -ArgumentList @(
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-Command", "`$env:GOCACHE='$GoCacheDir'; `$env:GOTMPDIR='$GoTmpDir'; Set-Location '$RootDir\sidecar'; go run ./cmd/capture --ws-probe"
-    )
-    Start-Sleep -Seconds 3
-}
-
-# Watchdog 24/48h: grava o modo escolhido (o watchdog reinicia o core NESTE modo) e sobe o
-# supervisor em segundo plano. -Probe nao liga watchdog.
-if (-not $Probe) {
-    $LogsDir = "$RootDir\logs"
-    if (-not (Test-Path $LogsDir)) { New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null }
-    Set-Content -Path "$LogsDir\monster-mode.txt" -Value $(if ($Live) { "live" } else { "dry-run" })
-    Remove-Item "$LogsDir\monster-stop.flag" -ErrorAction SilentlyContinue
+# 4. Grava o modo e liga o watchdog: ele sobe captura e core (e os reinicia se cairem).
+Set-Content -Path "$LogsDir\monster-mode.txt" -Value $(if ($Live) { "live" } else { "dry-run" })
+Remove-Item "$LogsDir\monster-stop.flag" -ErrorAction SilentlyContinue
+# Pela tarefa agendada (quando registrada) o watchdog nasce fora da arvore desta janela:
+# fechar/matar este terminal nunca leva o watchdog e o core junto.
+$task = Get-ScheduledTask -TaskName 'MONSTER Watchdog' -ErrorAction SilentlyContinue
+if ($task) {
+    Start-ScheduledTask -TaskName 'MONSTER Watchdog'
+} else {
     Start-Process powershell -WindowStyle Hidden -ArgumentList @(
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$RootDir\scripts\monster-watch.ps1`""
     ) | Out-Null
-    Write-Host "[MONSTER] Watchdog ligado (reinicia Chrome/captura/core e recarrega a mesa travada)." -ForegroundColor Green
-    Write-Host "[MONSTER] Para parar tudo de vez: stop-monster.bat" -ForegroundColor Green
 }
+if ($Live) { Write-Host "[MONSTER] ATENCAO: -Live ativo, o executor VAI APOSTAR DINHEIRO REAL." -ForegroundColor Red }
 
-Write-Host "[MONSTER] Painel: http://127.0.0.1:8791" -ForegroundColor Yellow
-Start-Process "http://127.0.0.1:8791"
-Set-Location $RootDir
-if ($Live) {
-    Write-Host "[MONSTER] ATENCAO: -Live ativo, o executor VAI APOSTAR DINHEIRO REAL." -ForegroundColor Red
-    cargo run --offline -p monster-core -- --live
-} else {
-    cargo run --offline -p monster-core -- --dry-run
+# 5. Espera o core responder (o watchdog leva alguns segundos para subir captura -> core).
+Write-Host "[MONSTER] Aguardando captura e core..." -ForegroundColor Cyan
+$deadline = (Get-Date).AddSeconds(90)
+$ok = $false
+while ((Get-Date) -lt $deadline) {
+    try { $null = Invoke-RestMethod -Uri "http://127.0.0.1:8791/api/tick" -TimeoutSec 2; $ok = $true; break } catch { Start-Sleep -Seconds 2 }
 }
+if (-not $ok) {
+    Write-Host "[MONSTER] O core nao respondeu em 90 s. Ultimas linhas:" -ForegroundColor Red
+    Get-Content "$LogsDir\watchdog.log" -Tail 8 -ErrorAction SilentlyContinue
+    Get-Content "$LogsDir\core-live.log" -Tail 15 -ErrorAction SilentlyContinue
+    Read-Host "Enter para fechar (o watchdog continua tentando em segundo plano)"
+    exit 1
+}
+Write-Host "[MONSTER] Tudo no ar. Painel: http://127.0.0.1:8791" -ForegroundColor Green
+Write-Host "[MONSTER] Fechar esta janela NAO para o MONSTER. Para parar: stop-monster.bat" -ForegroundColor Green
+Start-Process "http://127.0.0.1:8791"
+
+# 6. Mostra o log do core ao vivo (so leitura).
+Write-Host "---------------------------- log do core ----------------------------" -ForegroundColor DarkGray
+Get-Content "$LogsDir\core-live.log" -Tail 20 -Wait
