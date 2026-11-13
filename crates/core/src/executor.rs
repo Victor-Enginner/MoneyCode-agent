@@ -592,20 +592,7 @@ impl CdpActuator for LiveHttpActuator {
             .read_to_string(&mut resp)
             .map_err(|e| ExecError::CdpTransport(e.to_string()))?;
         let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
-        let parsed: serde_json::Value = serde_json::from_str(body.trim())
-            .map_err(|e| ExecError::CdpTransport(format!("preview inválido: {e}")))?;
-        // Sempre devolve o total REAL da mesa: nunca mascara divergência com o valor que achamos ter apostado.
-        // Valor em cache (sem leitura desta mesa agora) vira `SlipStale`, para o chamador re-ler.
-        if let Some(age) = parsed.get("bet_age_ms").and_then(|v| v.as_i64()) {
-            if !(0..=SLIP_FRESH_MAX_MS).contains(&age) {
-                return Err(ExecError::SlipStale(age));
-            }
-        }
-        Ok(parsed
-            .get("preview_cents")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0)
-            .max(0) as u64)
+        parse_preview(body)
     }
 
     fn clear_bets(&self, cal: &Calibration) -> Result<(), ExecError> {
@@ -666,6 +653,28 @@ impl CdpActuator for LiveHttpActuator {
 /// Idade máxima aceita para o total de `Bet` do sidecar. Mais velho que isso não descreve
 /// a mesa neste instante — o valor é cache, e comparar em cima dele é apostar às cegas.
 const SLIP_FRESH_MAX_MS: i64 = 700;
+
+/// Interpreta o corpo de `/act/preview` exigindo os DOIS campos que autorizam agir.
+///
+/// Ausência de `bet_age_ms` NÃO é leitura fresca: antes, campo faltando pulava a checagem e a
+/// resposta virava "mesa limpa, 0¢" — bastava o sidecar mudar de forma para apostar em cima de
+/// fichas residuais. Sem `preview_cents` também não há total, então não há decisão possível.
+fn parse_preview(body: &str) -> Result<u64, ExecError> {
+    let parsed: serde_json::Value = serde_json::from_str(body.trim())
+        .map_err(|e| ExecError::CdpTransport(format!("preview inválido: {e}")))?;
+    let age = parsed
+        .get("bet_age_ms")
+        .and_then(|v| v.as_i64())
+        .ok_or(ExecError::SlipStale(SLIP_FRESH_MAX_MS + 1))?;
+    if !(0..=SLIP_FRESH_MAX_MS).contains(&age) {
+        return Err(ExecError::SlipStale(age));
+    }
+    let cents = parsed
+        .get("preview_cents")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| ExecError::CdpTransport("preview sem preview_cents".to_string()))?;
+    Ok(cents.max(0) as u64)
+}
 const SETTLE_POLL_MS: u64 = 70;
 const SETTLE_DEADLINE_MS: u64 = 1_200;
 
@@ -961,6 +970,34 @@ mod slip_settle_tests {
         match read_settled(&cdp, 0) {
             Err(ExecError::SlipStale(_)) => {}
             other => panic!("esperava SlipStale, veio {other:?}"),
+        }
+    }
+
+    /// Corpo de `/act/preview` sem `bet_age_ms` não pode virar "mesa limpa, 0¢":
+    /// campo faltando é leitura não autorizada, não leitura fresca.
+    #[test]
+    fn preview_sem_idade_de_leitura_falha_em_vez_de_assumir_zero() {
+        let body = r#"{"preview_cents":0,"balance_cents":6907,"round_open":true}"#;
+        match parse_preview(body) {
+            Err(ExecError::SlipStale(_)) => {}
+            other => panic!("esperava SlipStale, veio {other:?}"),
+        }
+    }
+
+    /// Resposta normal: idade dentro da tolerância devolve o total real da mesa.
+    #[test]
+    fn preview_fresco_devolve_o_total_lido() {
+        let body = r#"{"preview_cents":90,"bet_age_ms":120,"balance_cents":6817,"round_open":true}"#;
+        assert_eq!(parse_preview(body).expect("preview fresco"), 90);
+    }
+
+    /// Sem `preview_cents` não existe total, logo não existe decisão: erro de transporte.
+    #[test]
+    fn preview_sem_total_nao_pode_significar_cero_apostado() {
+        let body = r#"{"bet_age_ms":50,"balance_cents":6907}"#;
+        match parse_preview(body) {
+            Err(ExecError::CdpTransport(_)) => {}
+            other => panic!("esperava CdpTransport, veio {other:?}"),
         }
     }
 
