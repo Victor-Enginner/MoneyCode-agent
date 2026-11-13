@@ -187,8 +187,17 @@ func (c *Client) RequestTargetCoords(sid string, target string, fallbackX, fallb
     const top = colAnchor.rows[2].y - rowGap * 0.55;
     const lastRowY = colAnchor.rows[0].y;
     const bottom = lastRowY + rowGap * 3.2; // cobre a linha das dúzias e a de 18/par/vermelho
+    // A pista oval ("racetrack") repete todos os números em células minúsculas; clicar nela aposta
+    // o número + 2 vizinhos de cada lado (5 fichas). Pleno só sai da grade 3x12: exclui a pista.
+    // Também há "9"/"2" no seletor de vizinhos na mesma faixa do pano: quando a mesa expõe a classe
+    // da casa de pleno (table-cell_straight), só ela vale. Sem essa classe, cai no filtro geométrico.
+    const onRacetrack = (n) => !!(n.el && n.el.closest && n.el.closest('[class*="source-racetrack"]'));
+    const inStraightCell = (n) => !!(n.el && n.el.closest && n.el.closest('[class*="table-cell_straight"]'));
+    const hasStraightCells = nodes.some(n => inStraightCell(n) && !onRacetrack(n));
     const nums = nodes.filter(n =>
       /^\d{1,2}$/.test(n.t) &&
+      !onRacetrack(n) &&
+      (!hasStraightCells || inStraightCell(n)) &&
       n.x < right &&
       n.y > top &&
       n.y <= lastRowY + rowGap * 0.55
