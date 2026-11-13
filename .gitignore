@@ -19,3 +19,4 @@
 Thumbs.db
 /logs/*.bin
 config/tuning.json
+config/telegram.json
