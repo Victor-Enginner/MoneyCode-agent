@@ -55,6 +55,17 @@ pub enum Hypothesis {
     FrequencyBias,
     /// Cadeia de Markov de coluna: P(coluna seguinte | coluna atual) aprendida no TREINO.
     MarkovColumn,
+    /// "Puxada": os 2 finais que mais saíram logo depois do final atual, aprendidos no TREINO.
+    MarkovTerminal,
+    /// Final mais forte (maior z) nos últimos `w` giros, ponderado pelo tamanho (4 ou 3 números).
+    TerminalForte { w: usize },
+}
+
+/// Quantos números tem cada final: 0–6 têm 4 (0,10,20,30 …), 7–9 têm 3.
+pub const TERMINAL_SIZE: [u32; 10] = [4, 4, 4, 4, 4, 4, 4, 3, 3, 3];
+
+fn terminal_numbers(ts: &[u8]) -> Vec<u8> {
+    (0..=36u8).filter(|n| ts.contains(&(n % 10))).collect()
 }
 
 impl Hypothesis {
@@ -64,6 +75,8 @@ impl Hypothesis {
             Self::HotTerminal { w, k } => format!("ml_terminal_quente_w{w}_top{k}"),
             Self::FrequencyBias => "ml_vies_frequencia_top5".to_string(),
             Self::MarkovColumn => "ml_markov_coluna".to_string(),
+            Self::MarkovTerminal => "ml_puxada_terminal_top2".to_string(),
+            Self::TerminalForte { w } => format!("ml_final_forte_w{w}"),
         }
     }
 
@@ -73,6 +86,8 @@ impl Hypothesis {
             Self::HotTerminal { .. } => "Segue o terminal que mais saiu recentemente. Se as 'ondas' fossem reais, acertaria mais que o acaso.",
             Self::FrequencyBias => "Aprende no treino quais 5 números mais saíram e aposta neles depois. Só ganha se a roda tiver viés físico.",
             Self::MarkovColumn => "Aprende no treino qual coluna costuma vir depois de cada coluna. Só ganha se um giro depender do anterior.",
+            Self::MarkovTerminal => "Puxada medida: aprende no treino quais 2 finais mais saem depois de cada final e aposta neles. É a versão testável de 'número que puxa número'.",
+            Self::TerminalForte { .. } => "Aposta no final que mais está saindo acima do esperado (maior z) na janela longa. Só ganha se a mesa tiver final realmente viciado.",
         }
     }
 }
@@ -82,6 +97,7 @@ impl Hypothesis {
 struct Trained {
     top5: Vec<u8>,
     markov: [[u32; 4]; 4],
+    markov_t: [[u32; 10]; 10],
 }
 
 fn column(n: u8) -> usize {
@@ -99,7 +115,11 @@ fn train(train: &[u8]) -> Trained {
     for w in train.windows(2) {
         markov[column(w[0])][column(w[1])] += 1;
     }
-    Trained { top5: idx[..5].to_vec(), markov }
+    let mut markov_t = [[0u32; 10]; 10];
+    for w in train.windows(2) {
+        markov_t[usize::from(w[0] % 10)][usize::from(w[1] % 10)] += 1;
+    }
+    Trained { top5: idx[..5].to_vec(), markov, markov_t }
 }
 
 fn covered(covers: &[Cover]) -> Vec<u8> {
@@ -142,6 +162,36 @@ fn bet(h: &Hypothesis, past: &[u8], t: &Trained) -> Option<Vec<u8>> {
             }
             let best = (1..=3).max_by_key(|&c| (row[c], std::cmp::Reverse(c)))?;
             Some((1..=36u8).filter(|&n| column(n) == best).collect())
+        }
+        Hypothesis::MarkovTerminal => {
+            let a = usize::from(*past.last()? % 10);
+            let row = t.markov_t[a];
+            if row.iter().sum::<u32>() < 20 {
+                return None;
+            }
+            // Ranqueia pelo excesso sobre o esperado (count / tamanho do final), não pela contagem crua.
+            let mut ts: Vec<u8> = (0..10).collect();
+            ts.sort_by(|&x, &y| {
+                let fx = f64::from(row[usize::from(x)]) / f64::from(TERMINAL_SIZE[usize::from(x)]);
+                let fy = f64::from(row[usize::from(y)]) / f64::from(TERMINAL_SIZE[usize::from(y)]);
+                fy.partial_cmp(&fx).unwrap_or(std::cmp::Ordering::Equal).then(x.cmp(&y))
+            });
+            Some(terminal_numbers(&ts[..2]))
+        }
+        Hypothesis::TerminalForte { w } => {
+            if past.len() < *w {
+                return None;
+            }
+            let recent = &past[past.len() - *w..];
+            let n = recent.len() as f64;
+            let best = (0..10u8)
+                .map(|d| {
+                    let k = recent.iter().filter(|&&x| x % 10 == d).count() as f64;
+                    let p = f64::from(TERMINAL_SIZE[usize::from(d)]) / 37.0;
+                    ((k - n * p) / (n * p * (1.0 - p)).sqrt(), d)
+                })
+                .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))?;
+            (best.0 >= 2.0).then(|| terminal_numbers(&[best.1]))
         }
     }
 }
@@ -342,6 +392,8 @@ pub fn default_hypotheses(matchers: &[Arc<dyn Matcher>]) -> Vec<Hypothesis> {
     v.push(Hypothesis::HotTerminal { w: 20, k: 2 });
     v.push(Hypothesis::FrequencyBias);
     v.push(Hypothesis::MarkovColumn);
+    v.push(Hypothesis::MarkovTerminal);
+    v.push(Hypothesis::TerminalForte { w: 200 });
     v
 }
 
@@ -388,6 +440,25 @@ mod tests {
             .collect();
         let r = run_lab(6_000, &spins, &[Hypothesis::FrequencyBias]);
         assert_eq!(r.linhas[0].veredito, "APROVADO", "{:?}", r.linhas[0].motivo);
+    }
+
+    #[test]
+    fn puxada_real_e_detectada_e_puxada_inventada_nao() {
+        // Mesa onde o final 7 é seguido pelo final 4 metade das vezes: puxada verdadeira.
+        let mut s = 11u64;
+        let mut spins: Vec<u8> = Vec::new();
+        for _ in 0..6_000 {
+            let prev = spins.last().copied();
+            let n = if prev.is_some_and(|p| p % 10 == 7) && lcg(&mut s) % 2 == 0 { 14 } else { lcg(&mut s) };
+            spins.push(n);
+        }
+        let r = run_lab(6_000, &spins, &[Hypothesis::MarkovTerminal]);
+        assert_eq!(r.linhas[0].veredito, "APROVADO", "{}", r.linhas[0].motivo);
+        // Roleta justa: nenhuma puxada aprovada.
+        let mut s2 = 99u64;
+        let fair: Vec<u8> = (0..6_000).map(|_| lcg(&mut s2)).collect();
+        let r2 = run_lab(6_000, &fair, &[Hypothesis::MarkovTerminal, Hypothesis::TerminalForte { w: 200 }]);
+        assert!(r2.linhas.iter().all(|l| l.veredito != "APROVADO"));
     }
 
     #[test]

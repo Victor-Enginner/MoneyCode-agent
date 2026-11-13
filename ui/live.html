@@ -340,6 +340,11 @@
             <canvas id="ph-mc-c" class="ph-c"></canvas>
             <div id="ph-mc-out" class="ph-out num"></div>
             <div class="ph-note">Distribuição do resultado final de cada sessão (vermelho = prejuízo). Nenhuma escada muda o EV de −2,7%: ela troca muitos ganhos pequenos por raros estouros grandes.</div></section>
+          <section class="ph-card" style="grid-column:1/-1"><div class="panel-header"><span>5 · TERMINAIS · FORÇA E PUXADAS</span><span class="src num">z vs acaso · finais 0–6 têm 4 números, 7–9 têm 3</span></div>
+            <div class="ph-two"><div><div class="metric-label">força de cada final (z) · <span id="ph-tf-w">—</span></div><canvas id="ph-tf-c" class="ph-c"></canvas></div>
+            <div><div class="metric-label">puxada: depois do final da LINHA, sai o final da COLUNA (z)</div><div id="ph-px" class="num" style="overflow-x:auto"></div></div></div>
+            <div id="ph-term-out" class="ph-out num"></div>
+            <div class="ph-note">Verde forte = sai mais que o acaso; z só vale com correção por testar muitas coisas: 10 finais → |z| ≥ 2,58 · 100 puxadas → |z| ≥ 3,29. Abaixo disso é sorte. O 🧪 Laboratório testa as duas ideias no teste oculto antes de virar aposta.</div></section>
         </div>
         <table class="num" id="tab-table"><thead id="tab-head"></thead><tbody id="tab-body"></tbody></table>
       </div>
@@ -1107,6 +1112,38 @@
         `${N.toLocaleString('pt-BR')} sessões · P(banca não cobrir a escada) = <b style="color:${ruin / N > 0.05 ? '#ff0a54' : '#39ff14'}">${(100 * ruin / N).toFixed(2)}%</b> · ` +
         `resultado médio <b style="color:${mean < 0 ? '#ff0a54' : '#39ff14'}">R$ ${mean.toFixed(2)}</b> · p5 R$ ${q(0.05).toFixed(2)} · p95 R$ ${q(0.95).toFixed(2)} · estouros/sessão ${(blows / N).toFixed(2)}`;
     }
+    // ---------- 5. Terminais: força (z por final) e puxadas (matriz de transição 10×10) ----------
+    function phTerm(sp) {
+      const SZ = [4,4,4,4,4,4,4,3,3,3], T = sp.map((v) => v % 10), W = Math.min(200, T.length);
+      const zf = (k, n, p) => (n ? (k - n * p) / Math.sqrt(n * p * (1 - p)) : 0);
+      const rec = T.slice(-W), zs = SZ.map((s, d) => zf(rec.filter((t) => t === d).length, W, s / 37));
+      document.getElementById('ph-tf-w').textContent = 'últimos ' + W + ' giros';
+      const lim = Math.max(3, ...zs.map(Math.abs));
+      phBars('ph-tf-c', zs, { min: -lim, max: lim, bands: [2.58, -2.58], color: (v) => (v >= 2.58 ? '#39ff14' : (v <= -2.58 ? '#ff0a54' : (v > 0 ? '#1f7a10' : '#5a1022'))), labels: [...Array(10).keys()].map((d) => [d, String(d)]) });
+      const M = [...Array(10)].map(() => new Array(10).fill(0));
+      for (let i = 1; i < T.length; i++) M[T[i - 1]][T[i]]++;
+      let html = '<table style="border-collapse:collapse;font-size:10px"><tr><td></td>' + [...Array(10).keys()].map((b) => `<td style="text-align:center;color:var(--muted);padding:2px 4px">${b}</td>`).join('') + '</tr>';
+      let best = null;
+      for (let a = 0; a < 10; a++) {
+        const ra = M[a].reduce((x, y) => x + y, 0);
+        html += `<tr><td style="color:var(--muted);padding:2px 6px">${a}→</td>`;
+        for (let b = 0; b < 10; b++) {
+          const z = zf(M[a][b], ra, SZ[b] / 37), sig = Math.abs(z) >= 3.29;
+          if (!best || z > best.z) best = { a, b, z, o: M[a][b], e: ra * SZ[b] / 37 };
+          const al = Math.min(1, Math.abs(z) / 3.29), col = z > 0 ? `rgba(57,255,20,${0.12 + 0.6 * al})` : `rgba(255,10,84,${0.12 + 0.6 * al})`;
+          html += `<td title="${a}→${b}: ${M[a][b]} vs ${(ra * SZ[b] / 37).toFixed(1)} esperado · z=${z.toFixed(2)}" style="width:26px;height:20px;text-align:center;background:${col};${sig ? 'outline:2px solid #ffd60a;' : ''}color:#fff">${M[a][b]}</td>`;
+        }
+        html += '</tr>';
+      }
+      document.getElementById('ph-px').innerHTML = html + '</table>';
+      const top = zs.map((z, d) => [z, d]).sort((x, y) => y[0] - x[0]);
+      const sigT = top.filter(([z]) => z >= 2.58).map(([z, d]) => `final ${d} (z=${z.toFixed(2)})`);
+      document.getElementById('ph-term-out').innerHTML =
+        `mais fortes agora: ${top.slice(0, 3).map(([z, d]) => `<b>${d}</b> ${z >= 0 ? '+' : ''}${z.toFixed(2)}σ`).join(' · ')} → ` +
+        (sigT.length ? `<span style="color:#39ff14">acima do acaso: ${sigT.join(', ')}</span>` : '<span style="color:var(--muted)">nenhum final fora do ruído</span>') +
+        ` · puxada mais forte: <b>${best.a}→${best.b}</b> (${best.o} vs ${best.e.toFixed(1)}, z=${best.z.toFixed(2)}) ` +
+        (best.z >= 3.29 ? '<span style="color:#39ff14">significativa</span>' : '<span style="color:var(--muted)">dentro do acaso</span>');
+    }
     async function phRender() {
       phDyn(); phMC();
       try {
@@ -1119,7 +1156,7 @@
         return;
       }
       document.getElementById('ph-n').textContent = sp.length + ' GIROS REAIS';
-      phGeo(sp); phStats(sp);
+      phGeo(sp); phStats(sp); phTerm(sp);
     }
   </script>
 </body>
