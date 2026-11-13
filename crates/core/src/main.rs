@@ -196,9 +196,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         chip_denoms_cents: vec![2500, 1000, 500, 100, 50, 10],
     };
 
+    // `--mc-only` imprime os dois Monte Carlo e sai: é como se testa uma mudança de
+    // `base_cents`/`max_steps`/banca sem abrir sessão (gate do §13).
+    let mut mc_only = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--mc-only" => mc_only = true,
             "--live" => mode = ExecutionMode::Live,
             "--dry-run" => mode = ExecutionMode::DryRun,
             "--stream" if i + 1 < args.len() => {
@@ -267,6 +271,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mc_numbers.ev_per_hour_cents,
         if mc_numbers.gate_passes() { "PASS" } else { "FAIL" }
     );
+    if mc_only {
+        return Ok(());
+    }
 
     // 2. Inicializa SQLite WAL, remove registros inválidos antigos e reconcilia órfãos no boot (§9).
     let pool = init_pool(&db_uri)?;
