@@ -47,12 +47,49 @@ pub use timeline_sync::{
 /// Versão do módulo core.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Janela de aposta (§2) que o gate enxerga para o giro que acabou de chegar.
+pub const BET_WINDOW_MS: u32 = 9_000;
+
+/// Orçamento de janela para o gate de risco.
+///
+/// O texto "PLACE YOUR BETS" é lido por polling e só vira DEPOIS do resultado, mas o DAG roda no
+/// instante do giro. Usar só esse texto como fonte fazia todo giro cair em `Skip(WindowTooShort)`
+/// e nenhuma entrada acontecer — nem no dry-run. O evento de spin é a autoridade: o resultado é
+/// o que abre a janela. `round_open` volta a decidir quando o giro é antigo (replay, reconexão,
+/// fita DOM chegando com atraso), aí não há janela nova para apostar.
+pub fn window_budget_ms(round_open: bool, spin_age_ms: i64) -> u32 {
+    const FRESH_SPIN_MS: i64 = 5_000;
+    if round_open {
+        return BET_WINDOW_MS;
+    }
+    if spin_age_ms <= FRESH_SPIN_MS {
+        // Giro recém-chegado: desconta o que já passou desde o resultado (idade negativa é
+        // relógio do sidecar à frente, não janela gasta).
+        return BET_WINDOW_MS.saturating_sub(spin_age_ms.max(0) as u32);
+    }
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use monster_risk::{Cfg, State, Verdict};
     use monster_store::{init_pool, orphan_sweep};
     use monster_strategy_native::{default_matchers, Cover};
+
+    #[test]
+    fn giro_recem_chegado_abre_janela_mesmo_com_texto_da_ui_atrasado() {
+        // Texto da UI ainda diz "aguarde" (round_open=false) porque o polling não alcançou o
+        // resultado — o giro recém-chegado manda, senão toda entrada vira Skip(WindowTooShort).
+        assert_eq!(window_budget_ms(false, 40), BET_WINDOW_MS - 40);
+        assert_eq!(window_budget_ms(false, 0), BET_WINDOW_MS);
+        // Mesa confirmadamente aberta: janela cheia.
+        assert_eq!(window_budget_ms(true, 9_000), BET_WINDOW_MS);
+        // Giro antigo (replay/reconexão): não existe janela nova para apostar.
+        assert_eq!(window_budget_ms(false, 20_000), 0);
+        // Idade negativa (relógio do sidecar à frente) não pode virar janela gigante.
+        assert_eq!(window_budget_ms(false, -500), BET_WINDOW_MS);
+    }
 
     #[test]
     fn window30_maintains_most_recent_first_up_to_30() {

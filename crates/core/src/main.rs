@@ -8,7 +8,8 @@ use monster_core::{
     boot_reconcile, build_brain_snapshot, evaluate_all_matchers_history,
     evaluate_dag_with_history, has_recent_number, load_chronological_history, place, reconcile_spin,
     sync_strip_to_db, write_gbrain_file, Calibration, CdpActuator, CoverAck, DryRunActuator,
-    ExecutionMode, GateCtx, HistoryBuffer, KillSwitch, LadderSteps, LiveHttpActuator, Plan,
+    window_budget_ms, ExecutionMode, GateCtx, HistoryBuffer, KillSwitch, LadderSteps,
+    LiveHttpActuator, Plan,
     PlayedEntry, Window30, HISTORY_CAPACITY, WINDOW_CAPACITY,
 };
 use monster_risk::{
@@ -545,13 +546,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let cur_bank = shared_bankroll_cents.load(Ordering::Relaxed);
         let cur_pnl = shared_pnl_cents.load(Ordering::Relaxed);
-        // Só tenta entrar com a mesa em `PLACE YOUR BETS`; fora disso a janela é zero e o gate dá Skip.
+        // Janela: o giro é a autoridade (o texto da UI chega depois por polling). Replay e
+        // reconexão entregam sempre giro velho, aí a janela é zero e o gate dá Skip.
         let window_open = table_round_open.load(Ordering::Relaxed);
+        let spin_age_ms = now_ms.saturating_sub(ev.ts);
         let st = State {
             bankroll_cents: if cur_bank > 0 { cur_bank } else { bankroll_cents },
             exposure_cents: 0,
             session_pnl_cents: cur_pnl,
-            remaining_window_ms: if window_open { 9_000 } else { 0 },
+            remaining_window_ms: window_budget_ms(window_open, spin_age_ms),
             spins_since_blow,
             // Neutro: o DAG usa o degrau da própria estratégia vencedora (`ladder_steps`).
             step: 0,
