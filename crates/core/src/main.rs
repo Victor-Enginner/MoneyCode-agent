@@ -112,6 +112,47 @@ fn stake_path() -> String {
 /// cada valor muda a escada e precisa passar pelo Monte Carlo do §13.
 const ALLOWED_BASES: [u64; 5] = [10, 20, 40, 50, 100];
 
+/// Janela mínima entre entradas, mesmo sem Game Code (WS + fita duplicando o mesmo giro).
+const MIN_ENTRY_GAP_MS: i64 = 15_000;
+/// Uma rodada da Playtech dura ~35 s: Game Code igual depois disso é texto velho no DOM,
+/// não a mesma rodada. Sem esse teto o bot ignorou sinais por 33 min (13/11, código preso).
+const ROUND_KEY_TTL_MS: i64 = 45_000;
+
+/// Regra "uma entrada por rodada" tolerante a Game Code congelado no DOM.
+fn is_same_round(round_key: &str, last_round: &str, last_entry_at_ms: i64, now_ms: i64) -> bool {
+    if last_entry_at_ms <= 0 {
+        return false;
+    }
+    let since = now_ms - last_entry_at_ms;
+    since < MIN_ENTRY_GAP_MS || (!round_key.is_empty() && last_round == round_key && since < ROUND_KEY_TTL_MS)
+}
+
+#[cfg(test)]
+mod round_tests {
+    use super::is_same_round;
+
+    #[test]
+    fn mesmo_codigo_dentro_da_rodada_bloqueia() {
+        assert!(is_same_round("A", "A", 1_000, 31_000));
+    }
+
+    #[test]
+    fn codigo_congelado_no_dom_nao_trava_para_sempre() {
+        assert!(!is_same_round("3845027974", "3845027974", 1_000, 1_000 + 484_930));
+    }
+
+    #[test]
+    fn intervalo_minimo_vale_sem_codigo() {
+        assert!(is_same_round("", "", 1_000, 10_000));
+        assert!(!is_same_round("", "", 1_000, 20_000));
+    }
+
+    #[test]
+    fn sem_entrada_anterior_nunca_bloqueia() {
+        assert!(!is_same_round("A", "A", 0, 5_000));
+    }
+}
+
 /// Lê a ficha salva; valor inválido ou não permitido volta ao padrão do `Cfg`.
 fn load_stake_base(path: &str, fallback: u64) -> u64 {
     let Ok(raw) = std::fs::read_to_string(path) else {
@@ -1042,8 +1083,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Regra dura: no máximo UMA entrada por rodada da Playtech, mesmo que a rodada chegue
             // por duas fontes (WS + fita DOM) ou o DAG emita o sinal mais de uma vez.
             let round_key = table_round.lock().map(|g| g.clone()).unwrap_or_default();
-            let same_round = (!round_key.is_empty() && last_entry_round == round_key)
-                || (last_entry_at_ms > 0 && (now_ms - last_entry_at_ms) < 15_000);
+            let same_round = is_same_round(&round_key, &last_entry_round, last_entry_at_ms, now_ms);
             if same_round {
                 println!(
                     "[EXECUTOR] rodada {} já possui entrada (última em {}ms) — sinal duplicado ignorado",
