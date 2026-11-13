@@ -8,7 +8,11 @@ use thiserror::Error;
 use tracing::warn;
 
 pub mod mc;
+pub mod mc_numbers;
 pub use mc::{run_monte_carlo, McParams, McReport};
+pub use mc_numbers::{
+    run_monte_carlo_numbers, NumbersMcParams, NumbersMcReport, P_RUIN_GATE,
+};
 
 /// Probabilidade de perda ao cobrir 2 colunas em roleta single-zero (13/37).
 pub const P_LOSE: f64 = 13.0 / 37.0;
