@@ -169,6 +169,7 @@ mod tests {
         chrono.reverse();
         let cfg = Cfg {
             base_cents: 10,
+            number_base_cents: 10,
             max_steps: 4,
             cooldown_spins: 2,
             ..Cfg::default()

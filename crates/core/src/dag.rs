@@ -184,7 +184,7 @@ pub const fn compute_ev_cents_numbers(numbers: u64, stake_per_number_cents: u64)
 fn gate_for(winner: &Aggregate, cfg: &Cfg, state: &State) -> Verdict {
     match number_coverage(&winner.cover) {
         Some(numbers) => {
-            let nl = NumberLadder::new(numbers.len() as u8, cfg.base_cents);
+            let nl = NumberLadder::new(numbers.len() as u8, cfg.number_base_cents);
             authorize_numbers(cfg, &nl, state)
         }
         None => authorize(cfg, state),
@@ -200,7 +200,7 @@ fn gate_for(winner: &Aggregate, cfg: &Cfg, state: &State) -> Verdict {
 fn compile_plan(spin_id: &str, winner: &Aggregate, ladder_step: u8, cfg: &Cfg) -> Option<Plan> {
     let (covers, stake_per_cover_cents, ev_cents): (Vec<(Cover, u64)>, u64, i64) =
         if let Some(numbers) = number_coverage(&winner.cover) {
-            let nl = NumberLadder::new(numbers.len() as u8, cfg.base_cents);
+            let nl = NumberLadder::new(numbers.len() as u8, cfg.number_base_cents);
             let stake = nl.stake_cents(ladder_step);
             let covers = numbers
                 .iter()
@@ -268,7 +268,13 @@ fn apply_permanence_priority(
 /// fora que não são permanência (`cluster_terminal`, `fibonacci_lag`, `setor_vies`). Com
 /// permanência disparada os sinais de número já foram removidos por `apply_permanence_priority`.
 fn pick_winner(aggregates: &[Aggregate], min_confidence: f64) -> Option<&Aggregate> {
-    let eligible = |a: &&Aggregate| a.confidence >= min_confidence && !a.cover.is_empty();
+    // Teto do operador: entrada por número nunca passa de MAX_NUMBER_COVERS (24) casas.
+    let eligible = |a: &&Aggregate| {
+        a.confidence >= min_confidence
+            && !a.cover.is_empty()
+            && number_coverage(&a.cover)
+                .is_none_or(|n| n.len() <= usize::from(monster_risk::MAX_NUMBER_COVERS))
+    };
     let permanence_firing = aggregates
         .iter()
         .filter(eligible)

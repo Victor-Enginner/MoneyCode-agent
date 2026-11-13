@@ -359,6 +359,7 @@ mod tests {
         let chrono = hist.to_chronological_vec();
         let cfg = Cfg {
             base_cents: 10,
+            number_base_cents: 10,
             max_steps: 4,
             cooldown_spins: 2,
             ..Cfg::default()

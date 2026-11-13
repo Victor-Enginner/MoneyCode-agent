@@ -39,7 +39,7 @@ pub fn cum_loss_cents(step: u8, base_cents: u64) -> u64 {
 pub const MIN_CHIP_CENTS: u64 = 10;
 
 /// Teto de números distintos que uma cobertura de número pode cobrir.
-pub const MAX_NUMBER_COVERS: u8 = 30;
+pub const MAX_NUMBER_COVERS: u8 = 24;
 
 /// Divisão para cima em inteiros (centavos), sem float.
 const fn ceil_div(a: u64, b: u64) -> u64 {
@@ -198,8 +198,11 @@ pub enum RiskError {
 /// Parâmetros de configuração do gate de risco (`config/risk.toml`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cfg {
-    /// Valor base por cobertura no degrau 1 em centavos inteiros.
+    /// Valor base por cobertura no degrau 1 em centavos inteiros (escada de fora: coluna/dúzia/cor).
     pub base_cents: u64,
+    /// Lucro alvo por ciclo da escada de **números** (`NumberLadder`), separado da ficha de fora.
+    #[serde(default = "default_number_base_cents")]
+    pub number_base_cents: u64,
     /// Número máximo de degraus da escada.
     pub max_steps: u8,
     /// Limite máximo da mesa por cobertura em centavos inteiros.
@@ -220,10 +223,15 @@ pub struct Cfg {
     pub chip_denoms_cents: Vec<u64>,
 }
 
+const fn default_number_base_cents() -> u64 {
+    10
+}
+
 impl Default for Cfg {
     fn default() -> Self {
         Self {
             base_cents: 10,
+            number_base_cents: 10,
             max_steps: 5,
             max_bet_per_cover_cents: 50000,
             max_exposure_pct: 0.16,

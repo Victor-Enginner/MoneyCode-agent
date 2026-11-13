@@ -472,6 +472,7 @@ impl Default for FuiController {
     fn default() -> Self {
         Self::new(Cfg {
             base_cents: 10,
+            number_base_cents: 10,
             max_steps: 4,
             max_bet_per_cover_cents: 100_000,
             max_exposure_pct: 0.10,

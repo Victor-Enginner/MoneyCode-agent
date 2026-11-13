@@ -235,6 +235,21 @@
     .btn-kill, .btn-gear { white-space: nowrap; flex-shrink: 0; }
     .btn-x { width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--line-2); background: transparent; color: var(--fg); cursor: pointer; font-size: 14px; }
     .btn-x:hover { border-color: #ff0a54; color: #ff0a54; }
+    /* 🔬 Física & Estatística: ocupa o miolo inteiro, como a gaveta de ajustes. */
+    body.phys-open .panel-e { grid-row: 3 / 5; }
+    body.phys-open .panel-b, body.phys-open .panel-c, body.phys-open .panel-d { display: none; }
+    .ph-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 10px; padding: 4px 2px; }
+    .ph-grid[hidden] { display: none; }
+    .ph-card { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.015); min-width: 0; }
+    .ph-c { width: 100%; height: 170px; display: block; background: #050505; border: 1px solid var(--line); border-radius: 6px; }
+    .ph-sm { height: 120px; }
+    .ph-two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .ph-ctrl { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: flex-end; }
+    .ph-sl { display: flex; flex-direction: column; gap: 3px; font-size: 9px; color: var(--muted); min-width: 120px; }
+    .ph-sl b { color: #39ff14; } .ph-sl input[type=range] { accent-color: #39ff14; }
+    .ph-sl input[type=number] { width: 90px; height: 24px; background: #000; color: #39ff14; border: 1px solid var(--line-2); border-radius: 5px; padding: 0 6px; font: 600 11px 'JetBrains Mono', monospace; }
+    .ph-out { font-size: 11px; color: var(--fg); line-height: 1.5; }
+    .ph-note { font-size: 9px; color: var(--dim); line-height: 1.5; }
   </style>
 </head>
 <body>
@@ -300,8 +315,32 @@
         <button class="tab-btn" onclick="setTab('ERROS', this)">4 · Erros</button>
         <button class="tab-btn" onclick="setTab('PADROES', this)">5 · Padrões (walk-forward)</button>
         <button class="tab-btn" onclick="setTab('BRAIN', this)">6 · Brain &amp; Datalab</button>
+        <button class="tab-btn" onclick="setTab('LAB', this)">🧪 Laboratório</button>
+        <button class="tab-btn" onclick="setTab('PHYS', this)">🔬 Física &amp; Estatística</button>
       </div>
       <div class="tab-scroll">
+        <div id="phys-panel" class="ph-grid" hidden>
+          <section class="ph-card"><div class="panel-header"><span>1 · DINÂMICA ANGULAR (RK4)</span><span class="src num">modelo didático</span></div>
+            <div class="ph-ctrl"><label class="ph-sl"><span>ω bola (rad/s) <b id="ph-wb-v"></b></span><input id="ph-wb" type="range" min="3" max="35" step="0.5" value="18" oninput="phDyn()"></label><label class="ph-sl"><span>arrasto bola γb <b id="ph-gb-v"></b></span><input id="ph-gb" type="range" min="0.005" max="0.2" step="0.005" value="0.045" oninput="phDyn()"></label><label class="ph-sl"><span>ω rotor (rad/s) <b id="ph-wr-v"></b></span><input id="ph-wr" type="range" min="-3" max="3" step="0.1" value="-0.8" oninput="phDyn()"></label><label class="ph-sl"><span>arrasto rotor γr <b id="ph-gr-v"></b></span><input id="ph-gr" type="range" min="0.001" max="0.08" step="0.001" value="0.012" oninput="phDyn()"></label><label class="ph-sl"><span>acoplamento κ <b id="ph-k-v"></b></span><input id="ph-k" type="range" min="0" max="0.15" step="0.005" value="0.025" oninput="phDyn()"></label></div>
+            <canvas id="ph-dyn-c" class="ph-c"></canvas>
+            <div class="ph-note"><span style="color:#39ff14">━ bola</span> · <span style="color:#bc13fe">━ rotor</span> · <span style="color:#ffd60a">┄ limiar de queda</span> · <span style="color:#ff0a54">│ queda</span></div>
+            <div id="ph-dyn-out" class="ph-out num"></div><div id="ph-dyn-sens" class="ph-note"></div></section>
+          <section class="ph-card"><div class="panel-header"><span>2 · GEOMETRIA · ASSINATURA DO CRUPIÊ</span><span id="ph-n" class="src num">—</span></div>
+            <canvas id="ph-geo-c" class="ph-c"></canvas>
+            <div class="ph-note">Para cada par de giros seguidos: quantas casas, no sentido da roda, separam o número anterior do próximo. Crupiê sem assinatura → barras uniformes na linha branca. Pico fixo = lançamento repetitivo.</div>
+            <div id="ph-geo-out" class="ph-out num"></div></section>
+          <section class="ph-card"><div class="panel-header"><span>3 · ESTATÍSTICA DOS GIROS REAIS</span><span class="src num">qui² · entropia · autocorrelação · runs</span></div>
+            <div class="ph-two"><div><div class="metric-label">frequência por casa (0–36)</div><canvas id="ph-freq-c" class="ph-c ph-sm"></canvas></div>
+            <div><div class="metric-label">autocorrelação vermelho/preto (lags 1–20)</div><canvas id="ph-ac-c" class="ph-c ph-sm"></canvas></div></div>
+            <div id="ph-stats-out" class="ph-out num"></div>
+            <div class="ph-note">Banda amarela = ±2/√n: fora dela por acaso ~1 em 20 lags. Entropia máxima (roda perfeita) = log₂37 ≈ 5,209 bits.</div></section>
+          <section class="ph-card"><div class="panel-header"><span>4 · MONTE CARLO DA ESCADA ×3 (2 COLUNAS)</span><span class="src num">simulação</span></div>
+            <div class="ph-ctrl"><label class="ph-sl"><span>banca (R$)</span><input id="ph-mc-bank" type="number" value="40" min="1" max="100000"></label><label class="ph-sl"><span>ficha (¢)</span><input id="ph-mc-base" type="number" value="20" min="10" max="10000"></label><label class="ph-sl"><span>degraus</span><input id="ph-mc-steps" type="number" value="5" min="1" max="12"></label><label class="ph-sl"><span>sessões</span><input id="ph-mc-n" type="number" value="10000" min="100" max="200000"></label><label class="ph-sl"><span>giros/sessão</span><input id="ph-mc-spins" type="number" value="70" min="10" max="2000"></label><label class="ph-sl"><span>% giros com entrada</span><input id="ph-mc-fire" type="number" value="15" min="1" max="100"></label>
+              <button type="button" class="btn-save" onclick="phMC()">SIMULAR</button></div>
+            <canvas id="ph-mc-c" class="ph-c"></canvas>
+            <div id="ph-mc-out" class="ph-out num"></div>
+            <div class="ph-note">Distribuição do resultado final de cada sessão (vermelho = prejuízo). Nenhuma escada muda o EV de −2,7%: ela troca muitos ganhos pequenos por raros estouros grandes.</div></section>
+        </div>
         <table class="num" id="tab-table"><thead id="tab-head"></thead><tbody id="tab-body"></tbody></table>
       </div>
     </section>
@@ -315,6 +354,37 @@
     let lastTick = null;
     let lastPatterns = [];
     let lastBrain = null;
+    // ---------- Laboratório de hipóteses (GET /api/lab): treino 60% · validação 20% · teste oculto 20% ----------
+    let lastLab = null, labAt = 0;
+    async function loadLab(force) {
+      if (!force && Date.now() - labAt < 30000) return;
+      labAt = Date.now();
+      try { const r = await fetch('/api/lab'); if (r.ok) lastLab = await r.json(); } catch (_) { lastLab = { error: 'core offline' }; }
+      if (currentTab === 'LAB' && lastTick) render(lastTick);
+    }
+    function labRows() {
+      if (!lastLab) return '<tr><td colspan="8">carregando…</td></tr>';
+      if (lastLab.error) return `<tr><td colspan="8" style="color:var(--bad)">Laboratório indisponível: ${lastLab.error}</td></tr>`;
+      const cor = { 'APROVADO': '#39ff14', 'REPROVADO': '#ff0a54', 'DADOS INSUFICIENTES': '#ffd60a' };
+      const head = `<tr><td colspan="8" style="color:var(--muted);white-space:normal;line-height:1.6">
+        <b style="color:var(--fg)">${lastLab.giros_limpos}</b> giros reais (de ${lastLab.giros_brutos} gravados) ·
+        qui² das 37 casas <b style="color:var(--fg)">${lastLab.qui2_casas.toFixed(1)}</b> (acima de 51 = roda desviando a 5%) ·
+        para detectar viés de ~1% numa casa: ~${lastLab.giros_recomendados.toLocaleString('pt-BR')} giros ·
+        <span style="color:var(--dim)">só o <b>teste oculto</b> (últimos 20% dos giros) decide; treino e validação servem para aprender e ajustar.</span></td></tr>`;
+      return head + lastLab.linhas.map(l => {
+        const t = l.teste, c = cor[l.veredito] || 'var(--muted)';
+        const z = (v) => `<span style="color:${v.z >= 2 ? '#39ff14' : (v.z <= -2 ? '#ff0a54' : 'var(--muted)')}">${v.z >= 0 ? '+' : ''}${v.z.toFixed(2)}σ</span>`;
+        return `<tr title="${l.explicacao}">
+          <td style="color:var(--fg)">${l.id}<div style="color:var(--dim);font-size:9px;white-space:normal">${l.explicacao}</div></td>
+          <td>${l.treino.bets} · ${z(l.treino)}</td>
+          <td>${l.validacao.bets} · ${z(l.validacao)}</td>
+          <td>${t.bets}</td>
+          <td>${t.hit_pct.toFixed(1)}% <span style="color:var(--dim)">vs ${t.chance_pct.toFixed(1)}%</span></td>
+          <td style="color:${t.ev_pct >= 0 ? '#39ff14' : '#ff0a54'}">${t.ev_pct >= 0 ? '+' : ''}${t.ev_pct.toFixed(1)}%</td>
+          <td>${l.p_teste.toFixed(3)}</td>
+          <td style="color:${c};font-weight:700;white-space:normal">${l.veredito}<div style="color:var(--dim);font-weight:400;font-size:9px">${l.motivo}</div></td></tr>`;
+      }).join('');
+    }
     const fmtCents = (c) => (c === null || c === undefined) ? '—' : (c < 0 ? '-R$ ' : 'R$ ') + Math.floor(Math.abs(c)/100) + ',' + String(Math.abs(c)%100).padStart(2,'0');
     const fmtVal = (v) => (v === null || v === undefined || v === '') ? '—' : String(v);
     const fmtClock = (s) => (s === null || s === undefined) ? '—' : String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
@@ -662,6 +732,11 @@
       currentTab = t;
       document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
       if (btn) btn.classList.add('active');
+      const isPhys = t === 'PHYS';
+      document.body.classList.toggle('phys-open', isPhys);
+      document.getElementById('phys-panel').hidden = !isPhys;
+      document.getElementById('tab-table').style.display = isPhys ? 'none' : 'table';
+      if (isPhys) setTimeout(phRender, 30);
       if (lastTick) render(lastTick);
     }
     function toggleCfg(force) {
@@ -761,6 +836,10 @@
           const label = p.worth_entering ? '● SIM (APROVADO)' : '✖ NÃO (BLOQUEADO)';
           return `<tr><td>${p.strategy_id}</td><td>${p.spins_analyzed}g</td><td>${wins}V / ${p.busts}E</td><td>${d[0]} · ${d[1]} · ${d[2]} · ${d[3]}</td><td style="color:${p.net_pnl_cents>=0?'var(--accent)':'var(--loss)'}">${fmtCents(p.net_pnl_cents)}</td><td style="color:${color};font-weight:600">${label}</td></tr>`;
         }).join('') : '<tr><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>';
+      } else if (currentTab === 'LAB') {
+        loadLab(false);
+        th.innerHTML = '<tr><th>HIPÓTESE</th><th>TREINO (apostas · z)</th><th>VALIDAÇÃO</th><th>TESTE OCULTO</th><th>ACERTO vs ACASO</th><th>EV</th><th>P (sorte)</th><th>VEREDITO</th></tr>';
+        tb.innerHTML = labRows();
       } else if (currentTab === 'BRAIN') {
         th.innerHTML = '<tr><th>MÉTRICA CIENTÍFICA (DATALAB / NCM / JEV / GBRAIN)</th><th>VALOR ATUAL</th><th>INTERPRETAÇÃO OPERACIONAL</th></tr>';
         if (lastBrain && lastBrain.systemic) {
@@ -913,6 +992,134 @@
         const v = h[k];
         document.getElementById(id).className = 'led-dot led-' + (['ok', 'warn', 'bad', 'off'].includes(v) ? v : 'off');
       });
+    }
+  </script>
+  <script>
+    // ================= 🔬 FÍSICA & ESTATÍSTICA (porte do Roulette Dynamics Lab, em giros reais) =================
+    // Didático: o modelo físico é de baixa ordem e não prevê resultado; a estatística usa os giros limpos do /api/lab.
+    const PH = {
+      W: [0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3,26],
+      RED: new Set([1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]),
+      serie: null,
+    };
+    function phCanvas(id) {
+      const c = document.getElementById(id); if (!c) return null;
+      const r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+      c.width = Math.max(10, r.width * d); c.height = Math.max(10, r.height * d);
+      const x = c.getContext('2d'); x.setTransform(d, 0, 0, d, 0, 0); x.clearRect(0, 0, r.width, r.height);
+      return { x, w: r.width, h: r.height };
+    }
+    function phBars(id, vals, opts = {}) {
+      const g = phCanvas(id); if (!g) return; const { x, w, h } = g, n = vals.length;
+      const lo = opts.min ?? Math.min(0, ...vals), hi = opts.max ?? Math.max(...vals, opts.ref ?? 0, 1e-9);
+      const Y = (v) => h - 14 - (v - lo) / (hi - lo || 1) * (h - 22), bw = w / n;
+      vals.forEach((v, i) => {
+        x.fillStyle = typeof opts.color === 'function' ? opts.color(v, i) : (opts.color || '#39ff14');
+        const y0 = Y(Math.max(lo, 0)), y1 = Y(v);
+        x.fillRect(i * bw + 1, Math.min(y0, y1), Math.max(1, bw - 2), Math.abs(y1 - y0) || 1);
+      });
+      const line = (v, c, dash) => { x.strokeStyle = c; x.setLineDash(dash || []); x.beginPath(); x.moveTo(0, Y(v)); x.lineTo(w, Y(v)); x.stroke(); x.setLineDash([]); };
+      if (opts.ref !== undefined) line(opts.ref, '#f5f5f7', [4, 4]);
+      (opts.bands || []).forEach((b) => line(b, '#ffd60a', [2, 3]));
+      x.fillStyle = '#55555f'; x.font = '9px JetBrains Mono, monospace';
+      (opts.labels || []).forEach(([i, t]) => x.fillText(t, i * bw + 2, h - 3));
+    }
+    // ---------- 1. Dinâmica: θ̇b=ωb, ω̇b=−γb·ωb−κ(ωb−ωr), θ̇r=ωr, ω̇r=−γr·ωr (RK4) ----------
+    function phDyn() {
+      const v = (id) => Number(document.getElementById(id).value);
+      const p = { wb: v('ph-wb'), gb: v('ph-gb'), wr: v('ph-wr'), gr: v('ph-gr'), k: v('ph-k') };
+      ['ph-wb','ph-gb','ph-wr','ph-gr','ph-k'].forEach((id) => { document.getElementById(id + '-v').textContent = v(id); });
+      const f = (s) => [s[1], -p.gb * s[1] - p.k * (s[1] - s[3]), s[3], -p.gr * s[3]];
+      let s = [0, p.wb, 0, p.wr], t = 0, dt = 0.02, drop = null; const B = [], R = [];
+      const THR = 6.0; // rad/s: abaixo disso a bola deixa a pista (limiar didático)
+      while (t <= 30) {
+        B.push(s[1]); R.push(s[3]);
+        if (drop === null && s[1] < THR) drop = { t, rel: s[0] - s[2] };
+        const a = f(s), b = f(s.map((y, i) => y + dt / 2 * a[i])), c = f(s.map((y, i) => y + dt / 2 * b[i])), d = f(s.map((y, i) => y + dt * c[i]));
+        s = s.map((y, i) => y + dt / 6 * (a[i] + 2 * b[i] + 2 * c[i] + d[i])); t += dt;
+      }
+      const g = phCanvas('ph-dyn-c'); if (!g) return; const { x, w, h } = g;
+      const mx = Math.max(...B, ...R.map(Math.abs), THR) * 1.05, mn = Math.min(0, ...R);
+      const Y = (val) => h - 12 - (val - mn) / (mx - mn) * (h - 20), X = (i) => i / (B.length - 1) * w;
+      const plot = (arr, col) => { x.strokeStyle = col; x.lineWidth = 2; x.beginPath(); arr.forEach((val, i) => (i ? x.lineTo(X(i), Y(val)) : x.moveTo(X(i), Y(val)))); x.stroke(); };
+      x.strokeStyle = '#ffd60a'; x.setLineDash([3, 3]); x.beginPath(); x.moveTo(0, Y(THR)); x.lineTo(w, Y(THR)); x.stroke(); x.setLineDash([]);
+      plot(B, '#39ff14'); plot(R, '#bc13fe');
+      if (drop) { x.strokeStyle = '#ff0a54'; x.beginPath(); x.moveTo(drop.t / 30 * w, 0); x.lineTo(drop.t / 30 * w, h); x.stroke(); }
+      const pockets = drop ? ((drop.rel / (2 * Math.PI / 37)) % 37 + 37) % 37 : null;
+      document.getElementById('ph-dyn-out').innerHTML = drop
+        ? `queda em <b>${drop.t.toFixed(1)} s</b> · ângulo relativo bola−rotor = <b>${pockets.toFixed(1)} casas</b> · casa ${PH.W[Math.floor(pockets)]}`
+        : 'a bola não chegou ao limiar em 30 s — aumente o arrasto';
+      // Sensibilidade: 1% de erro na velocidade inicial da bola quanto desloca a queda?
+      const shift = (() => { let s2 = [0, p.wb * 1.01, 0, p.wr], t2 = 0; while (t2 <= 60 && s2[1] >= THR) { const a = f(s2), b = f(s2.map((y, i) => y + dt / 2 * a[i])), c = f(s2.map((y, i) => y + dt / 2 * b[i])), d = f(s2.map((y, i) => y + dt * c[i])); s2 = s2.map((y, i) => y + dt / 6 * (a[i] + 2 * b[i] + 2 * c[i] + d[i])); t2 += dt; } return drop ? Math.abs((s2[0] - s2[2]) - drop.rel) / (2 * Math.PI / 37) : null; })();
+      document.getElementById('ph-dyn-sens').textContent = shift === null ? '' : `1% de erro na velocidade da bola desloca o ponto de queda em ${shift.toFixed(1)} casas — por isso medir à mão não basta.`;
+    }
+    // ---------- 2. Geometria: distância na roda entre giros consecutivos (assinatura do crupiê) ----------
+    function phGeo(sp) {
+      const pos = new Map(PH.W.map((n, i) => [n, i])), h = new Array(37).fill(0);
+      for (let i = 1; i < sp.length; i++) h[((pos.get(sp[i]) - pos.get(sp[i - 1])) % 37 + 37) % 37]++;
+      const n = sp.length - 1, e = n / 37, chi = h.reduce((a, o) => a + (o - e) ** 2 / e, 0);
+      phBars('ph-geo-c', h, { ref: e, color: (v) => (v > e * 1.5 ? '#ff0a54' : (v < e * 0.5 ? '#bc13fe' : '#39ff14')), labels: [[0, '0'], [9, '+9'], [18, '+18'], [27, '+27'], [36, '+36']] });
+      document.getElementById('ph-geo-out').innerHTML = `${n} pares · qui² = <b>${chi.toFixed(1)}</b> (df 36; acima de 51,0 = assinatura detectada a 5%) · ` +
+        (chi > 51 ? '<span style="color:#ff0a54">distribuição NÃO uniforme — investigar com mais dados</span>' : '<span style="color:#39ff14">compatível com crupiê sem assinatura</span>');
+    }
+    // ---------- 3. Estatística real: qui², entropia, autocorrelação, runs ----------
+    function phStats(sp) {
+      const n = sp.length, f = new Array(37).fill(0); sp.forEach((v) => f[v]++);
+      const e = n / 37, chi = f.reduce((a, o) => a + (o - e) ** 2 / e, 0);
+      const H = -f.filter((c) => c).reduce((a, c) => a + c / n * Math.log2(c / n), 0);
+      phBars('ph-freq-c', f, { ref: e, color: (v, i) => (i === 0 ? '#1fd10a' : (PH.RED.has(i) ? '#e0003c' : '#9a9aa6')), labels: [[0, '0'], [12, '12'], [24, '24'], [36, '36']] });
+      // Autocorrelação de vermelho(+1)/preto(−1), zero fora; bandas ±2/√n.
+      const rb = sp.filter((v) => v).map((v) => (PH.RED.has(v) ? 1 : -1)), m = rb.reduce((a, b) => a + b, 0) / rb.length;
+      const den = rb.reduce((a, b) => a + (b - m) ** 2, 0) || 1, ac = [];
+      for (let k = 1; k <= 20; k++) { let s = 0; for (let i = k; i < rb.length; i++) s += (rb[i] - m) * (rb[i - k] - m); ac.push(s / den); }
+      const band = 2 / Math.sqrt(rb.length);
+      phBars('ph-ac-c', ac, { min: -Math.max(band * 2, ...ac.map(Math.abs)), max: Math.max(band * 2, ...ac.map(Math.abs)), bands: [band, -band], color: (v) => (Math.abs(v) > band ? '#ff0a54' : '#39ff14'), labels: [[0, 'lag 1'], [9, '10'], [19, '20']] });
+      const out = ac.filter((v) => Math.abs(v) > band).length;
+      // Runs test (Wald–Wolfowitz) em vermelho/preto.
+      const n1 = rb.filter((v) => v > 0).length, n2 = rb.length - n1; let runs = 1; for (let i = 1; i < rb.length; i++) if (rb[i] !== rb[i - 1]) runs++;
+      const mu = 2 * n1 * n2 / (n1 + n2) + 1, va = (mu - 1) * (mu - 2) / (n1 + n2 - 1), z = (runs - mu) / Math.sqrt(va || 1);
+      document.getElementById('ph-stats-out').innerHTML =
+        `qui² 37 casas <b>${chi.toFixed(1)}</b> (limite 51,0) · entropia <b>${H.toFixed(3)}</b> de ${Math.log2(37).toFixed(3)} bits · ` +
+        `runs V/P z = <b>${z.toFixed(2)}</b> (|z|&gt;2 = sequências anormais) · autocorrelação: ${out} de 20 lags fora da banda (esperado ~1 por acaso)`;
+    }
+    // ---------- 4. Monte Carlo da escada ×3 em 2 colunas ----------
+    function phMC() {
+      const v = (id) => Number(document.getElementById(id).value);
+      const bank0 = v('ph-mc-bank') * 100, base = v('ph-mc-base'), steps = v('ph-mc-steps'), N = v('ph-mc-n'), spins = v('ph-mc-spins'), fire = v('ph-mc-fire') / 100;
+      const res = []; let ruin = 0, blows = 0;
+      for (let s = 0; s < N; s++) {
+        let b = bank0, step = 0, dead = false;
+        for (let k = 0; k < spins && !dead; k++) {
+          if (step === 0 && Math.random() > fire) continue;
+          let st = base; for (let j = 0; j < step; j++) st *= 3;
+          if (2 * st > b) { dead = true; break; } // não cobre a aposta: banca quebrada para esta escada
+          const win = Math.floor(Math.random() * 37) !== 0 && Math.random() < 24 / 36;
+          if (win) { b += st; step = 0; } else { b -= 2 * st; step++; if (step >= steps) { step = 0; blows++; } }
+        }
+        if (dead) ruin++; res.push((b - bank0) / 100);
+      }
+      res.sort((a, b) => a - b);
+      const mean = res.reduce((a, c) => a + c, 0) / N, q = (p) => res[Math.min(N - 1, Math.floor(p * N))];
+      const lo = q(0.01), hi = q(0.99), bins = new Array(30).fill(0);
+      res.forEach((r) => { const i = Math.floor((r - lo) / ((hi - lo) || 1) * 29); if (i >= 0 && i < 30) bins[i]++; });
+      phBars('ph-mc-c', bins, { color: (val, i) => (lo + (i / 29) * (hi - lo) < 0 ? '#ff0a54' : '#39ff14'), labels: [[0, 'R$ ' + lo.toFixed(0)], [26, 'R$ ' + hi.toFixed(0)]] });
+      document.getElementById('ph-mc-out').innerHTML =
+        `${N.toLocaleString('pt-BR')} sessões · P(banca não cobrir a escada) = <b style="color:${ruin / N > 0.05 ? '#ff0a54' : '#39ff14'}">${(100 * ruin / N).toFixed(2)}%</b> · ` +
+        `resultado médio <b style="color:${mean < 0 ? '#ff0a54' : '#39ff14'}">R$ ${mean.toFixed(2)}</b> · p5 R$ ${q(0.05).toFixed(2)} · p95 R$ ${q(0.95).toFixed(2)} · estouros/sessão ${(blows / N).toFixed(2)}`;
+    }
+    async function phRender() {
+      phDyn(); phMC();
+      try {
+        const r = await fetch('/api/lab'); const j = r.ok ? await r.json() : null;
+        PH.serie = j && j.serie ? j.serie : null;
+      } catch (_) { PH.serie = null; }
+      const sp = PH.serie;
+      if (!sp || sp.length < 40) {
+        ['ph-geo-out', 'ph-stats-out'].forEach((id) => { document.getElementById(id).innerHTML = '<span style="color:#ff0a54">sem giros reais suficientes (core offline ou &lt; 40 giros)</span>'; });
+        return;
+      }
+      document.getElementById('ph-n').textContent = sp.length + ' GIROS REAIS';
+      phGeo(sp); phStats(sp);
     }
   </script>
 </body>

@@ -114,7 +114,22 @@ fn save_stake_base(path: &str, base_cents: u64) -> std::io::Result<()> {
     if let Some(dir) = std::path::Path::new(path).parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, format!("{{\n  \"base_cents\": {base_cents}\n}}\n"))
+    // Preserva a ficha de números: a dashboard só muda a ficha de fora.
+    let number_base = load_number_base(path, 10);
+    std::fs::write(
+        path,
+        format!("{{\n  \"base_cents\": {base_cents},\n  \"number_base_cents\": {number_base}\n}}\n"),
+    )
+}
+
+/// Lê o lucro alvo da escada de números (`number_base_cents`); ausente ou inválido = fallback.
+fn load_number_base(path: &str, fallback: u64) -> u64 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.get("number_base_cents").and_then(serde_json::Value::as_u64))
+        .filter(|b| ALLOWED_BASES.contains(b))
+        .unwrap_or(fallback)
 }
 
 /// Copia a config vigente: a ficha pode mudar em runtime, então nada guarda `Cfg` fixo.
@@ -284,6 +299,24 @@ fn spawn_fui_http_server(deps: FuiServerDeps) {
                     }
                 }
                 let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n");
+            } else if first_line.starts_with("GET /api/lab") {
+                let matchers = matchers_now(&tuning);
+                let body = match monster_core::lab::load_clean_spins(&pool) {
+                    Ok((raw, spins)) => serde_json::to_string(&monster_core::lab::run_lab(
+                        raw,
+                        &spins,
+                        &monster_core::lab::default_hypotheses(&matchers),
+                    ))
+                    .unwrap_or_else(|_| "{}".to_string()),
+                    Err(err) => format!("{{\"error\":\"{err}\"}}"),
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                continue;
             } else if first_line.starts_with("GET /api/patterns") {
                 let chrono = history
                     .lock()
@@ -508,6 +541,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Stop loss desligado a pedido do operador: o limite é a própria banca (4000¢).
     let mut cfg = Cfg {
         base_cents: 10,
+        number_base_cents: 10,
         max_steps: 5,
         max_bet_per_cover_cents: 100_000,
         max_exposure_pct: 0.55,
@@ -522,10 +556,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `--mc-only` imprime os dois Monte Carlo e sai: é como se testa uma mudança de
     // `base_cents`/`max_steps`/banca sem abrir sessão (gate do §13).
     let mut mc_only = false;
+    // `--lab` roda o laboratório de hipóteses sobre o banco e sai (não toca na mesa nem reconcilia).
+    let mut lab_only = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--mc-only" => mc_only = true,
+            "--lab" => lab_only = true,
             "--live" => mode = ExecutionMode::Live,
             "--dry-run" => mode = ExecutionMode::DryRun,
             "--stream" if i + 1 < args.len() => {
@@ -564,7 +601,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Ficha salva pela dashboard vence o padrão do binário; o MC abaixo já roda com ela.
     cfg.base_cents = load_stake_base(STAKE_PATH, cfg.base_cents);
-    println!("[STAKE] ficha de entrada: {}¢ por cobertura", cfg.base_cents);
+    cfg.number_base_cents = load_number_base(STAKE_PATH, cfg.number_base_cents);
+    println!(
+        "[STAKE] ficha de fora: {}¢ por cobertura · números: lucro alvo {}¢/ciclo, máx {} casas",
+        cfg.base_cents,
+        cfg.number_base_cents,
+        monster_risk::MAX_NUMBER_COVERS
+    );
 
     // 1. Validação obrigatória de Monte Carlo antes de iniciar (§13 e §15.4).
     let mc_report = run_monte_carlo(&McParams {
@@ -599,6 +642,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if mc_numbers.gate_passes() { "PASS" } else { "FAIL" }
     );
     if mc_only {
+        return Ok(());
+    }
+    if lab_only {
+        let pool = init_pool(&db_uri)?;
+        let tuning = Arc::new(Mutex::new(load_sequence_tuning(TUNING_PATH)));
+        let matchers = matchers_now(&tuning);
+        let (raw, spins) = monster_core::lab::load_clean_spins(&pool)?;
+        let r = monster_core::lab::run_lab(raw, &spins, &monster_core::lab::default_hypotheses(&matchers));
+        println!(
+            "[LAB] giros brutos={} limpos={} | qui2 37 casas={:.1} (df=36, desvio a 5% acima de 51,0) | recomendado {}",
+            r.giros_brutos, r.giros_limpos, r.qui2_casas, r.giros_recomendados
+        );
+        println!("{:<30} {:>6} {:>7} {:>7} {:>6} {:>8} {:>7}  VEREDITO", "HIPOTESE", "APOST", "ACERTO", "ACASO", "Z", "EV", "P");
+        for l in &r.linhas {
+            println!(
+                "{:<30} {:>6} {:>6.1}% {:>6.1}% {:>6.2} {:>7.1}% {:>7.3}  {}",
+                l.id, l.teste.bets, l.teste.hit_pct, l.teste.chance_pct, l.teste.z, l.teste.ev_pct, l.p_teste, l.veredito
+            );
+        }
         return Ok(());
     }
 

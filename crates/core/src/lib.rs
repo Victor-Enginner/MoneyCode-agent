@@ -9,6 +9,7 @@ pub mod bocpd;
 pub mod brain;
 pub mod dag;
 pub mod executor;
+pub mod lab;
 pub mod reconciler;
 pub mod terminals;
 pub mod timeline_sync;

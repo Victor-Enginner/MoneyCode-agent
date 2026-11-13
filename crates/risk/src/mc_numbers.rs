@@ -137,7 +137,7 @@ pub fn run_monte_carlo_numbers(params: &NumbersMcParams) -> NumbersMcReport {
     let hours = params.hours_per_session.max(1);
     let spins_per_session = hours * params.spins_per_hour.max(1);
     let k = u64::from(params.numbers.clamp(1, crate::MAX_NUMBER_COVERS));
-    let nl = NumberLadder::new(params.numbers.clamp(1, crate::MAX_NUMBER_COVERS), params.cfg.base_cents);
+    let nl = NumberLadder::new(params.numbers.clamp(1, crate::MAX_NUMBER_COVERS), params.cfg.number_base_cents);
     let stop_win_cents =
         (params.initial_bankroll_cents.max(0) as f64 * params.cfg.stop_win_pct).round() as i64;
 
