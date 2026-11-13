@@ -252,6 +252,8 @@ struct DryRunState {
     slip_lag_value_cents: u64,
     /// Leituras que respondem `SlipStale` (sidecar sem leitura fresca desta mesa).
     slip_stale_reads: u32,
+    /// Cliques que o pano engole (animação da pilha em andamento) em vez de virar ficha.
+    swallow_chips: u32,
 }
 
 /// Atuador determinístico para modo `--dry-run` (§1.5 e §15.5).
@@ -294,6 +296,13 @@ impl DryRunActuator {
         }
     }
 
+    /// Simula o pano engolindo os próximos `n` cliques (ficha postada nunca chega ao slip).
+    pub fn set_swallow_chips(&self, n: u32) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.swallow_chips = n;
+        }
+    }
+
     /// Simula o sidecar devolvendo cache (`bet_age_ms` velho) nas próximas `reads` leituras.
     pub fn set_slip_stale_reads(&self, reads: u32) {
         if let Ok(mut g) = self.inner.lock() {
@@ -321,6 +330,11 @@ impl CdpActuator for DryRunActuator {
             .lock()
             .map_err(|_| ExecError::CdpTransport("mutex poisoned".to_string()))?;
         g.clicks.push((x, y));
+        if g.swallow_chips > 0 {
+            // Clique despachado, ficha descartada: espelha a animação do pano engolindo o chip.
+            g.swallow_chips -= 1;
+            return Ok(());
+        }
         if let Some(chip) = g.selected_chip_cents {
             g.staged_total_cents = g.staged_total_cents.saturating_add(chip);
         }
@@ -801,7 +815,22 @@ pub fn place(
         // é detectada antes de confirmar, em vez de escondida atrás de um total que fecha por coincidência.
         cumulative_expected += *cents;
         legit_prefixes.push(cumulative_expected);
-        let seen = read_settled(cdp, cumulative_expected)?;
+        let mut seen = read_settled(cdp, cumulative_expected)?;
+        // Ficha engolida pela animação do pano: o lote de 3 entrou como 2 ao vivo
+        // (`cover=high lido=20 esperado=30 fichas=10x3`). Se o total FICOU ABAIXO do esperado,
+        // repete só a diferença uma vez, na mesma cobertura. Acima do esperado nunca repete:
+        // excesso é divergência e vai para o clear+abort do §1.4.
+        if seen < cumulative_expected {
+            let missing = cumulative_expected - seen;
+            for (denom, n) in decompose(missing, &cal.denoms) {
+                if last_denom != Some(denom) {
+                    cdp.click_chip(denom, cal)?;
+                    last_denom = Some(denom);
+                }
+                cdp.click_cover_repeat(cover, cal, u32::from(n))?;
+            }
+            seen = read_settled(cdp, cumulative_expected)?;
+        }
         if seen == cumulative_expected {
             continue;
         }

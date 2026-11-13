@@ -334,8 +334,10 @@ drained:
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		// Pausa curta após cada clique físico para o canvas/DOM da Playtech atualizar o estado da ficha/aposta
-		time.Sleep(120 * time.Millisecond)
+		// Pausa entre cliques físicos: a mesa empilha uma ficha por vez e ANIMA a pilha, e um clique
+		// que cai no meio da animação é engolido. Com 120 ms o lote de 3 fichas entrou como 2
+		// (`cover_mismatch cover=high lido=20 esperado=30 fichas=10x3`). 220 ms cobre a animação.
+		time.Sleep(220 * time.Millisecond)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

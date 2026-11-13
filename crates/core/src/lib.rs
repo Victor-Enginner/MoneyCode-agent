@@ -306,6 +306,67 @@ mod tests {
         assert_eq!(singles, 0, "nenhuma ficha pode ser clicada com resolução própria");
     }
 
+    /// Ao vivo o pano engoliu a terceira ficha de um lote de 3 (`lido=20 esperado=30`).
+    /// A segunda passada repõe SÓ a diferença e a entrada fecha correta.
+    #[test]
+    fn ficha_engolida_pela_animacao_e_reposta_na_mesma_cobertura() {
+        let pool = init_pool(":memory:").expect("init in-memory sqlite");
+        let actuator = DryRunActuator::new();
+        actuator.set_swallow_chips(1);
+        let cal = Calibration::default();
+        let kill_switch = KillSwitch::new();
+
+        let plan = Plan {
+            spin_id: "spin-engole-1".to_string(),
+            strategy_id: "quebra_alto_baixo_6x".to_string(),
+            ladder_step: 2,
+            stake_per_cover_cents: 30,
+            total_cents: 30,
+            ev_cents: -1,
+            confidence: 0.75,
+            covers: vec![(Cover::High, 30)],
+            chips_per_cover: vec![(10, 3)],
+        };
+
+        let fills = place(&pool, &actuator, &plan, &cal, &kill_switch, 1_730_000_030_000)
+            .expect("ficha engolida deve ser reposta, nao abortada");
+        assert_eq!(fills.preview_cents, 30);
+        assert_eq!(actuator.cleared_count(), 0, "nao houve divergencia, nada a limpar");
+    }
+
+    /// A reposicao e uma so: se ela tambem perder fichas, o total segue errado e o certo e
+    /// abortar (clear + abort), nunca ficar insistindo — insistir cegamente vira aposta dupla.
+    #[test]
+    fn reposicao_insuficiente_aborta_em_vez_de_insistir() {
+        let pool = init_pool(":memory:").expect("init in-memory sqlite");
+        let actuator = DryRunActuator::new();
+        // 3 do lote + 1 da reposicao engolidas: sobram 20 de 30 esperados.
+        actuator.set_swallow_chips(4);
+        let cal = Calibration::default();
+        let kill_switch = KillSwitch::new();
+
+        let plan = Plan {
+            spin_id: "spin-engole-2".to_string(),
+            strategy_id: "quebra_alto_baixo_6x".to_string(),
+            ladder_step: 2,
+            stake_per_cover_cents: 30,
+            total_cents: 30,
+            ev_cents: -1,
+            confidence: 0.75,
+            covers: vec![(Cover::High, 30)],
+            chips_per_cover: vec![(10, 3)],
+        };
+
+        let err = place(&pool, &actuator, &plan, &cal, &kill_switch, 1_730_000_040_000)
+            .expect_err("duas fichas perdidas devem abortar");
+        assert!(
+            matches!(err, ExecError::PreviewMismatch { .. }),
+            "esperava divergencia, veio {err:?}"
+        );
+        assert_eq!(actuator.cleared_count(), 1, "divergencia limpa a mesa");
+        assert_eq!(actuator.confirmed_count(), 0, "nunca confirma com total errado");
+    }
+
     #[test]
     fn preview_mismatch_clears_bets_and_aborts_before_confirm() {
         let pool = init_pool(":memory:").expect("init in-memory sqlite");
