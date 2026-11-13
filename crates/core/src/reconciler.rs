@@ -121,7 +121,11 @@ pub fn reconcile_spin(
     let zero_protected = winning_number == 0
         && outside_entry
         && acks.iter().any(|a| a.acked && a.cover == Cover::Straight(0));
-    let (next_step, next_loss_cents, reset_at) = if zero_protected {
+    // Zero protegido que já paga a perda acumulada (comum nas apostas 1:1, onde o 0 dá lucro)
+    // conta como vitória: zera a escada.
+    let zero_paid_all = zero_protected && expected_delta_cents >= current.loss_cents as i64;
+    let won = won && (!zero_protected || zero_paid_all);
+    let (next_step, next_loss_cents, reset_at) = if zero_protected && !zero_paid_all {
         let leftover = u64::try_from((-expected_delta_cents).max(0)).unwrap_or(0);
         (
             played_step.saturating_sub(1),
@@ -295,6 +299,21 @@ mod tests {
             .expect("reconcile");
         assert!(!r2.won);
         assert_eq!(r2.next_step, 1);
+    }
+
+    #[test]
+    fn zero_com_lucro_que_paga_a_perda_zera_a_escada() {
+        let pool = init_pool(":memory:").expect("pool");
+        let cfg = Cfg::default();
+        // Vermelho degrau 2 (1,20) + 0,10 no zero; perda anterior de 0,40; sai o 0: +3,50-1,20 = +2,30.
+        upsert_ladder_state(&pool, "quebra_cor_6x", 1, 40, None).expect("estado");
+        let acks = [
+            CoverAck { cover: Cover::Red, stake_cents: 120, acked: true },
+            CoverAck { cover: Cover::Straight(0), stake_cents: 10, acked: true },
+        ];
+        let r = reconcile_spin(&pool, entrada("quebra_cor_6x", 2, &acks), 0, &cfg, None, 1).expect("rec");
+        assert!(r.won);
+        assert_eq!(r.next_step, 0);
     }
 
     #[test]

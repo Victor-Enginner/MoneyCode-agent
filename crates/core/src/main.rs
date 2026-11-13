@@ -110,7 +110,7 @@ fn stake_path() -> String {
 
 /// Fichas que o operador pode escolher na FUI (centavos). Fora desta lista é recusado:
 /// cada valor muda a escada e precisa passar pelo Monte Carlo do §13.
-const ALLOWED_BASES: [u64; 4] = [10, 20, 50, 100];
+const ALLOWED_BASES: [u64; 5] = [10, 20, 40, 50, 100];
 
 /// Lê a ficha salva; valor inválido ou não permitido volta ao padrão do `Cfg`.
 fn load_stake_base(path: &str, fallback: u64) -> u64 {

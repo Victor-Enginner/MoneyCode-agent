@@ -214,7 +214,8 @@ fn compile_plan(spin_id: &str, winner: &Aggregate, ladder_step: u8, cfg: &Cfg) -
                 winner.cover.iter().copied().map(|c| (c, stake)).collect();
             // Proteção do zero a partir do degrau 3: toda aposta por fora perde no 0, e no degrau
             // alto o 0 estoura a escada. A ficha devolve a aposta inteira se sair o 0.
-            if let Some(z) = zero_insurance_cents(ladder_step, stake * covers.len() as u64) {
+            let from = if winner.cover.iter().all(|c| is_even_money(*c)) { 1 } else { ZERO_INSURANCE_FROM_STEP };
+            if let Some(z) = zero_insurance_from(from, ladder_step, stake * covers.len() as u64) {
                 covers.push((Cover::Straight(0), z));
             }
             (covers, stake, compute_ev_cents_two_covers(stake))
@@ -243,7 +244,18 @@ pub const ZERO_INSURANCE_FROM_STEP: u8 = 3;
 /// Ficha no pleno 0 que devolve a aposta por fora inteira se sair o 0: `ceil(total / 36)`,
 /// arredondada para cima em fichas de 10¢ (o 0 paga 35:1 + a ficha = 36x).
 pub const fn zero_insurance_cents(ladder_step: u8, outside_total_cents: u64) -> Option<u64> {
-    if ladder_step < ZERO_INSURANCE_FROM_STEP || outside_total_cents == 0 {
+    zero_insurance_from(ZERO_INSURANCE_FROM_STEP, ladder_step, outside_total_cents)
+}
+
+/// Apostas 1:1 (cor, par/ímpar, alto/baixo) cobrem o 0 desde o degrau 1 (regra do operador):
+/// o acerto paga só 1 ficha, e a menor ficha de 10¢ no 0 custa pouco perto do que o 0 levaria.
+pub const fn is_even_money(c: Cover) -> bool {
+    matches!(c, Cover::Red | Cover::Black | Cover::Even | Cover::Odd | Cover::Low | Cover::High)
+}
+
+/// Ficha de proteção do 0 a partir de `from_step`: `ceil(total/36)` em fichas de 10¢.
+pub const fn zero_insurance_from(from_step: u8, ladder_step: u8, outside_total_cents: u64) -> Option<u64> {
+    if ladder_step < from_step || outside_total_cents == 0 {
         return None;
     }
     let raw = outside_total_cents.div_ceil(36);
@@ -323,8 +335,9 @@ fn pick_winner(aggregates: &[Aggregate], min_confidence: f64) -> Option<&Aggrega
 /// Janela (giros) usada para medir se os terminais estão concentrados.
 pub const TERMINAL_GATE_WINDOW: usize = 12;
 /// Máximo de finais distintos na janela para liberar entrada por número.
-/// Numa roleta justa, ≤ 5 finais em 12 giros acontece só ~5% do tempo (média = 7).
-pub const TERMINAL_GATE_MAX_DISTINCT: usize = 5;
+/// Numa roleta justa, ≤ 6 finais em 12 giros acontece ~26% do tempo (média = 7). O corte em 5
+/// liberou só 4 de 216 giros na mesa real (1,9%): números praticamente nunca entravam.
+pub const TERMINAL_GATE_MAX_DISTINCT: usize = 6;
 
 /// Finais distintos nos últimos `TERMINAL_GATE_WINDOW` giros (`window[0]` = mais recente).
 pub fn distinct_terminals(window: &[u8]) -> usize {
@@ -685,6 +698,26 @@ mod tests {
     }
 
     #[test]
+    fn cor_cobre_o_zero_desde_o_degrau_1() {
+        let w = Aggregate {
+            strategy_id: "quebra_cor_6x".to_string(),
+            confidence: 0.7,
+            cover: vec![Cover::Red],
+            regime_veto: false,
+        };
+        let cfg = Cfg { base_cents: 40, ..Cfg::default() };
+        let p1 = compile_plan("s", &w, 1, &cfg).expect("plano");
+        assert_eq!(p1.covers, vec![(Cover::Red, 40), (Cover::Straight(0), 10)]);
+        assert_eq!(p1.total_cents, 50);
+        let p4 = compile_plan("s", &w, 4, &cfg).expect("plano");
+        assert_eq!(p4.covers[1], (Cover::Straight(0), 30), "1080/36 = 30");
+        // Coluna com 40c: sem zero no degrau 1 (so do 3 em diante).
+        let col = Aggregate { strategy_id: "quebra_permanencia_coluna".into(), cover: vec![Cover::Col(1), Cover::Col(3)], ..w };
+        let c1 = compile_plan("s", &col, 1, &cfg).expect("plano");
+        assert_eq!(c1.total_cents, 80);
+    }
+
+    #[test]
     fn plano_de_coluna_no_degrau_3_inclui_o_zero() {
         let w = Aggregate {
             strategy_id: "quebra_permanencia_coluna".to_string(),
@@ -713,6 +746,11 @@ mod tests {
         // Cluster: só finais 1, 3, 7, 9 e 0 → 5 distintos: número liberado.
         let concentrada = [1u8, 11, 3, 21, 13, 7, 17, 31, 9, 19, 10, 33];
         assert_eq!(distinct_terminals(&concentrada), 5);
+        let mut aggs = vec![number_signal()];
+        assert_eq!(apply_terminal_concentration(&mut aggs, &concentrada), 0);
+        // 6 finais distintos (1, 3, 7, 9, 0, 5) ainda libera; 7 bloqueia.
+        let seis = [1u8, 11, 3, 21, 13, 7, 17, 31, 9, 19, 10, 5];
+        assert_eq!(distinct_terminals(&seis), 6);
         let mut aggs = vec![number_signal()];
         assert_eq!(apply_terminal_concentration(&mut aggs, &concentrada), 0);
     }
