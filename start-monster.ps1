@@ -24,6 +24,16 @@ $GoTmpDir    = "$RootDir\target\go-tmp"
 $CargoTarget = "$RootDir\target"
 $ChromeExe   = "O:\Archives\Eistein\chromium\chrome.exe"
 
+# Parada limpa: o kill switch do core bloqueia NOVAS apostas na hora; a que ja estiver em
+# andamento termina (cliques + conferencia + confirmacao). So depois os processos sao mortos.
+# Antes o core seguia vivo ~8 s no reinicio e foi morto no meio de um gale (R$ 1,60 sem registro).
+function Stop-MonsterSafely([string]$reason) {
+    $wasUp = $false
+    try { $null = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8791/api/kill" -TimeoutSec 2; $wasUp = $true } catch { }
+    Set-Content -Path "$LogsDir\monster-stop.flag" -Value $reason
+    if ($wasUp) { Start-Sleep -Seconds 6 }
+}
+
 function Fail([string]$msg) {
     Write-Host ""
     Write-Host "[MONSTER] ERRO: $msg" -ForegroundColor Red
@@ -49,8 +59,8 @@ Write-Host "================================================================" -F
 if (-not (Test-Path $ChromeExe)) { Fail "Chromium dedicado nao encontrado em $ChromeExe" }
 
 # 1. Para o que estiver rodando (watchdog, core, captura), para nunca existirem dois cores.
-Write-Host "[MONSTER] Parando instancias anteriores..." -ForegroundColor DarkGray
-Set-Content -Path "$LogsDir\monster-stop.flag" -Value "restart"
+Write-Host "[MONSTER] Parando instancias anteriores (sem cortar aposta em andamento)..." -ForegroundColor DarkGray
+Stop-MonsterSafely "restart"
 $deadline = (Get-Date).AddSeconds(15)
 while ((Test-Path "$LogsDir\watchdog.lock") -and (Get-Date) -lt $deadline) {
     $wpid = Get-Content "$LogsDir\watchdog.lock" -ErrorAction SilentlyContinue
@@ -150,7 +160,8 @@ try {
     # Fechar a janela no X mata o processo sem passar por aqui: o MONSTER continua rodando.
     if (-not $stopped) {
         $stopped = $true
-        Set-Content -Path "$LogsDir\monster-stop.flag" -Value "ctrl-c"
+        Write-Host "[MONSTER] Parando sem cortar aposta em andamento..." -ForegroundColor Yellow
+        Stop-MonsterSafely "ctrl-c"
         Get-Process monster-core, monster-capture, monster-telegram -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
         Write-Host ""
         Write-Host "[MONSTER] Parado por Ctrl+C. Para voltar: atalho MONSTER LIVE." -ForegroundColor Yellow
