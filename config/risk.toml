@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-# Configuração de risco aprovada pelo Monte Carlo do §13 (10.000 sessões de 1 h) para banca de ~R$ 80.
-# Escada de 3 degraus: 20, 60, 180 centavos. Exposição máxima no degrau 3 = 360 centavos (R$ 3,60);
-# perda acumulada máxima = 520 centavos (R$ 5,20).
-# Medição: base 20¢ · 3 degraus -> P(ruína)=0,00% · DD p95=520¢. Com 4 degraus sobe a 8,16% e reprova o gate.
-base_cents = 20
-max_steps = 3
+# Banca de teste R$ 40 (2026-11-13). ATENCAO: o core ainda nao le este arquivo; os valores
+# vigentes ficam em crates/core/src/main.rs (+ config/stake.json para a ficha). Mantidos iguais.
+# Escada de 5 degraus x3: 10, 30, 90, 270, 810 centavos por coluna. Exposicao no degrau 5 = 1620c;
+# perda acumulada maxima de um estouro = 2420c (R$ 24,20).
+# Medicao (--mc-only, 10.000 sessoes de 1 h, banca 4000c): colunas P(ruina)=0,02% DD p95=260c;
+# numeros k=15 P(ruina)=1,20% DD p95=1950c -> gate PASS.
+# Stop loss desligado a pedido do operador: igual a banca (4000c).
+base_cents = 10
+max_steps = 5
 max_bet_per_cover_cents = 100000
-max_exposure_pct = 0.10
-stop_loss_cents = 1600
+max_exposure_pct = 0.55
+stop_loss_cents = 4000
 stop_win_pct = 0.08
 min_window_ms = 2000
 cooldown_spins = 2

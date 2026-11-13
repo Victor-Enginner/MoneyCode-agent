@@ -8,17 +8,17 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --bg: #05070b; --panel: #0b0f17; --panel-2: #0f1520; --line: #1a2232; --line-2: #243047;
-      --fg: #e2e8f2; --muted: #8592a8; --dim: #4a5670; --ok: #34d399; --warn: #fbbf24;
-      --bad: #f43f5e; --accent: #22d3ee; --loss: #f472b6; --hot: #fb7185; --cold: #60a5fa;
-      --red: #e11d48; --black: #1e2533; --green: #059669; --r: 10px;
+      --bg: #000000; --panel: #000000; --panel-2: #050505; --line: #1c1c1c; --line-2: #2c2c2c;
+      --fg: #f5f5f7; --muted: #9a9aa6; --dim: #55555f; --ok: #39ff14; --warn: #ffd60a; --violet: #bc13fe; --amber: #ffd60a;
+      --bad: #ff0a54; --accent: #39ff14; --loss: #ff0a54; --hot: #ff0a54; --cold: #39ff14;
+      --red: #e0003c; --black: #111111; --green: #1fd10a; --r: 10px;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body {
       width: 100vw; height: 100vh; overflow: hidden; color: var(--fg);
       background:
-        linear-gradient(rgba(34,211,238,.025) 1px, transparent 1px) 0 0/24px 24px,
-        linear-gradient(90deg, rgba(34,211,238,.025) 1px, transparent 1px) 0 0/24px 24px,
+        linear-gradient(rgba(255,255,255,0) 1px, transparent 1px) 0 0/24px 24px,
+        linear-gradient(90deg, rgba(255,255,255,0) 1px, transparent 1px) 0 0/24px 24px,
         var(--bg);
       font-family: Inter, system-ui, 'Segoe UI', sans-serif; font-size: 12px;
       -webkit-font-smoothing: antialiased;
@@ -38,8 +38,8 @@
       align-self: center; display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px;
       font-weight: 700; font-size: 11px; letter-spacing: .06em; border: 1px solid var(--line-2); border-radius: 999px;
     }
-    .state-OBSERVANDO { color: var(--ok); border-color: rgba(52,211,153,.5); background: rgba(52,211,153,.08); }
-    .state-ENTRADA { color: var(--warn); border-color: rgba(251,191,36,.6); background: rgba(251,191,36,.1); }
+    .state-OBSERVANDO { color: var(--ok); border-color: rgba(57,255,20,.5); background: rgba(57,255,20,.08); }
+    .state-ENTRADA { color: var(--warn); border-color: rgba(255,10,84,.6); background: rgba(255,10,84,.1); }
     .state-PAUSADO { color: var(--muted); }
     .state-DEGRADED { color: var(--warn); border-color: var(--warn); }
     .state-ERRO { color: var(--bad); border-color: var(--bad); }
@@ -55,13 +55,13 @@
     .led-bad { background: var(--bad); box-shadow: 0 0 8px var(--bad); } .led-off { background: var(--dim); }
     .btn-kill {
       align-self: center; height: 32px; padding: 0 16px; border-radius: 8px; background: var(--bad); color: #fff;
-      border: 1px solid #ff6b81; font-weight: 700; letter-spacing: .08em; cursor: pointer; box-shadow: 0 0 18px rgba(244,63,94,.35);
+      border: 1px solid #ff5c7a; font-weight: 700; letter-spacing: .08em; cursor: pointer; box-shadow: 0 0 18px rgba(255,10,84,.35);
     }
     .btn-kill:hover { filter: brightness(1.12); }
     .status-banner {
       grid-column: 1 / -1; height: 30px; display: none; align-items: center; border-radius: 8px;
       justify-content: space-between; padding: 0 12px; font-weight: 600;
-      background: rgba(244,63,94,.12); color: var(--bad); border: 1px solid var(--bad);
+      background: rgba(255,10,84,.12); color: var(--bad); border: 1px solid var(--bad);
     }
     .panel-b, .panel-c, .panel-d { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
     .panel-a { grid-row: 1; } .status-banner { grid-row: 2; }
@@ -74,7 +74,7 @@
     .spin-pill strong { display: grid; place-items: center; height: 18px; border-radius: 5px; color: #fff; font-size: 11px; }
     .spin-pill.n-red strong { background: var(--red); } .spin-pill.n-black strong { background: var(--black); border: 1px solid var(--line-2); }
     .spin-pill.n-zero strong { background: var(--green); }
-    .spin-pill.latest { border-color: var(--accent); background: rgba(34,211,238,.07); color: var(--fg); }
+    .spin-pill.latest { border-color: var(--accent); background: rgba(57,255,20,.07); color: var(--fg); }
     .spin-pill.triggered { box-shadow: inset 2px 0 0 var(--warn); }
     .spin-pill span:last-child { text-align: right; color: var(--dim); font-size: 9px; }
     .heat-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 12px; flex: 1; min-height: 0; }
@@ -87,31 +87,31 @@
     .sector .bar { grid-column: 1 / -1; height: 4px; border-radius: 4px; background: var(--line); overflow: hidden; }
     .sector .bar i { display: block; height: 100%; border-radius: 4px; }
     .sector .meta { grid-column: 1 / -1; font-size: 9px; color: var(--muted); }
-    .sector.hot { border-color: rgba(251,113,133,.55); background: rgba(251,113,133,.06); }
-    .sector.cold { border-color: rgba(96,165,250,.45); }
+    .sector.hot { border-color: rgba(255,10,84,.55); background: rgba(255,10,84,.06); }
+    .sector.cold { border-color: rgba(57,255,20,.45); }
     .hot-list { display: flex; gap: 6px; flex-wrap: wrap; }
     .chip { padding: 3px 8px; border-radius: 999px; font-size: 10px; font-weight: 700; border: 1px solid var(--line-2); }
     .legend { display: flex; align-items: center; gap: 8px; font-size: 9px; color: var(--muted); }
-    .legend i { flex: 1; height: 6px; border-radius: 6px; background: linear-gradient(90deg, #1e3a8a, #60a5fa, #263042, #fb923c, #f43f5e); }
+    .legend i { flex: 1; height: 6px; border-radius: 6px; background: linear-gradient(90deg, #39ff14, #146e0a, #121216, #96003c, #ff0a54); }
     .heat-note { font-size: 9px; color: var(--dim); line-height: 1.45; }
     .cover-box { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     .cover-box > div { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.02); }
     .felt { display: grid; grid-template-columns: 22px repeat(12, minmax(0, 1fr)); grid-template-rows: repeat(3, 20px); gap: 2px; }
-    .felt .cell, .felt .wheel-zero { display: grid; place-items: center; font-size: 9px; font-weight: 700; border-radius: 3px; color: #cfd6e4; opacity: .55; }
-    .felt .cell.r { background: #5b1222; } .felt .cell.b { background: #151b27; }
-    .felt .wheel-zero { grid-row: 1 / 4; grid-column: 1; background: #064e3b; }
+    .felt .cell, .felt .wheel-zero { display: grid; place-items: center; font-size: 9px; font-weight: 700; border-radius: 3px; color: #f2f2f2; opacity: .55; }
+    .felt .cell.r { background: #4a0012; } .felt .cell.b { background: #0d0d0d; }
+    .felt .wheel-zero { grid-row: 1 / 4; grid-column: 1; background: #003d18; }
     .felt .cover { opacity: 1; box-shadow: inset 0 0 0 1.5px var(--accent); color: #fff; }
     .felt .last { opacity: 1; box-shadow: inset 0 0 0 2px #fff; color: #fff; }
     table { width: 100%; border-collapse: collapse; text-align: left; }
     th, td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: left; }
     th { font-size: 9px; color: var(--muted); font-weight: 700; letter-spacing: .08em; position: sticky; top: 0; background: var(--panel); }
     tbody tr:hover td { background: rgba(255,255,255,.02); }
-    .ladder-row-active td { color: var(--warn); font-weight: 700; background: rgba(251,191,36,.08); }
+    .ladder-row-active td { color: var(--warn); font-weight: 700; background: rgba(255,10,84,.08); }
     .foot { margin-top: auto; display: flex; justify-content: space-between; padding-top: 8px; border-top: 1px solid var(--line); color: var(--muted); }
     .tab-bar { display: flex; gap: 4px; flex-wrap: wrap; }
     .tab-btn { padding: 5px 12px; background: transparent; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; font-size: 10px; font-weight: 600; cursor: pointer; font-family: inherit; }
     .tab-btn:hover { color: var(--fg); border-color: var(--line-2); }
-    .tab-btn.active { color: #04121a; background: var(--accent); border-color: var(--accent); }
+    .tab-btn.active { color: #000000; background: var(--accent); border-color: var(--accent); }
     .tab-scroll { overflow-y: auto; flex: 1; min-height: 0; }
     .tab-scroll::-webkit-scrollbar, .heat-side::-webkit-scrollbar { width: 8px; }
     .tab-scroll::-webkit-scrollbar-thumb, .heat-side::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 8px; }
@@ -128,12 +128,12 @@
     .seq-score { font-size: 10px; font-weight: 600; color: var(--muted); }
     .seq-score.good { color: var(--ok); } .seq-score.bad { color: var(--bad); }
     .seq-toggle { height: 24px; padding: 0 8px; font-size: 10px; font-weight: 700; cursor: pointer; background: transparent; border: 1px solid var(--line); border-radius: 999px; font-family: inherit; }
-    .seq-toggle.on { color: var(--ok); border-color: rgba(52,211,153,.6); background: rgba(52,211,153,.08); }
+    .seq-toggle.on { color: var(--ok); border-color: rgba(57,255,20,.6); background: rgba(57,255,20,.08); }
     .seq-toggle.off { color: var(--muted); }
-    .seq-stake { display: grid; grid-template-columns: 240px 1fr; align-items: center; gap: 10px; padding: 10px; border-radius: 8px; background: rgba(34,211,238,.04); border: 1px solid rgba(34,211,238,.4); }
+    .seq-stake { display: grid; grid-template-columns: 240px 1fr; align-items: center; gap: 10px; padding: 10px; border-radius: 8px; background: rgba(57,255,20,.04); border: 1px solid rgba(57,255,20,.4); }
     .stake-btns { display: flex; gap: 6px; flex-wrap: wrap; }
     .stake-btn { height: 26px; padding: 0 12px; font-size: 11px; font-weight: 700; cursor: pointer; background: transparent; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; }
-    .stake-btn.active { color: #04121a; background: var(--accent); border-color: var(--accent); }
+    .stake-btn.active { color: #000000; background: var(--accent); border-color: var(--accent); }
     .stake-meta { grid-column: 1 / -1; display: flex; justify-content: space-between; gap: 12px; font-size: 10px; color: var(--muted); }
     .seq-radar { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px 14px; padding: 8px 10px; border-radius: 8px; background: rgba(255,255,255,.02); border: 1px solid var(--line); font-size: 10px; }
     .seq-radar > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -145,11 +145,96 @@
     .seq-live { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
     .seq-pill { font-size: 10px; font-weight: 700; padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); }
     .seq-pill.armed { color: var(--accent); border-color: var(--accent); }
-    .seq-pill.trigger { color: var(--warn); border-color: var(--warn); background: rgba(251,191,36,.1); }
+    .seq-pill.trigger { color: var(--warn); border-color: var(--warn); background: rgba(255,10,84,.1); }
     .seq-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 4px; }
     .btn-ghost, .btn-save { height: 26px; padding: 0 12px; font-size: 10px; font-weight: 700; cursor: pointer; background: transparent; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; }
-    .btn-save { color: #04121a; background: var(--accent); border-color: var(--accent); }
+    .btn-save { color: #000000; background: var(--accent); border-color: var(--accent); }
     .btn-ghost:hover { color: var(--fg); border-color: var(--muted); }
+    .cfg-bar { position: sticky; top: 0; z-index: 2; background: var(--panel); padding: 4px 0 8px; border-bottom: 1px solid var(--line); }
+    .cfg-group { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
+    .cfg-ghead { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    .cfg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
+    .cfg-card { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,.02); }
+    .cfg-card.off { opacity: .5; }
+    .cfg-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+    .cfg-range { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+    .cfg-range input { width: 38px; height: 24px; background: var(--bg); color: var(--accent); border: 1px solid var(--line); border-radius: 5px; font: 700 12px 'JetBrains Mono', monospace; text-align: center; -moz-appearance: textfield; }
+    .cfg-range input::-webkit-inner-spin-button { -webkit-appearance: none; }
+    .cfg-range .metric-label { margin: 0 2px 0 6px; } .cfg-range .metric-label:first-child { margin-left: 0; }
+    .cfg-range .seq-pill { margin-left: auto; }
+    .stp { width: 24px; height: 24px; border-radius: 5px; border: 1px solid var(--line-2); background: transparent; color: var(--fg); font-weight: 700; cursor: pointer; }
+    .stp:hover { border-color: var(--accent); color: var(--accent); }
+    .cfg-score { display: flex; justify-content: space-between; align-items: center; border-top: 1px dashed var(--line); padding-top: 6px; }
+    .cfg-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 18px; border: 1px dashed var(--bad); border-radius: 10px; }
+    .metric-label, .metric-val, .seq-toggle, .stake-btn, .tab-btn, .chip, .seq-pill { white-space: nowrap; }
+    .metric-cell { min-width: 0; } .metric-cell > * { overflow: hidden; text-overflow: ellipsis; }
+    .metric-val { font-size: clamp(11px, 0.95vw, 15px); }
+    .metrics { grid-template-columns: repeat(6, minmax(70px, 1fr)); }
+    .ladder-row-active td { color: var(--ok); background: rgba(57,255,20,.08); }
+    .seq-toggle { flex-shrink: 0; }
+    .cfg-top > div { min-width: 0; }
+    .sector .meta, .seq-sub { overflow-wrap: anywhere; }
+    .card { background: #000; }
+    /* ---------- neon ---------- */
+    .brand b { background: linear-gradient(90deg, #39ff14, #ffd60a 55%, #ff0a54); -webkit-background-clip: text; background-clip: text; color: transparent; filter: drop-shadow(0 0 6px rgba(57,255,20,.35)); }
+    .card { box-shadow: inset 0 1px 0 rgba(255,255,255,.03); }
+    .panel-header > span:first-child { display: inline-flex; align-items: center; gap: 7px; color: var(--fg); }
+    .panel-header > span:first-child::before { content: ''; width: 3px; height: 12px; border-radius: 2px; background: linear-gradient(#39ff14, #bc13fe); box-shadow: 0 0 8px #39ff14; }
+    .panel-c .panel-header > span:first-child::before { background: linear-gradient(#ff0a54, #ffd60a); box-shadow: 0 0 8px #ff0a54; }
+    .panel-d .panel-header > span:first-child::before { background: linear-gradient(#ffd60a, #39ff14); box-shadow: 0 0 8px #ffd60a; }
+    .state-OBSERVANDO { text-shadow: 0 0 8px rgba(57,255,20,.8); box-shadow: 0 0 14px rgba(57,255,20,.25); }
+    .state-ENTRADA { color: var(--amber); border-color: var(--amber); background: rgba(255,214,10,.1); text-shadow: 0 0 8px rgba(255,214,10,.8); }
+    .state-DEGRADED { color: var(--amber); border-color: var(--amber); }
+    .btn-kill { box-shadow: 0 0 22px rgba(255,10,84,.6), inset 0 0 10px rgba(255,255,255,.15); text-shadow: 0 0 6px #fff; }
+    .led-warn { background: var(--amber); box-shadow: 0 0 10px var(--amber); }
+    .led-ok { box-shadow: 0 0 10px #39ff14, 0 0 2px #39ff14; } .led-bad { box-shadow: 0 0 10px #ff0a54; }
+    .metric-cell:nth-child(2) { border-color: rgba(188,19,254,.35); }
+    .metric-cell:nth-child(3) { border-color: rgba(57,255,20,.3); }
+    .metric-cell:nth-child(4) { border-color: rgba(255,214,10,.3); }
+    #m-pnl.pos { color: #39ff14; text-shadow: 0 0 8px rgba(57,255,20,.6); } #m-pnl.neg { color: #ff0a54; text-shadow: 0 0 8px rgba(255,10,84,.6); }
+    #m-bank { color: #e9b8ff; text-shadow: 0 0 8px rgba(188,19,254,.5); } #m-step { color: var(--amber); }
+    .tab-btn.active { box-shadow: 0 0 14px rgba(57,255,20,.55); }
+    .seq-toggle.on { text-shadow: 0 0 6px rgba(57,255,20,.8); box-shadow: 0 0 10px rgba(57,255,20,.2); }
+    .seq-pill.armed { color: var(--amber); border-color: var(--amber); text-shadow: 0 0 6px rgba(255,214,10,.7); }
+    .seq-pill.trigger { color: #ff0a54; border-color: #ff0a54; background: rgba(255,10,84,.12); text-shadow: 0 0 6px rgba(255,10,84,.8); }
+    .btn-save { box-shadow: 0 0 14px rgba(57,255,20,.45); }
+    .stake-btn.active { box-shadow: 0 0 12px rgba(57,255,20,.5); }
+    .seq-stake { border-color: rgba(188,19,254,.5); background: rgba(188,19,254,.05); box-shadow: 0 0 18px rgba(188,19,254,.12); }
+    .cfg-group:nth-of-type(1) { border-color: rgba(57,255,20,.25); }
+    .cfg-group:nth-of-type(2) { border-color: rgba(255,10,84,.3); }
+    .cfg-group:nth-of-type(3) { border-color: rgba(188,19,254,.3); }
+    .cfg-range input { color: #39ff14; text-shadow: 0 0 6px rgba(57,255,20,.6); }
+    .stp:hover { border-color: var(--amber); color: var(--amber); }
+    .sector.hot { box-shadow: 0 0 16px rgba(255,10,84,.25); }
+    .sector.cold { box-shadow: 0 0 16px rgba(57,255,20,.2); }
+    .chip { text-shadow: 0 0 6px currentColor; }
+    .spin-pill.n-red strong { box-shadow: 0 0 8px rgba(255,10,84,.55); }
+    .spin-pill.n-zero strong { box-shadow: 0 0 8px rgba(57,255,20,.6); color: #000; }
+    .spin-pill.latest { box-shadow: 0 0 12px rgba(57,255,20,.3); }
+    .spin-pill.triggered { box-shadow: inset 2px 0 0 var(--amber); }
+    .felt .cover { box-shadow: inset 0 0 0 1.5px #39ff14, 0 0 8px rgba(57,255,20,.6); }
+    .ladder-row-active td { color: #39ff14; text-shadow: 0 0 6px rgba(57,255,20,.6); }
+    #c-cover { text-shadow: 0 0 8px rgba(57,255,20,.6); }
+    #heat-svg { filter: drop-shadow(0 0 14px rgba(188,19,254,.18)); }
+    /* Ajustes em tela cheia: a aba 7 cobre o miolo; qualquer outra aba devolve o layout. */
+    /* Gaveta de ajustes (botão ⚙): flutua sobre a roda e a mesa, sem position:fixed. */
+    .fui-shell { position: relative; }
+    .cfg-drawer { position: absolute; top: 74px; right: 10px; bottom: 10px; width: min(560px, calc(100% - 20px)); z-index: 20;
+      display: flex; flex-direction: column; background: rgba(0,0,0,.96); border: 1px solid rgba(57,255,20,.45); border-radius: 12px;
+      box-shadow: 0 0 0 1px rgba(188,19,254,.25), 0 0 40px rgba(57,255,20,.18), 0 20px 60px rgba(0,0,0,.9); backdrop-filter: blur(6px); }
+    .cfg-drawer[hidden] { display: none; }
+    .cfg-dhead { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+    .cfg-dhead b { font-size: 13px; letter-spacing: .12em; color: #39ff14; text-shadow: 0 0 8px rgba(57,255,20,.7); }
+    .cfg-dbody { overflow-y: auto; padding: 10px 14px 14px; flex: 1; min-height: 0; }
+    .cfg-drawer .cfg-grid { grid-template-columns: 1fr; }
+    .cfg-drawer .seq-radar { grid-template-columns: 1fr; }
+    .btn-gear { align-self: center; height: 32px; padding: 0 12px; border-radius: 8px; background: transparent; color: #39ff14; border: 1px solid rgba(57,255,20,.6);
+      font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; box-shadow: 0 0 12px rgba(57,255,20,.25); }
+    .btn-gear:hover, .btn-gear.on { background: rgba(57,255,20,.12); box-shadow: 0 0 18px rgba(57,255,20,.5); }
+    .btn-gear svg { width: 16px; height: 16px; }
+    .btn-kill, .btn-gear { white-space: nowrap; flex-shrink: 0; }
+    .btn-x { width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--line-2); background: transparent; color: var(--fg); cursor: pointer; font-size: 14px; }
+    .btn-x:hover { border-color: #ff0a54; color: #ff0a54; }
   </style>
 </head>
 <body>
@@ -171,6 +256,7 @@
         <span class="led-item"><span id="led-exec" class="led-dot led-off"></span>EXEC</span>
         <span class="led-item"><span id="led-db" class="led-dot led-off"></span>DB</span>
       </div>
+      <button type="button" id="btn-gear" class="btn-gear num" onclick="toggleCfg()" title="Ajustes (tecla 7)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>AJUSTES</button>
       <button type="button" class="btn-kill num" onclick="postCmd('kill')">■ KILL</button>
     </header>
     <div id="banner" class="status-banner num"><span id="banner-txt">—</span><span>Ctrl+Alt+K · [P] Pause · [R] Resume</span></div>
@@ -214,13 +300,15 @@
         <button class="tab-btn" onclick="setTab('ERROS', this)">4 · Erros</button>
         <button class="tab-btn" onclick="setTab('PADROES', this)">5 · Padrões (walk-forward)</button>
         <button class="tab-btn" onclick="setTab('BRAIN', this)">6 · Brain &amp; Datalab</button>
-        <button class="tab-btn" onclick="setTab('SEQUENCIAS', this)">7 · Sequências (ajuste)</button>
       </div>
       <div class="tab-scroll">
         <table class="num" id="tab-table"><thead id="tab-head"></thead><tbody id="tab-body"></tbody></table>
-        <div id="seq-editor" class="seq-editor num" style="display:none;"></div>
       </div>
     </section>
+    <aside id="cfg-drawer" class="cfg-drawer" hidden>
+      <div class="cfg-dhead"><b>⚙ AJUSTES</b><span class="metric-label">Esc fecha · nada vale antes de salvar</span><button type="button" class="btn-x" onclick="toggleCfg(false)">✕</button></div>
+      <div class="cfg-dbody"><div id="seq-editor" class="seq-editor num"></div></div>
+    </aside>
   </main>
   <script>
     let currentTab = 'DECISOES';
@@ -309,57 +397,96 @@
       if (cnt) cnt.textContent = (MATCHERS.length - seqDisabled.length) + '/' + MATCHERS.length + ' ligados';
       markDirty();
     }
+    const GRUPOS = [
+      { id: 'fora', nome: 'Entradas por fora', sub: 'quebra de permanência · coluna, dúzia, cor, alto/baixo, par/ímpar', ids: ['quebra_permanencia_coluna','quebra_permanencia_duzia','quebra_cor_6x','quebra_alto_baixo_6x','quebra_par_impar_6x','quebra_numero_repetido'] },
+      { id: 'numero', nome: 'Entradas por número', sub: 'terminais e plenos · só entram quando nenhuma quebra de fora está ativa', ids: ['terminal_quente','cluster_final','cluster_terminal','invictor_conservadora','invictor_arrojada'] },
+      { id: 'estat', nome: 'Leituras estatísticas', sub: 'viés de setor e Fibonacci · ruído em janela curta, use com cuidado', ids: ['setor_vies','setor_vies_duzia','fibonacci_lag'] },
+    ];
+    function stepInput(k, b, d) {
+      const i = document.querySelector(`#seq-editor input[data-k="${k}"][data-b="${b}"]`);
+      if (!i) return;
+      i.value = Math.max(2, Math.min(20, Number(i.value) + d));
+      markDirty();
+      if (lastTick) updateSeqLive(lastTick.spins || []);
+    }
+    function toggleGroup(gid) {
+      const g = GRUPOS.find(x => x.id === gid);
+      const allOn = g.ids.every(matcherEnabled);
+      g.ids.forEach(id => { if (matcherEnabled(id) === allOn) toggleMatcher(id); });
+      renderGroupHeads();
+    }
+    function renderGroupHeads() {
+      GRUPOS.forEach(g => {
+        const on = g.ids.filter(matcherEnabled).length;
+        const el = document.getElementById('grp-' + g.id);
+        if (el) {
+          el.textContent = `${on}/${g.ids.length} ligadas · ${on === g.ids.length ? 'desligar todas' : 'ligar todas'}`;
+          el.className = 'seq-toggle ' + (on ? 'on' : 'off');
+        }
+      });
+    }
     function buildSeqEditor(t) {
       const box = document.getElementById('seq-editor');
       seqDisabled = (t.disabled || []).slice();
-      const rows = MATCHERS.map((m) => {
+      const card = (m) => {
         const on = matcherEnabled(m.id);
-        const controles = m.k
-          ? `<label class="seq-in">ENTRA EM <input type="number" min="2" max="20" step="1" value="${t[m.k].min}" data-k="${m.k}" data-b="min"></label>
-             <label class="seq-in">ATÉ <input type="number" min="2" max="20" step="1" value="${t[m.k].max}" data-k="${m.k}" data-b="max"></label>
-             <div class="seq-live"><span class="metric-label">AGORA</span><span id="seq-live-${m.k}" class="seq-pill">—</span></div>`
-          : `<div class="seq-in" style="justify-content:center;color:var(--dim);">SEM FAIXA</div>
-             <div class="seq-in" style="justify-content:center;color:var(--dim);">—</div>
-             <div class="seq-live"><span class="metric-label">PARÂMETRO</span><span class="seq-pill">ESTATÍSTICO</span></div>`;
-        return `<div class="seq-row${on ? '' : ' off'}" id="seq-row-${m.id}">
-          <div><div class="seq-name">${m.nome}</div><div class="seq-sub">${m.sub}</div></div>
-          ${controles}
-          <div class="seq-score" id="seq-score-${m.id}">—</div>
-          <button type="button" id="seq-tg-${m.id}" class="seq-toggle ${on ? 'on' : 'off'}" onclick="toggleMatcher('${m.id}')">${on ? '● LIGADO' : '○ DESLIGADO'}</button>
+        const faixa = m.k ? `
+          <div class="cfg-range">
+            <span class="metric-label">entra em</span>
+            <button type="button" class="stp" onclick="stepInput('${m.k}','min',-1)">−</button>
+            <input type="number" min="2" max="20" value="${t[m.k].min}" data-k="${m.k}" data-b="min">
+            <button type="button" class="stp" onclick="stepInput('${m.k}','min',1)">+</button>
+            <span class="metric-label">até</span>
+            <button type="button" class="stp" onclick="stepInput('${m.k}','max',-1)">−</button>
+            <input type="number" min="2" max="20" value="${t[m.k].max}" data-k="${m.k}" data-b="max">
+            <button type="button" class="stp" onclick="stepInput('${m.k}','max',1)">+</button>
+            <span id="seq-live-${m.k}" class="seq-pill">—</span>
+          </div>` : '';
+        return `<div class="cfg-card${on ? '' : ' off'}" id="seq-row-${m.id}">
+          <div class="cfg-top">
+            <div><div class="seq-name">${m.nome}</div><div class="seq-sub">${m.sub}</div></div>
+            <button type="button" id="seq-tg-${m.id}" class="seq-toggle ${on ? 'on' : 'off'}" onclick="toggleMatcher('${m.id}');renderGroupHeads()">${on ? '● LIGADO' : '○ DESLIGADO'}</button>
+          </div>
+          ${faixa}
+          <div class="cfg-score"><span class="metric-label">placar walk-forward</span><span class="seq-score" id="seq-score-${m.id}">—</span></div>
         </div>`;
-      }).join('');
+      };
+      const grupos = GRUPOS.map(g => `
+        <section class="cfg-group">
+          <div class="cfg-ghead">
+            <div><div class="seq-name" style="font-size:12px">${g.nome}</div><div class="seq-sub">${g.sub}</div></div>
+            <button type="button" id="grp-${g.id}" class="seq-toggle" onclick="toggleGroup('${g.id}')">—</button>
+          </div>
+          <div class="cfg-grid">${g.ids.map(id => MATCHERS.find(m => m.id === id)).filter(Boolean).map(card).join('')}</div>
+        </section>`).join('');
       box.innerHTML = `
-        <div class="seq-radar" id="term-radar">—</div>
-        <div class="seq-radar" id="family-radar">—</div>
-        <div class="seq-stake">
-          <div>
-            <div class="metric-label">FICHA DE ENTRADA (POR COBERTURA)</div>
-            <div id="stake-current" class="metric-val num">—</div>
-          </div>
-          <div id="stake-btns" class="stake-btns num"></div>
-          <div class="stake-meta">
-            <span id="stake-ladder" class="num">ESCADA: —</span>
-            <span id="stake-status" class="num">—</span>
-          </div>
-        </div>
-        <div class="seq-note">Duas coisas separadas: <strong>faixa</strong> muda <em>quando</em> o padrão entra (entra em N repetições, aceita até M); <strong>interruptor</strong> tira o padrão do jogo por inteiro, sem mexer no que os outros estão fazendo. O pré-alerta sai em (entra − 1) só como observação, com confiança 0,50 — abaixo do corte de 0,55, nunca vira aposta. O <strong>placar</strong> é o walk-forward da fita inteira: vitórias por degrau, estouros e P&L líquido. Vale a partir do próximo giro.</div>
-        <div class="seq-row seq-head"><span>PADRÃO</span><span>ENTRA EM</span><span>ATÉ</span><span>AGORA</span><span>PLACAR (WALK-FORWARD)</span><span>ESTADO</span></div>
-        ${rows}
-        <div class="seq-foot">
+        <div class="seq-foot cfg-bar">
           <span id="seq-status" style="color:var(--muted);">—</span>
           <span id="seq-count" class="num" style="color:var(--muted);">${MATCHERS.length - seqDisabled.length}/${MATCHERS.length} ligados</span>
           <div style="display:flex;gap:6px;">
             <button type="button" class="btn-ghost" onclick="resetSeqTuning()">RESTAURAR PADRÃO</button>
             <button type="button" class="btn-save" onclick="saveSeqTuning()">SALVAR AJUSTES</button>
           </div>
-        </div>`;
+        </div>
+        <div class="seq-stake">
+          <div><div class="metric-label">Ficha de entrada (por cobertura)</div><div id="stake-current" class="metric-val num">—</div></div>
+          <div id="stake-btns" class="stake-btns num"></div>
+          <div class="stake-meta"><span id="stake-ladder" class="num">ESCADA: —</span><span id="stake-status" class="num">—</span></div>
+        </div>
+        ${grupos}
+        <div class="cfg-grid" style="grid-template-columns:1fr 1fr"><div class="seq-radar" id="term-radar">—</div><div class="seq-radar" id="family-radar">—</div></div>
+        <div class="seq-note"><b>Entra em N</b>: repetições para apostar (pré-alerta em N−1, sem aposta). <b>Até M</b>: acima disso a sequência é longa demais e o padrão cala. Desligar tira o padrão do jogo sem mexer nos outros. Nada muda até clicar <b>SALVAR AJUSTES</b>; vale a partir do próximo giro.</div>`;
       document.querySelectorAll('#seq-editor input').forEach((i) => i.addEventListener('input', markDirty));
+      renderGroupHeads();
       if (lastTick) updateSeqLive(lastTick.spins || []);
       updateSeqScore();
     }
     async function loadSeqTuning() {
+      const box = document.getElementById('seq-editor');
       try {
-        const j = await (await fetch('/api/tuning')).json();
+        const r = await fetch('/api/tuning');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const j = await r.json();
         seqDefaults = j.defaults; seqCurrent = j.current;
         buildSeqEditor(j.current);
         seqLoaded = true;
@@ -367,9 +494,10 @@
         const st = document.getElementById('seq-status');
         st.textContent = 'VIGENTE · ' + seqSummary(j.current);
         st.style.color = 'var(--muted)';
-      } catch (_) {
-        const st = document.getElementById('seq-status');
-        if (st) { st.textContent = 'FALHA AO LER /api/tuning'; st.style.color = 'var(--bad)'; }
+      } catch (e) {
+        box.innerHTML = `<div class="cfg-empty"><div class="seq-name" style="color:var(--bad)">Core offline — não consegui ler /api/tuning</div>
+          <div class="seq-sub">Os ajustes vivem no core (porta 8791). Rode <b>start-monster.bat</b> e tente de novo. (${String(e.message || e)})</div>
+          <button type="button" class="btn-save" onclick="loadSeqTuning()">TENTAR DE NOVO</button></div>`;
       }
     }
     // Placar dos terminais 2-3-6-9 (vem pronto do core em /api/tick, já sem replay de fixture).
@@ -534,13 +662,20 @@
       currentTab = t;
       document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
       if (btn) btn.classList.add('active');
-      const isSeq = t === 'SEQUENCIAS';
-      document.getElementById('tab-table').style.display = isSeq ? 'none' : 'table';
-      document.getElementById('seq-editor').style.display = isSeq ? 'flex' : 'none';
-      if (isSeq && !seqLoaded) loadSeqTuning();
       if (lastTick) render(lastTick);
     }
+    function toggleCfg(force) {
+      const d = document.getElementById('cfg-drawer');
+      const open = force === undefined ? d.hidden : force;
+      d.hidden = !open;
+      document.getElementById('btn-gear').classList.toggle('on', open);
+      if (open && !seqLoaded) loadSeqTuning();
+      if (open && lastTick) { updateSeqLive(lastTick.spins || []); updateSeqScore(); }
+    }
+    const cfgOpen = () => !document.getElementById('cfg-drawer').hidden;
     window.addEventListener('keydown', (e) => {
+      if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+      if (e.key === 'Escape') { toggleCfg(false); return; }
       if (e.ctrlKey && e.altKey && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); postCmd('kill'); }
       else if (e.key === 'p' || e.key === 'P') postCmd('pause');
       else if (e.key === 'r' || e.key === 'R') postCmd('resume');
@@ -550,7 +685,7 @@
       else if (e.key === '4') setTab('ERROS', document.querySelectorAll('.tab-btn')[3]);
       else if (e.key === '5') setTab('PADROES', document.querySelectorAll('.tab-btn')[4]);
       else if (e.key === '6') setTab('BRAIN', document.querySelectorAll('.tab-btn')[5]);
-      else if (e.key === '7') setTab('SEQUENCIAS', document.querySelectorAll('.tab-btn')[6]);
+      else if (e.key === '7') toggleCfg();
     });
     function render(t) {
       lastTick = t;
@@ -561,6 +696,7 @@
       document.getElementById('m-uptime').textContent = fmtClock(t.session?.uptime_sec);
       document.getElementById('m-bank').textContent = fmtCents(t.session?.bankroll_cents);
       document.getElementById('m-pnl').textContent = fmtCents(t.session?.pnl_cents);
+      { const v = t.session?.pnl_cents; document.getElementById('m-pnl').className = 'metric-val num' + (v > 0 ? ' pos' : (v < 0 ? ' neg' : '')); }
       document.getElementById('m-step').textContent = (t.ladder?.current_step !== null && t.ladder?.max_steps !== null) ? `${t.ladder.current_step}/${t.ladder.max_steps}` : '—';
       document.getElementById('ladder-title').textContent = 'ESCADA ×3 (' + fmtVal(t.ladder?.max_steps) + ' DEGRAUS)';
       document.getElementById('m-bet').textContent = fmtCents(t.session?.table_bet_cents);
@@ -601,11 +737,7 @@
       }
       const lb = document.getElementById('ladder-body');
       lb.innerHTML = (t.ladder?.rows || []).map(r => `<tr class="${r.active?'ladder-row-active':''}"><td>${r.active?'▸ '+r.step:r.step}</td><td>${fmtCents(r.stake_per_cover_cents)}</td><td>${fmtCents(r.exposure_cents)}</td><td>${fmtCents(r.cum_loss_cents)}</td></tr>`).join('');
-      if (currentTab === 'SEQUENCIAS') {
-        updateSeqLive(spins);
-        updateSeqScore();
-        return;
-      }
+      if (cfgOpen()) { updateSeqLive(spins); updateSeqScore(); }
       const th = document.getElementById('tab-head');
       const tb = document.getElementById('tab-body');
       if (currentTab === 'DECISOES') {
@@ -681,10 +813,10 @@
     // ---------- Mapa de calor da roda (dados reais: tick.heat = contagem por casa, últimos 200 giros) ----------
     const WHEEL = [0,32,15,19,4,21,2,25,17,34,6,27,13,36,11,30,8,23,10,5,24,16,33,1,20,14,31,9,22,18,29,7,28,12,35,3,26];
     const SECTORS = [
-      { id: 'voisins', nome: 'Voisins du Zéro', nums: [22,18,29,7,28,12,35,3,26,0,32,15,19,4,21,2,25], ring: '#34d399' },
-      { id: 'jeu0', nome: 'Jeu 0', nums: [12,35,3,26,0,32,15], ring: '#a7f3d0' },
-      { id: 'tiers', nome: 'Tiers du Cylindre', nums: [27,13,36,11,30,8,23,10,5,24,16,33], ring: '#d6a46a' },
-      { id: 'orph', nome: 'Orphelins', nums: [1,20,14,31,9,17,34,6], ring: '#e2e8f2' },
+      { id: 'voisins', nome: 'Voisins du Zéro', nums: [22,18,29,7,28,12,35,3,26,0,32,15,19,4,21,2,25], ring: '#39ff14' },
+      { id: 'jeu0', nome: 'Jeu 0', nums: [12,35,3,26,0,32,15], ring: '#39ff14' },
+      { id: 'tiers', nome: 'Tiers du Cylindre', nums: [27,13,36,11,30,8,23,10,5,24,16,33], ring: '#ff0a54' },
+      { id: 'orph', nome: 'Orphelins', nums: [1,20,14,31,9,17,34,6], ring: '#bc13fe' },
     ];
     const KERNEL = [1, 0.6, 0.25];
     const KSUM = KERNEL[0] + 2 * (KERNEL[1] + KERNEL[2]);
@@ -692,7 +824,7 @@
       // r = observado/esperado; 1 = neutro. Escala log2, satura em 0,25x e 4x.
       const t = Math.max(-1, Math.min(1, Math.log2(Math.max(r, 1e-3)) / 2));
       const mix = (a, b, k) => a.map((v, i) => Math.round(v + (b[i] - v) * k));
-      const neu = [38,48,66], hot1 = [251,146,60], hot2 = [244,63,94], c1 = [96,165,250], c2 = [30,58,138];
+      const neu = [20,20,20], hot1 = [140,10,35], hot2 = [255,10,84], c1 = [0,90,38], c2 = [57,255,20];
       const c = t >= 0 ? (t < .5 ? mix(neu, hot1, t * 2) : mix(hot1, hot2, (t - .5) * 2))
                        : (-t < .5 ? mix(neu, c1, -t * 2) : mix(c1, c2, (-t - .5) * 2));
       return `rgb(${c[0]},${c[1]},${c[2]})`;
@@ -705,7 +837,7 @@
     (function buildHeatWheel() {
       const svg = document.getElementById('heat-svg');
       const step = 2 * Math.PI / 37, half = step / 2;
-      let h = '<defs><radialGradient id="hub"><stop offset="0" stop-color="#111827"/><stop offset="1" stop-color="#05070b"/></radialGradient></defs>';
+      let h = '<defs><radialGradient id="hub"><stop offset="0" stop-color="#0a0a0a"/><stop offset="1" stop-color="#000000"/></radialGradient></defs>';
       SECTORS.filter(s => s.id !== 'jeu0').forEach(sec => {
         sec.nums.forEach(n => {
           const i = WHEEL.indexOf(n);
@@ -714,18 +846,18 @@
       });
       WHEEL.forEach((n, i) => {
         const a0 = i * step - half, a1 = i * step + half;
-        const base = n === 0 ? '#059669' : (REDS.has(n) ? '#be123c' : '#1e2533');
-        h += `<path d="${arcPath(152, 182, a0, a1)}" fill="${base}" stroke="#05070b" stroke-width="1"/>`;
-        h += `<path id="hz-${n}" d="${arcPath(70, 148, a0, a1)}" fill="#263042" stroke="#05070b" stroke-width="1"><title>${n}</title></path>`;
+        const base = n === 0 ? '#1fd10a' : (REDS.has(n) ? '#e0003c' : '#111111');
+        h += `<path d="${arcPath(152, 182, a0, a1)}" fill="${base}" stroke="#000000" stroke-width="1"/>`;
+        h += `<path id="hz-${n}" d="${arcPath(70, 148, a0, a1)}" fill="#141414" stroke="#000000" stroke-width="1"><title>${n}</title></path>`;
         const [tx, ty] = polar(167, i * step);
         h += `<text x="${tx}" y="${ty}" transform="rotate(${i * 360 / 37} ${tx} ${ty})" text-anchor="middle" dominant-baseline="central" fill="#fff" font-size="11" font-weight="700" font-family="JetBrains Mono, monospace">${n}</text>`;
         const [cx, cy] = polar(132, i * step);
-        h += `<text id="hc-${n}" x="${cx}" y="${cy}" text-anchor="middle" dominant-baseline="central" fill="#e2e8f2" font-size="9" font-weight="600" font-family="JetBrains Mono, monospace" opacity=".85"></text>`;
+        h += `<text id="hc-${n}" x="${cx}" y="${cy}" text-anchor="middle" dominant-baseline="central" fill="#f2f2f2" font-size="9" font-weight="600" font-family="JetBrains Mono, monospace" opacity=".85"></text>`;
       });
-      h += '<circle r="66" fill="url(#hub)" stroke="#22d3ee" stroke-opacity=".5"/>';
-      h += '<text x="0" y="-18" text-anchor="middle" fill="#8592a8" font-size="9" letter-spacing="2">ÚLTIMO</text>';
-      h += '<text id="heat-last" x="0" y="12" text-anchor="middle" fill="#e2e8f2" font-size="34" font-weight="700" font-family="JetBrains Mono, monospace">—</text>';
-      h += '<text id="heat-n" x="0" y="36" text-anchor="middle" fill="#4a5670" font-size="9" font-family="JetBrains Mono, monospace"></text>';
+      h += '<circle r="66" fill="url(#hub)" stroke="#bc13fe" stroke-opacity=".8"/>';
+      h += '<text x="0" y="-18" text-anchor="middle" fill="#8c8c8c" font-size="9" letter-spacing="2">ÚLTIMO</text>';
+      h += '<text id="heat-last" x="0" y="12" text-anchor="middle" fill="#f2f2f2" font-size="34" font-weight="700" font-family="JetBrains Mono, monospace">—</text>';
+      h += '<text id="heat-n" x="0" y="36" text-anchor="middle" fill="#4d4d4d" font-size="9" font-family="JetBrains Mono, monospace"></text>';
       h += '<path id="heat-marker" d="" fill="none" stroke="#fff" stroke-width="2.5"/>';
       svg.innerHTML = h;
     })();

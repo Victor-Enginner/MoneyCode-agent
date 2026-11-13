@@ -501,15 +501,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut mode = ExecutionMode::DryRun;
     let mut stream_addr = DEFAULT_STREAM_ADDR.to_string();
     let mut db_uri = "O:/Archives/Eistein/FUI AGENT ROULLET/monster.db".to_string();
-    let mut bankroll_cents: i64 = 5_088;
-    // Padrão definido pelo gate do §13 com banca ~R$ 80: base 20¢ e 3 degraus
-    // (20/60/180, perda máxima 520¢) dão P(ruína)=0,00%; com 4 degraus sobe para 8,16% e reprova.
+    let mut bankroll_cents: i64 = 4_000;
+    // Banca de teste R$ 40: base 10¢ e 5 degraus ×3 (10/30/90/270/810 por coluna).
+    // Perda máxima de um estouro = 2420¢. Exposição do degrau 5 = 1620¢, que é ~51% da banca
+    // depois de 4 perdas (3200¢) — por isso o teto de exposição sobe para 0,55.
+    // Stop loss desligado a pedido do operador: o limite é a própria banca (4000¢).
     let mut cfg = Cfg {
-        base_cents: 20,
-        max_steps: 3,
+        base_cents: 10,
+        max_steps: 5,
         max_bet_per_cover_cents: 100_000,
-        max_exposure_pct: 0.10,
-        stop_loss_cents: 1600,
+        max_exposure_pct: 0.55,
+        stop_loss_cents: 4000,
         stop_win_pct: 0.08,
         min_window_ms: 2000,
         cooldown_spins: 2,
