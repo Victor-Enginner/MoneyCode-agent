@@ -942,7 +942,7 @@ pub const MATCHER_IDS: [&str; 10] = [
 ///
 /// As faixas vêm achatadas no JSON (`coluna`, `duzia`, ...) para o arquivo ficar
 /// legível; `disabled` é opcional, então um `tuning.json` antigo continua válido.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MatcherTuning {
     /// Faixas `min..=max` dos cinco matchers de sequência.
     #[serde(flatten)]
@@ -950,6 +950,19 @@ pub struct MatcherTuning {
     /// Ids desligados pelo operador: não emitem sinal, mas seguem no binário.
     #[serde(default)]
     pub disabled: Vec<String>,
+}
+
+impl Default for MatcherTuning {
+    /// Os dois matchers de viés de setor nascem **desligados**: medem 55% de
+    /// ocupação numa janela de 20 giros, e em n=20 isso é ruído — a exigência
+    /// estatística do §3 (n >= 185 e chi-quadrado significativo) não é atendida.
+    /// Ligar de volta é um clique na dashboard, com o custo assumido.
+    fn default() -> Self {
+        Self {
+            sequences: SequenceTuning::default(),
+            disabled: vec!["setor_vies".to_string(), "setor_vies_duzia".to_string()],
+        }
+    }
 }
 
 impl MatcherTuning {
@@ -978,8 +991,11 @@ impl MatcherTuning {
 /// - Colunas (`2 to 1`) e Dúzias (`1st/2nd/3rd 12`): pré-alerta em `min - 1` (`0.50`) e entrada a partir de `min` (`>= 0.66`)
 /// - Vermelho/Preto, Baixo/Alto e Par/Ímpar: pré-alerta em `min - 1` (`0.50`) e entrada a partir de `min` (`>= 0.68`)
 /// - Viés de Setor Coluna (`setor_vies`), Viés de Setor Dúzia (`setor_vies_duzia`), Fibonacci Lag e Cluster Terminal.
+///
+/// Conjunto completo de matchers, sem o filtro do interruptor: é a allowlist do §8.
+/// Quem decide o que está ligado em produção é `MatcherTuning::matchers()`.
 pub fn default_matchers() -> Vec<Arc<dyn Matcher>> {
-    MatcherTuning::default().matchers()
+    SequenceTuning::default().matchers()
 }
 
 #[cfg(test)]
@@ -1036,6 +1052,19 @@ mod tests {
         let wide = col.evaluate(&[1, 4, 7, 10, 13, 20]).expect("streak 5 entra");
         assert!((wide.confidence - 0.82).abs() < 1e-9);
         assert!(col.evaluate(&[1, 4, 7, 10, 13, 16, 20]).is_none());
+    }
+
+    #[test]
+    fn padrao_desliga_os_vies_de_setor_de_janela_curta() {
+        let default = MatcherTuning::default();
+        assert!(default.validate().is_ok());
+        let ids: Vec<&str> = default.matchers().iter().map(|m| m.id()).collect();
+        assert!(!ids.contains(&"setor_vies"), "viés de setor em 20 giros é ruído");
+        assert!(!ids.contains(&"setor_vies_duzia"));
+        assert_eq!(ids.len(), MATCHER_IDS.len() - 2);
+        // Os de repetição continuam ligados: é o gatilho que o operador espera.
+        assert!(ids.contains(&"quebra_permanencia_duzia"));
+        assert!(ids.contains(&"quebra_permanencia_coluna"));
     }
 
     #[test]
