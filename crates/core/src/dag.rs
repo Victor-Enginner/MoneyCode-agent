@@ -4,6 +4,7 @@
 //! Executa 100% em memória sem alocação pesada e sem LLM no caminho crítico (<250 ms).
 
 use crate::backtest::{evaluate_matcher_walk_forward, PatternHistoryStats};
+use crate::bocpd::{analyze_chronological, BocpdCfg, BocpdReport};
 use monster_risk::{
     authorize, authorize_numbers, decompose, stake_cents, Cfg, NumberLadder, State, Verdict,
 };
@@ -11,6 +12,7 @@ use monster_strategy_native::{number_coverage, BetIntent, Cover, Matcher};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::warn;
 
 /// Capacidade fixa do ring buffer `feat.window(30)` (§8).
 pub const WINDOW_CAPACITY: usize = 30;
@@ -120,6 +122,9 @@ pub struct Aggregate {
     pub confidence: f64,
     /// Coberturas recomendadas pelo matcher.
     pub cover: Vec<Cover>,
+    /// O sinal foi zerado pelo veto de regime (família trocou ou esfriou).
+    #[serde(default)]
+    pub regime_veto: bool,
 }
 
 /// Executa o fan-out sobre todos os matchers e aplica o fan-in ponderado pelo `Regime` (§8).
@@ -138,6 +143,7 @@ pub fn fan_in(window: &[u8], matchers: &[Arc<dyn Matcher>]) -> Vec<Aggregate> {
                 strategy_id: intent.strategy_id,
                 confidence: (intent.confidence * bias).min(0.99),
                 cover: intent.cover,
+                regime_veto: false,
             })
         })
         .collect();
@@ -223,6 +229,45 @@ fn compile_plan(spin_id: &str, winner: &Aggregate, ladder_step: u8, cfg: &Cfg) -
     })
 }
 
+/// Família de finais que a cobertura de número pretende cobrir (`final % 3`).
+///
+/// `Terminal(0)` é o curinga e não define família; cobertura sem terminal (coluna, dúzia, cor)
+/// não é cobertura de família e nunca recebe veto de regime.
+fn cover_family(cover: &[Cover]) -> Option<usize> {
+    cover.iter().find_map(|c| match c {
+        Cover::Terminal(t) if *t != 0 => Some(usize::from(*t % 3)),
+        _ => None,
+    })
+}
+
+/// Aplica o veto de regime aos sinais de cluster: família que acabou de trocar não recebe entrada.
+///
+/// O sinal não é descartado — vai a `confidence = 0.0` com `regime_veto = true`, então aparece no
+/// stream de decisões com motivo (`JustChanged`/`FamilyFaded`) mas perde o fan-in para qualquer
+/// matcher legítimo. Nenhum outro tipo de cobertura é afetado.
+fn apply_regime_veto(aggregates: &mut [Aggregate], report: &BocpdReport, cfg: &BocpdCfg) {
+    for agg in aggregates.iter_mut() {
+        if !agg.strategy_id.contains("cluster") {
+            continue;
+        }
+        let Some(family) = cover_family(&agg.cover) else {
+            continue;
+        };
+        if let Some(reason) = report.veto(family, cfg) {
+            warn!(
+                strategy_id = %agg.strategy_id,
+                family,
+                p_change = report.p_change,
+                run = report.map_run_length,
+                ?reason,
+                "veto de regime: familia sem sustentacao"
+            );
+            agg.confidence = 0.0;
+            agg.regime_veto = true;
+        }
+    }
+}
+
 /// Plano compilado pelo `slip.compiler` pronto para o `executor.place`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
@@ -257,6 +302,8 @@ pub struct DagOutput {
     pub verdict: Option<Verdict>,
     /// Plano compilado de fichas (quando `verdict == Some(Verdict::Place)`).
     pub plan: Option<Plan>,
+    /// Posterior do BOCPD sobre a família de finais no momento da decisão.
+    pub bocpd: BocpdReport,
     /// Latência total do DAG em microssegundos (orçamento: < 250.000 µs).
     pub elapsed_us: u64,
 }
@@ -293,6 +340,15 @@ pub fn evaluate_dag_with_history(
     let regime = classify(window);
     let raw_aggregates = fan_in(window, matchers);
 
+    let bocpd_cfg = BocpdCfg::default();
+    let bocpd = if chronological_history.len() >= 2 {
+        analyze_chronological(chronological_history, &bocpd_cfg)
+    } else {
+        let mut newest_first = window.to_vec();
+        newest_first.reverse();
+        analyze_chronological(&newest_first, &bocpd_cfg)
+    };
+
     let mut adjusted_aggregates = Vec::with_capacity(raw_aggregates.len());
     let mut best_history: Option<PatternHistoryStats> = None;
 
@@ -320,6 +376,8 @@ pub fn evaluate_dag_with_history(
         adjusted_aggregates.push(agg);
     }
 
+    apply_regime_veto(&mut adjusted_aggregates, &bocpd, &bocpd_cfg);
+
     adjusted_aggregates.sort_by(|a, b| {
         b.confidence
             .partial_cmp(&a.confidence)
@@ -336,6 +394,7 @@ pub fn evaluate_dag_with_history(
                 regime,
                 aggregates: adjusted_aggregates,
                 verdict: None,
+                bocpd,
                 plan: None,
                 elapsed_us: start.elapsed().as_micros() as u64,
             },
@@ -375,6 +434,7 @@ pub fn evaluate_dag_with_history(
             aggregates: adjusted_aggregates,
             verdict: Some(verdict),
             plan,
+            bocpd,
             elapsed_us: start.elapsed().as_micros() as u64,
         },
         best_history,
@@ -391,7 +451,13 @@ pub fn evaluate_dag(
 ) -> DagOutput {
     let start = Instant::now();
     let regime = classify(window);
-    let aggregates = fan_in(window, matchers);
+    let mut aggregates = fan_in(window, matchers);
+
+    let bocpd_cfg = BocpdCfg::default();
+    let mut oldest_first = window.to_vec();
+    oldest_first.reverse();
+    let bocpd = analyze_chronological(&oldest_first, &bocpd_cfg);
+    apply_regime_veto(&mut aggregates, &bocpd, &bocpd_cfg);
 
     let best = aggregates
         .iter()
@@ -403,6 +469,7 @@ pub fn evaluate_dag(
             aggregates,
             verdict: None,
             plan: None,
+            bocpd,
             elapsed_us: start.elapsed().as_micros() as u64,
         };
     };
@@ -419,6 +486,69 @@ pub fn evaluate_dag(
         aggregates,
         verdict: Some(verdict),
         plan,
+        bocpd,
         elapsed_us: start.elapsed().as_micros() as u64,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(map_family: Option<usize>, family_share: [f64; 3]) -> BocpdReport {
+        BocpdReport {
+            observations: 40,
+            p_change: 0.02,
+            map_run_length: 40,
+            family_share,
+            map_family,
+        }
+    }
+
+    #[test]
+    fn cover_family_ignores_the_wildcard_terminal() {
+        assert_eq!(
+            cover_family(&[
+                Cover::Terminal(0),
+                Cover::Terminal(1),
+                Cover::Terminal(4),
+                Cover::Terminal(7)
+            ]),
+            Some(1)
+        );
+        assert_eq!(cover_family(&[Cover::Terminal(3)]), Some(0));
+        assert_eq!(cover_family(&[Cover::Terminal(0)]), None);
+        assert_eq!(cover_family(&[Cover::Col(2), Cover::Col(3)]), None);
+    }
+
+    #[test]
+    fn regime_veto_zeroes_only_cluster_number_signals() {
+        let cfg = BocpdCfg::default();
+        // Regime aponta 3-6-9; o cluster quer 1-4-7.
+        let rep = report(Some(0), [0.9, 0.05, 0.05]);
+        let mut aggregates = vec![
+            Aggregate {
+                strategy_id: "cluster_final".to_string(),
+                confidence: 0.80,
+                cover: vec![
+                    Cover::Terminal(0),
+                    Cover::Terminal(1),
+                    Cover::Terminal(4),
+                    Cover::Terminal(7),
+                ],
+                regime_veto: false,
+            },
+            Aggregate {
+                strategy_id: "quebra_permanencia_coluna".to_string(),
+                confidence: 0.70,
+                cover: vec![Cover::Col(2), Cover::Col(3)],
+                regime_veto: false,
+            },
+        ];
+        apply_regime_veto(&mut aggregates, &rep, &cfg);
+        assert!(aggregates[0].regime_veto, "cluster fora de fase leva veto");
+        assert_eq!(aggregates[0].confidence, 0.0);
+        assert!(!aggregates[1].regime_veto, "coluna não é cobertura de família");
+        assert_eq!(aggregates[1].confidence, 0.70);
     }
 }

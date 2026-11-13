@@ -11,7 +11,9 @@ use monster_core::{
     ExecutionMode, GateCtx, HistoryBuffer, KillSwitch, LadderSteps, LiveHttpActuator, Plan,
     PlayedEntry, Window30, HISTORY_CAPACITY, WINDOW_CAPACITY,
 };
-use monster_risk::{run_monte_carlo, Cfg, McParams, State, Verdict};
+use monster_risk::{
+    run_monte_carlo, run_monte_carlo_numbers, Cfg, McParams, NumbersMcParams, State, Verdict,
+};
 use monster_store::{
     all_ladder_steps, init_pool, insert_intent, insert_spin, IntentDecision, NewIntent, NewSpin,
     SpinSource, SqlitePool,
@@ -244,6 +246,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mc_report.p_ruin * 100.0,
         mc_report.drawdown_p95_cents,
         mc_report.ev_per_hour_cents
+    );
+
+    // 1b. Mesmo gate para cobertura de números (cluster de terminais: k = 15 pockets).
+    // A geometria é outra — `k·x` de exposição, escada própria — então o MC de colunas não cobre.
+    let mc_numbers = run_monte_carlo_numbers(&NumbersMcParams {
+        initial_bankroll_cents: bankroll_cents,
+        numbers: 15,
+        cfg: cfg.clone(),
+        ..NumbersMcParams::default()
+    });
+    println!(
+        "[MONSTER-CORE] MC números (k={} · {} degraus) | estouro/ciclo={:.2}% | P(ruína)={:.2}% | DD p95={}¢ | exp. máx={}¢ | EV/h={:.1}¢ | gate={}",
+        mc_numbers.numbers,
+        mc_numbers.max_steps,
+        mc_numbers.p_blow_per_cycle * 100.0,
+        mc_numbers.p_ruin * 100.0,
+        mc_numbers.drawdown_p95_cents,
+        mc_numbers.max_exposure_cents,
+        mc_numbers.ev_per_hour_cents,
+        if mc_numbers.gate_passes() { "PASS" } else { "FAIL" }
     );
 
     // 2. Inicializa SQLite WAL, remove registros inválidos antigos e reconcilia órfãos no boot (§9).
@@ -539,10 +561,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             0.55,
         );
         println!(
-            "[DAG] spin={} num={} | regime={:?} | sinais={} | verdict={:?} | hist={} | {}µs",
+            "[DAG] spin={} num={} | regime={:?} | p_troca={:.2} bloco={} | sinais={} | verdict={:?} | hist={} | {}µs",
             ev.spin_id,
             ev.number,
             dag_out.regime,
+            dag_out.bocpd.p_change,
+            dag_out.bocpd.map_run_length,
             dag_out.aggregates.len(),
             dag_out.verdict,
             best_hist

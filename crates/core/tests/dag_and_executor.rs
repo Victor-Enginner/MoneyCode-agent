@@ -445,3 +445,60 @@ fn fase5_cluster_final_aposta_em_numeros_com_escada_propria() {
     assert_eq!(actuator.cleared_count(), 0, "zero preview-mismatch em números");
     assert_eq!(orphan_sweep(&pool).expect("orphan_sweep"), 0, "zero órfãos");
 }
+
+#[test]
+fn dag_expoe_posterior_de_regime_sem_vetar_bloco_real() {
+    use monster_core::{evaluate_dag_with_history, GateCtx, LadderSteps};
+    use monster_strategy_native::{ClusterFinal, Matcher};
+
+    let cfg = Cfg::default();
+    let matchers: Vec<std::sync::Arc<dyn Matcher>> =
+        vec![std::sync::Arc::new(ClusterFinal::default())];
+    let ladder_steps = LadderSteps::new();
+    let state = State {
+        bankroll_cents: 500_000,
+        exposure_cents: 0,
+        session_pnl_cents: 0,
+        remaining_window_ms: 10_000,
+        spins_since_blow: 5,
+        step: 0,
+    };
+    // Bloco real de 1-4-7: 30 giros da família e a janela atual no mesmo bloco.
+    let window: Vec<u8> = vec![1, 4, 7, 11, 14];
+    let mut chrono: Vec<u8> = [1u8, 4, 7, 11, 14, 17]
+        .iter()
+        .copied()
+        .cycle()
+        .take(30)
+        .collect();
+    chrono.extend(window.iter().rev().copied());
+
+    let (dag_out, _) = evaluate_dag_with_history(
+        "regime-bloco",
+        &window,
+        &chrono,
+        &matchers,
+        &cfg,
+        &GateCtx {
+            state: &state,
+            ladder_steps: &ladder_steps,
+        },
+        0.50,
+    );
+
+    // O DAG publica a posterior do BOCPD junto da decisão.
+    assert_eq!(dag_out.bocpd.map_family, Some(1), "regime na família 1-4-7");
+    assert!(dag_out.bocpd.observations >= 30);
+    assert!(dag_out.bocpd.p_change < 0.2, "bloco estável não está trocando");
+
+    // E não veta o sinal legítimo.
+    let cluster = dag_out
+        .aggregates
+        .iter()
+        .find(|a| a.strategy_id == "cluster_final")
+        .expect("matcher dispara com bloco estável");
+    assert!(!cluster.regime_veto);
+    assert!(cluster.confidence > 0.0);
+    assert_eq!(dag_out.verdict, Some(Verdict::Place));
+    assert_eq!(dag_out.plan.expect("plano de plenos").covers.len(), 15);
+}

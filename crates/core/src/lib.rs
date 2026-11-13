@@ -5,6 +5,7 @@
 
 pub mod analytics;
 pub mod backtest;
+pub mod bocpd;
 pub mod brain;
 pub mod dag;
 pub mod executor;
@@ -23,6 +24,9 @@ pub use backtest::{
 pub use brain::{
     build_brain_snapshot, render_gbrain_markdown, write_gbrain_file, BrainSnapshot, HarnessTier,
     StrategyEvidence,
+};
+pub use bocpd::{
+    analyze_chronological, family_of_number, BocpdCfg, BocpdReport, VetoReason,
 };
 pub use dag::{
     classify, compute_ev_cents_two_covers, evaluate_dag, evaluate_dag_with_history, fan_in,
