@@ -87,10 +87,15 @@
     .seq-editor { display: flex; flex-direction: column; gap: 6px; padding-top: 2px; }
     .seq-note { color: var(--muted); font-size: 10px; padding: 4px 6px; border: 1px solid var(--line); background: #0b0f17; }
     .seq-row {
-      display: grid; grid-template-columns: 1fr 124px 124px 148px 104px; align-items: center; gap: 8px;
+      display: grid; grid-template-columns: 1fr 118px 118px 138px 156px 104px; align-items: center; gap: 8px;
       padding: 6px 8px; background: #111622; border: 1px solid var(--line);
     }
     .seq-row.off { opacity: 0.55; }
+    .seq-row.seq-head { background: transparent; border-color: transparent; padding: 2px 8px; }
+    .seq-head span { font-size: 9px; color: var(--muted); font-weight: 600; }
+    .seq-score { font-size: 10px; font-weight: 600; color: var(--muted); }
+    .seq-score.good { color: var(--ok); }
+    .seq-score.bad { color: var(--bad); }
     .seq-toggle {
       height: 22px; padding: 0 8px; font-size: 10px; font-weight: 600; cursor: pointer;
       background: var(--bg); border: 1px solid var(--line);
@@ -286,11 +291,13 @@
         return `<div class="seq-row${on ? '' : ' off'}" id="seq-row-${m.id}">
           <div><div class="seq-name">${m.nome}</div><div class="seq-sub">${m.sub}</div></div>
           ${controles}
+          <div class="seq-score" id="seq-score-${m.id}">—</div>
           <button type="button" id="seq-tg-${m.id}" class="seq-toggle ${on ? 'on' : 'off'}" onclick="toggleMatcher('${m.id}')">${on ? '● LIGADO' : '○ DESLIGADO'}</button>
         </div>`;
       }).join('');
       box.innerHTML = `
-        <div class="seq-note">Duas coisas separadas: <strong>faixa</strong> muda <em>quando</em> o padrão entra (entra em N repetições, aceita até M); <strong>interruptor</strong> tira o padrão do jogo por inteiro, sem mexer no que os outros estão fazendo. O pré-alerta sai em (entra − 1) só como observação, com confiança 0,50 — abaixo do corte de 0,55, nunca vira aposta. Vale a partir do próximo giro.</div>
+        <div class="seq-note">Duas coisas separadas: <strong>faixa</strong> muda <em>quando</em> o padrão entra (entra em N repetições, aceita até M); <strong>interruptor</strong> tira o padrão do jogo por inteiro, sem mexer no que os outros estão fazendo. O pré-alerta sai em (entra − 1) só como observação, com confiança 0,50 — abaixo do corte de 0,55, nunca vira aposta. O <strong>placar</strong> é o walk-forward da fita inteira: vitórias por degrau, estouros e P&L líquido. Vale a partir do próximo giro.</div>
+        <div class="seq-row seq-head"><span>PADRÃO</span><span>ENTRA EM</span><span>ATÉ</span><span>AGORA</span><span>PLACAR (WALK-FORWARD)</span><span>ESTADO</span></div>
         ${rows}
         <div class="seq-foot">
           <span id="seq-status" style="color:var(--muted);">—</span>
@@ -302,6 +309,7 @@
         </div>`;
       document.querySelectorAll('#seq-editor input').forEach((i) => i.addEventListener('input', markDirty));
       if (lastTick) updateSeqLive(lastTick.spins || []);
+      updateSeqScore();
     }
     async function loadSeqTuning() {
       try {
@@ -332,6 +340,24 @@
         const cur = live[m.k];
         el.textContent = cur.len ? `${cur.len}× ${cur.label}` : '—';
         el.className = 'seq-pill' + (min > 0 && cur.len >= min ? ' trigger' : (min > 1 && cur.len === min - 1 ? ' armed' : ''));
+      });
+    }
+    function updateSeqScore() {
+      const byId = {};
+      (lastPatterns || []).forEach((p) => { byId[p.strategy_id] = p; });
+      MATCHERS.forEach((m) => {
+        const el = document.getElementById('seq-score-' + m.id);
+        if (!el) return;
+        const p = byId[m.id];
+        if (!p) {
+          el.textContent = '—';
+          el.className = 'seq-score';
+          return;
+        }
+        const wins = (p.wins_by_step || []).reduce((a, b) => a + b, 0);
+        el.textContent = `${wins}V / ${p.busts}E · ${fmtCents(p.net_pnl_cents)}`;
+        el.className = 'seq-score ' + (p.worth_entering ? 'good' : 'bad');
+        el.title = p.summary || '';
       });
     }
     async function saveSeqTuning() {
@@ -436,6 +462,7 @@
       lb.innerHTML = (t.ladder?.rows || []).map(r => `<tr class="${r.active?'ladder-row-active':''}"><td>${r.active?'▸ '+r.step:r.step}</td><td>${fmtCents(r.stake_per_cover_cents)}</td><td>${fmtCents(r.exposure_cents)}</td><td>${fmtCents(r.cum_loss_cents)}</td></tr>`).join('');
       if (currentTab === 'SEQUENCIAS') {
         updateSeqLive(spins);
+        updateSeqScore();
         return;
       }
       const th = document.getElementById('tab-head');

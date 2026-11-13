@@ -19,7 +19,7 @@ use monster_store::{
     all_ladder_steps, init_pool, insert_intent, insert_spin, IntentDecision, NewIntent, NewSpin,
     SpinSource, SqlitePool,
 };
-use monster_strategy_native::{Matcher, MatcherTuning};
+use monster_strategy_native::{Matcher, MatcherTuning, MATCHER_IDS};
 use monster_ui::FuiController;
 use std::env;
 use std::io::{Read, Write};
@@ -253,6 +253,9 @@ fn spawn_fui_http_server(
                 let resp = serde_json::json!({
                     "current": tuning_snapshot(&tuning),
                     "defaults": MatcherTuning::default(),
+                    // Allowlist do interruptor: o Telegram e a dashboard editam
+                    // pelos mesmos ids, então o nome mora só no strategy-native.
+                    "matchers": MATCHER_IDS,
                 });
                 let body = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string());
                 let out = format!(

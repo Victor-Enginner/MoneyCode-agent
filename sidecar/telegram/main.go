@@ -121,6 +121,8 @@ func main() {
 	log.Printf("[telegram] conectado como @%s (id %d) · core=%s", bot.Username, bot.ID, cfg.Core)
 	if cfg.ChatID == 0 {
 		log.Printf("[telegram] chat_id não configurado: só /whoami responderá até %q ter o seu id", *cfgPath)
+	} else {
+		log.Printf("[telegram] chat autorizado: %d (qualquer outro é ignorado)", cfg.ChatID)
 	}
 
 	sender := newSender(cfg.Token, queueSize)
@@ -266,6 +268,12 @@ func (s *sender) run() {
 
 func pollUpdates(cfg config, send *sender) {
 	offset := int64(0)
+	// Descarta o backlog: um comando digitado enquanto o bot estava fora (um /kill
+	// de ontem, por exemplo) não pode ser executado agora que ele voltou.
+	if last, err := latestUpdateID(cfg.Token); err == nil && last > 0 {
+		offset = last + 1
+		log.Printf("[telegram] backlog descartado até update %d", last)
+	}
 	client := &http.Client{Timeout: (pollTimeout + 10) * time.Second}
 	for {
 		q := url.Values{}
@@ -309,15 +317,21 @@ func pollUpdates(cfg config, send *sender) {
 }
 
 func handleMessage(cfg config, send *sender, chatID int64, text string) {
-	cmd := strings.ToLower(strings.TrimSpace(text))
+	fields := strings.Fields(strings.TrimSpace(text))
+	if len(fields) == 0 {
+		return
+	}
+	cmd := strings.ToLower(fields[0])
 	if i := strings.Index(cmd, "@"); i == 0 {
 		return
 	} else if i > 0 {
 		cmd = cmd[:i]
 	}
+	args := fields[1:]
 
 	// Sem chat_id configurado o bot não aceita ordens: só mostra o id para o operador colar no arquivo.
 	if cfg.ChatID == 0 {
+		log.Printf("[telegram] mensagem de chat %d (não autorizado) — configure este id em config/telegram.json", chatID)
 		if cmd == "/whoami" {
 			send.send(chatID, fmt.Sprintf("Seu chat_id é %d.\nColoque em config/telegram.json: {\"chat_id\": %d}", chatID, chatID))
 			return
@@ -329,10 +343,11 @@ func handleMessage(cfg config, send *sender, chatID int64, text string) {
 		log.Printf("[telegram] comando ignorado de chat não autorizado %d", chatID)
 		return
 	}
+	log.Printf("[telegram] comando %q do chat %d", cmd, chatID)
 
 	switch cmd {
 	case "/start", "/help":
-		send.send(chatID, "MONSTER · comandos\n/status · sessão, banca, degrau, janela\n/banca · saldo e aposta na mesa\n/pnl · resultado e último ganho\n/ladder · escada ativa\n/stop · pausa o executor (captura segue)\n/resume · retoma\n/kill · corta o executor")
+		send.send(chatID, "MONSTER · comandos\n/status · sessão, banca, degrau, janela\n/banca · saldo e aposta na mesa\n/pnl · resultado e último ganho\n/ladder · escada ativa\n/padroes · estado e placar de cada matcher\n/ligar <id> · liga um matcher\n/desligar <id> · tira do jogo\n/faixa <id> <min> <max> · repetições de entrada\n/stop · pausa o executor (captura segue)\n/resume · retoma\n/kill · corta o executor")
 	case "/whoami":
 		send.send(chatID, fmt.Sprintf("chat_id autorizado: %d", chatID))
 	case "/status":
@@ -365,6 +380,68 @@ func handleMessage(cfg config, send *sender, chatID int64, text string) {
 			return
 		}
 		send.send(chatID, ladderText(t))
+	case "/padroes":
+		doc, err := fetchTuning(cfg.Core)
+		if err != nil {
+			send.send(chatID, "core inacessível: "+err.Error())
+			return
+		}
+		send.send(chatID, tuningText(doc))
+	case "/ligar", "/desligar":
+		if len(args) == 0 {
+			send.send(chatID, "uso: "+cmd+" <id>\n/padroes lista os ids")
+			return
+		}
+		doc, err := fetchTuning(cfg.Core)
+		if err != nil {
+			send.send(chatID, "core inacessível: "+err.Error())
+			return
+		}
+		id, ok := resolveMatcherID(args[0], doc.Matchers)
+		if !ok {
+			send.send(chatID, "matcher desconhecido: "+args[0]+" — /padroes")
+			return
+		}
+		off := cmd == "/desligar"
+		if !setDisabled(&doc.Current, id, off) {
+			send.send(chatID, fmt.Sprintf("%s já estava %s", id, stateWord(off)))
+			return
+		}
+		if err := applyTuning(cfg.Core, doc.Current); err != nil {
+			send.send(chatID, "rejeitado: "+err.Error())
+			return
+		}
+		send.send(chatID, fmt.Sprintf("%s agora %s", id, stateWord(off)))
+	case "/faixa":
+		if len(args) < 3 {
+			send.send(chatID, "uso: /faixa <id> <min> <max>\nex.: /faixa coluna 3 5")
+			return
+		}
+		min, errMin := strconv.Atoi(args[1])
+		max, errMax := strconv.Atoi(args[2])
+		if errMin != nil || errMax != nil {
+			send.send(chatID, "min e max precisam ser números")
+			return
+		}
+		doc, err := fetchTuning(cfg.Core)
+		if err != nil {
+			send.send(chatID, "core inacessível: "+err.Error())
+			return
+		}
+		id, ok := resolveMatcherID(args[0], doc.Matchers)
+		if !ok {
+			send.send(chatID, "matcher desconhecido: "+args[0]+" — /padroes")
+			return
+		}
+		if !setRange(&doc.Current, id, min, max) {
+			send.send(chatID, id+" não usa faixa de repetição (parâmetro estatístico)")
+			return
+		}
+		if err := applyTuning(cfg.Core, doc.Current); err != nil {
+			send.send(chatID, "rejeitado: "+err.Error())
+			return
+		}
+		send.send(chatID, fmt.Sprintf("%s entra em %d e aceita até %d repetições", id, min, max))
 	case "/stop":
 		if err := postCmd(cfg.Core, "pause"); err != nil {
 			send.send(chatID, "falha ao pausar: "+err.Error())
@@ -521,6 +598,204 @@ func (w *watcher) scan(cfg config, send *sender, t tick) {
 			w.lastDead = dead
 		}
 	}
+}
+
+// ---- ajuste de padrões (espelha o POST /api/tuning da dashboard) ----
+
+type tuningRange struct {
+	Min int `json:"min"`
+	Max int `json:"max"`
+}
+
+// tuningDoc é o mesmo contrato do config/tuning.json: faixas achatadas + ids desligados.
+type tuningDoc struct {
+	Coluna    tuningRange `json:"coluna"`
+	Duzia     tuningRange `json:"duzia"`
+	Cor       tuningRange `json:"cor"`
+	AltoBaixo tuningRange `json:"alto_baixo"`
+	ParImpar  tuningRange `json:"par_impar"`
+	Disabled  []string    `json:"disabled"`
+}
+
+type tuningEnvelope struct {
+	Current  tuningDoc `json:"current"`
+	Defaults tuningDoc `json:"defaults"`
+	Matchers []string  `json:"matchers"`
+}
+
+// rangeOfID mapeia os cinco matchers que têm faixa de repetição.
+var rangeOfID = map[string]string{
+	"quebra_permanencia_coluna": "coluna",
+	"quebra_permanencia_duzia":  "duzia",
+	"quebra_cor_6x":             "cor",
+	"quebra_alto_baixo_6x":      "alto_baixo",
+	"quebra_par_impar_6x":       "par_impar",
+}
+
+// aliasID aceita nome curto no celular: /desligar cluster, /faixa col 3 5.
+var aliasID = map[string]string{
+	"col":     "quebra_permanencia_coluna",
+	"coluna":  "quebra_permanencia_coluna",
+	"duzia":   "quebra_permanencia_duzia",
+	"dúzia":   "quebra_permanencia_duzia",
+	"cor":     "quebra_cor_6x",
+	"alto":    "quebra_alto_baixo_6x",
+	"baixo":   "quebra_alto_baixo_6x",
+	"par":     "quebra_par_impar_6x",
+	"impar":   "quebra_par_impar_6x",
+	"setor":   "setor_vies",
+	"fib":     "fibonacci_lag",
+	"cluster": "cluster_terminal",
+	"familia": "cluster_final",
+}
+
+func fetchTuning(core string) (tuningEnvelope, error) {
+	var env tuningEnvelope
+	err := callJSON(http.MethodGet, strings.TrimRight(core, "/")+"/api/tuning", nil, &env, 5*time.Second)
+	return env, err
+}
+
+// applyTuning manda o documento inteiro (faixas + desligados) e devolve o erro do core.
+func applyTuning(core string, doc tuningDoc) error {
+	var out struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := callJSON(http.MethodPost, strings.TrimRight(core, "/")+"/api/tuning", doc, &out, 5*time.Second); err != nil {
+		return err
+	}
+	if !out.OK && out.Error != "" {
+		return errors.New(out.Error)
+	}
+	return nil
+}
+
+func resolveMatcherID(arg string, ids []string) (string, bool) {
+	want := strings.ToLower(arg)
+	for _, id := range ids {
+		if strings.EqualFold(id, want) {
+			return id, true
+		}
+	}
+	if id, ok := aliasID[want]; ok {
+		return id, true
+	}
+	// Prefixo único: /desligar cluster_ resolve cluster_terminal.
+	var match string
+	for _, id := range ids {
+		if strings.HasPrefix(id, want) {
+			if match != "" {
+				return "", false
+			}
+			match = id
+		}
+	}
+	return match, match != ""
+}
+
+func setDisabled(doc *tuningDoc, id string, off bool) bool {
+	for i, d := range doc.Disabled {
+		if d == id {
+			if !off {
+				doc.Disabled = append(doc.Disabled[:i], doc.Disabled[i+1:]...)
+				return true
+			}
+			return false
+		}
+	}
+	if !off {
+		return false
+	}
+	doc.Disabled = append(doc.Disabled, id)
+	return true
+}
+
+func setRange(doc *tuningDoc, id string, min, max int) bool {
+	field, ok := rangeOfID[id]
+	if !ok {
+		return false
+	}
+	switch field {
+	case "coluna":
+		doc.Coluna = tuningRange{Min: min, Max: max}
+	case "duzia":
+		doc.Duzia = tuningRange{Min: min, Max: max}
+	case "cor":
+		doc.Cor = tuningRange{Min: min, Max: max}
+	case "alto_baixo":
+		doc.AltoBaixo = tuningRange{Min: min, Max: max}
+	case "par_impar":
+		doc.ParImpar = tuningRange{Min: min, Max: max}
+	}
+	return true
+}
+
+func stateWord(off bool) string {
+	if off {
+		return "DESLIGADO"
+	}
+	return "LIGADO"
+}
+
+// tuningText lista os matchers com estado e faixa, para decidir do celular.
+func tuningText(env tuningEnvelope) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Leitura de padrões · %d/%d ligados\n", len(env.Matchers)-len(env.Current.Disabled), len(env.Matchers))
+	for _, id := range env.Matchers {
+		off := false
+		for _, d := range env.Current.Disabled {
+			if d == id {
+				off = true
+			}
+		}
+		state := "ON "
+		if off {
+			state = "OFF"
+		}
+		faixa := "sem faixa"
+		if field, ok := rangeOfID[id]; ok {
+			r := docRange(env.Current, field)
+			faixa = fmt.Sprintf("%d..=%d", r.Min, r.Max)
+		}
+		fmt.Fprintf(&b, "%s %-30s %s\n", state, id, faixa)
+	}
+	b.WriteString("\n/ligar <id> · /desligar <id> · /faixa <id> <min> <max>")
+	return b.String()
+}
+
+func docRange(doc tuningDoc, field string) tuningRange {
+	switch field {
+	case "coluna":
+		return doc.Coluna
+	case "duzia":
+		return doc.Duzia
+	case "cor":
+		return doc.Cor
+	case "alto_baixo":
+		return doc.AltoBaixo
+	case "par_impar":
+		return doc.ParImpar
+	}
+	return tuningRange{}
+}
+
+// latestUpdateID lê o update mais recente sem consumi-lo em lote, para pular
+// comandos antigos quando o bot volta.
+func latestUpdateID(token string) (int64, error) {
+	q := url.Values{}
+	q.Set("offset", "-1")
+	q.Set("timeout", "0")
+	var out struct {
+		OK     bool     `json:"ok"`
+		Result []update `json:"result"`
+	}
+	if err := callJSON(http.MethodGet, apiURL(token, "getUpdates", q), nil, &out, 15*time.Second); err != nil {
+		return 0, err
+	}
+	if len(out.Result) == 0 {
+		return 0, nil
+	}
+	return out.Result[len(out.Result)-1].UpdateID, nil
 }
 
 // ---- formatação ----
