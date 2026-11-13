@@ -140,5 +140,19 @@ Write-Host "[MONSTER] Fechar esta janela NAO para o MONSTER. Para parar: stop-mo
 Start-Process "http://127.0.0.1:8791"
 
 # 6. Mostra o log do core ao vivo (so leitura).
+Write-Host "[MONSTER] Ctrl+C aqui PARA o MONSTER (watchdog, core, captura). Fechar no X mantem rodando." -ForegroundColor Yellow
 Write-Host "---------------------------- log do core ----------------------------" -ForegroundColor DarkGray
-Get-Content "$LogsDir\core-live.log" -Tail 20 -Wait
+$stopped = $false
+try {
+    Get-Content "$LogsDir\core-live.log" -Tail 20 -Wait
+} finally {
+    # Ctrl+C interrompe o Get-Content e cai aqui: para tudo (o Chrome fica, sessao logada preservada).
+    # Fechar a janela no X mata o processo sem passar por aqui: o MONSTER continua rodando.
+    if (-not $stopped) {
+        $stopped = $true
+        Set-Content -Path "$LogsDir\monster-stop.flag" -Value "ctrl-c"
+        Get-Process monster-core, monster-capture, monster-telegram -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Write-Host ""
+        Write-Host "[MONSTER] Parado por Ctrl+C. Para voltar: atalho MONSTER LIVE." -ForegroundColor Yellow
+    }
+}
