@@ -47,7 +47,7 @@ Capturado em `logs/oplog.bin` e impresso no terminal com `--dump-op`:
 
 ## 4. Procedimento de Captura Canônica (5 Apostas Manuais de R$ 0,10)
 
-Com o Chrome aberto na mesa da Roleta Brasileira (`jogatudo.com`), execute o `start-probe.bat` (ou rode manualmente):
+Com o Chrome aberto na mesa da Roleta Brasileira (`jogatudo.com`), execute o `start-monster.bat -Probe` (ou rode manualmente):
 
 ```powershell
 cd "O:\Archives\Eistein\FUI AGENT ROULLET\sidecar"

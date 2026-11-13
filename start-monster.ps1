@@ -1,19 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
-# Inicia o ecossistema MONSTER (Fases 0-5): Chrome + Sidecar Go + Core Rust.
-# Default e --dry-run. Dinheiro real exige `-Live` explicito na linha de comando.
+# Iniciador unico do MONSTER: Chrome dedicado + sidecar Go + core Rust.
+#
+#   start-monster                  observa a mesa (--dry-run, default, NAO aposta)
+#   start-monster -Live            executa de verdade (aposta dinheiro real)
+#   start-monster -Probe           so o sidecar em --ws-probe (diagnostico de WS, sem core)
+#
 # Tudo gravado estritamente no disco O: (zero escrita no disco C:).
 
 param(
-    [switch]$Live
+    [switch]$Live,
+    [switch]$Probe
 )
 
 $ErrorActionPreference = "Stop"
-$TargetUrl  = "https://www.jogatudo.com/pt-BR/game/playtech-brasileira.roleta-brasileira"
-$ProfileDir = "O:\Archives\Eistein\chromium-profile"
-$RootDir    = "O:\Archives\Eistein\FUI AGENT ROULLET"
-$GoCacheDir = "$RootDir\target\go-cache"
-$GoTmpDir   = "$RootDir\target\go-tmp"
+$TargetUrl   = "https://www.jogatudo.com/pt-BR/game/playtech-brasileira.roleta-brasileira"
+$ProfileDir  = "O:\Archives\Eistein\chromium-profile"
+$RootDir     = "O:\Archives\Eistein\FUI AGENT ROULLET"
+$GoCacheDir  = "$RootDir\target\go-cache"
+$GoTmpDir    = "$RootDir\target\go-tmp"
 $CargoTarget = "$RootDir\target"
+$ChromeExe   = "O:\Archives\Eistein\chromium\chrome.exe"
+
+# `-Probe` nao sobe o core, entao `-Live` nao tem efeito nenhum ali.
+if ($Probe) { $Live = $false }
 
 foreach ($dir in @($ProfileDir, $GoCacheDir, $GoTmpDir, $CargoTarget)) {
     if (-not (Test-Path $dir)) {
@@ -28,13 +37,24 @@ $env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-msvc"
 $env:TEMP             = $GoTmpDir
 $env:TMP              = $GoTmpDir
 
+$ModeLabel = if ($Probe) { "WS-PROBE (diagnostico, sem core)" } elseif ($Live) { "LIVE (DINHEIRO REAL)" } else { "DRY-RUN (observa, nao aposta)" }
 Write-Host "================================================================" -ForegroundColor Cyan
-Write-Host " MONSTER (Fases 0-5) - DAG + Risco + Executor --dry-run" -ForegroundColor Cyan
+Write-Host " MONSTER - Roleta Brasileira" -ForegroundColor Cyan
+Write-Host " Modo: $ModeLabel" -ForegroundColor $(if ($Live) { "Red" } else { "Cyan" })
 Write-Host "================================================================" -ForegroundColor Cyan
 
-$ChromeExe = "O:\Archives\Eistein\chromium\chrome.exe"
 if (-not (Test-Path $ChromeExe)) {
     Write-Error "Chromium dedicado nao encontrado em $ChromeExe"
+}
+
+# Um segundo core brigaria pela porta 8791 e gravaria decisoes em paralelo.
+if (-not $Probe) {
+    $RunningCore = Get-Process monster-core -ErrorAction SilentlyContinue
+    if ($RunningCore) {
+        Write-Host "[MONSTER] ja existe um monster-core rodando (PID $($RunningCore[0].Id))." -ForegroundColor Red
+        Write-Host "[MONSTER] feche antes de iniciar outro:  taskkill /PID $($RunningCore[0].Id) /F" -ForegroundColor Red
+        exit 1
+    }
 }
 
 $CdpAlive = $false
@@ -42,6 +62,7 @@ try {
     $ver = Invoke-RestMethod -Uri "http://127.0.0.1:9222/json/version" -TimeoutSec 1
     if ($ver.Browser -match "131\.") {
         $CdpAlive = $true
+        Write-Host "[MONSTER] Chromium dedicado ja esta na porta 9222 - conectando na mesa." -ForegroundColor Green
     } else {
         $Port9222 = Get-NetTCPConnection -LocalPort 9222 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($Port9222) {
@@ -59,7 +80,7 @@ if (-not $CdpAlive) {
         Remove-Item -Force -ErrorAction SilentlyContinue $SingletonLock
     }
 
-    Write-Host "[MONSTER] Abrindo MESA DA ROLETA no Chromium dedicado ($ChromeExe)..." -ForegroundColor Cyan
+    Write-Host "[MONSTER] Abrindo a mesa no Chromium dedicado ($ChromeExe)..." -ForegroundColor Cyan
     Start-Process -FilePath $ChromeExe -ArgumentList @(
         "--remote-debugging-port=9222",
         "--user-data-dir=$ProfileDir",
@@ -75,16 +96,24 @@ if (-not $CdpAlive) {
     Start-Sleep -Seconds 3
 }
 
+if ($Probe) {
+    Write-Host "[MONSTER] Sidecar em --ws-probe --strict --dump-frames=3 --dump-op (Ctrl+C encerra)." -ForegroundColor Yellow
+    Set-Location "$RootDir\sidecar"
+    go run ./cmd/capture --ws-probe --strict --dump-frames=3 --dump-op
+    exit 0
+}
+
 $HealthAlive = $false
 try {
     $null = Invoke-RestMethod -Uri "http://127.0.0.1:8790/health" -TimeoutSec 1
     $HealthAlive = $true
+    Write-Host "[MONSTER] Sidecar ja esta vivo na porta 8787 - reaproveitando." -ForegroundColor Green
 } catch {
     $HealthAlive = $false
 }
 
 if (-not $HealthAlive) {
-    Write-Host "[MONSTER] Iniciando Sidecar Go em segundo plano (porta 8787)..." -ForegroundColor Green
+    Write-Host "[MONSTER] Iniciando sidecar Go em segundo plano (porta 8787)..." -ForegroundColor Green
     Start-Process powershell -ArgumentList @(
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
@@ -93,11 +122,11 @@ if (-not $HealthAlive) {
     Start-Sleep -Seconds 3
 }
 
-Write-Host "[MONSTER] Abrindo painel FUI em http://127.0.0.1:8791 e iniciando monster-core..." -ForegroundColor Yellow
+Write-Host "[MONSTER] Painel: http://127.0.0.1:8791" -ForegroundColor Yellow
 Start-Process "http://127.0.0.1:8791"
 Set-Location $RootDir
 if ($Live) {
-    Write-Host "[MONSTER] ATENCAO: -Live passado, o executor VAI APOSTAR DINHEIRO REAL." -ForegroundColor Red
+    Write-Host "[MONSTER] ATENCAO: -Live ativo, o executor VAI APOSTAR DINHEIRO REAL." -ForegroundColor Red
     cargo run --offline -p monster-core -- --live
 } else {
     cargo run --offline -p monster-core -- --dry-run
