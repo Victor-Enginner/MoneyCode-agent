@@ -184,9 +184,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stream_addr = DEFAULT_STREAM_ADDR.to_string();
     let mut db_uri = "O:/Archives/Eistein/FUI AGENT ROULLET/monster.db".to_string();
     let mut bankroll_cents: i64 = 5_088;
+    // Padrão definido pelo gate do §13 com banca ~R$ 80: base 20¢ e 3 degraus
+    // (20/60/180, perda máxima 520¢) dão P(ruína)=0,00%; com 4 degraus sobe para 8,16% e reprova.
     let mut cfg = Cfg {
-        base_cents: 10,
-        max_steps: 4,
+        base_cents: 20,
+        max_steps: 3,
         max_bet_per_cover_cents: 100_000,
         max_exposure_pct: 0.10,
         stop_loss_cents: 1600,

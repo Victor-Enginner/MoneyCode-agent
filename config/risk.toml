@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-# Configuração de risco calibrada para banca de R$ 70,58 (escada de 4 degraus: 10, 30, 90, 270 centavos).
-# Exposição máxima no degrau 4 = 540 centavos (R$ 5,40); estouro acumulado = 800 centavos (R$ 8,00).
-base_cents = 10
-max_steps = 4
+# Configuração de risco aprovada pelo Monte Carlo do §13 (10.000 sessões de 1 h) para banca de ~R$ 80.
+# Escada de 3 degraus: 20, 60, 180 centavos. Exposição máxima no degrau 3 = 360 centavos (R$ 3,60);
+# perda acumulada máxima = 520 centavos (R$ 5,20).
+# Medição: base 20¢ · 3 degraus -> P(ruína)=0,00% · DD p95=520¢. Com 4 degraus sobe a 8,16% e reprova o gate.
+base_cents = 20
+max_steps = 3
 max_bet_per_cover_cents = 100000
 max_exposure_pct = 0.10
 stop_loss_cents = 1600
