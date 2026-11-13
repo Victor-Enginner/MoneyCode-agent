@@ -212,6 +212,19 @@ pub trait CdpActuator: Send + Sync {
         let (x, y) = cal.coords(cover)?;
         self.click(x, y)
     }
+    /// Clica `n` vezes na mesma cobertura depositando `n` fichas.
+    ///
+    /// A implementação padrão repete `click_cover`, mas o atuador live sobrescreve para resolver
+    /// o alvo UMA vez e despachar as `n` fichas naquela coordenada: resolver por ficha custava
+    /// varredura de DOM + espera de janela + 280 ms cada, e uma cobertura de 5 fichas gastava ~3 s
+    /// dos ~12 s de janela — quando ela fechava no meio, o canvas recusava as fichas restantes e
+    /// o total ficava menor que o esperado (`cover_mismatch`).
+    fn click_cover_repeat(&self, cover: &Cover, cal: &Calibration, n: u32) -> Result<(), ExecError> {
+        for _ in 0..n {
+            self.click_cover(cover, cal)?;
+        }
+        Ok(())
+    }
     /// Seleciona a ficha de denominação `denom_cents`.
     fn click_chip(&self, denom_cents: u64, cal: &Calibration) -> Result<(), ExecError>;
     /// Lê o valor total acumulado no preview do bet slip antes de confirmar.
@@ -487,10 +500,21 @@ impl LiveHttpActuator {
     }
 
     fn post_target_click(&self, target: &str, x: i32, y: i32) -> Result<(), ExecError> {
+        self.post_target_click_repeat(target, x, y, 1)
+    }
+
+    /// Pede ao sidecar `repeat` cliques na mesma coordenada resolvida de `target`.
+    fn post_target_click_repeat(
+        &self,
+        target: &str,
+        x: i32,
+        y: i32,
+        repeat: u32,
+    ) -> Result<(), ExecError> {
         use std::io::{Read, Write};
         use std::net::TcpStream;
 
-        let body = format!(r#"{{"target":"{target}","x":{x},"y":{y}}}"#);
+        let body = format!(r#"{{"target":"{target}","x":{x},"y":{y},"repeat":{repeat}}}"#);
         let req = format!(
             "POST /act/click HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             self.sidecar_addr,
@@ -525,13 +549,20 @@ impl CdpActuator for LiveHttpActuator {
     }
 
     fn click_cover(&self, cover: &Cover, cal: &Calibration) -> Result<(), ExecError> {
+        self.click_cover_repeat(cover, cal, 1)
+    }
+
+    fn click_cover_repeat(&self, cover: &Cover, cal: &Calibration, n: u32) -> Result<(), ExecError> {
+        if n == 0 {
+            return Ok(());
+        }
         let (x, y) = cal.coords(cover)?;
         if let Ok(mut g) = self.staged_state.lock() {
             if let Some(chip) = g.0 {
-                g.1 = g.1.saturating_add(chip);
+                g.1 = g.1.saturating_add(chip.saturating_mul(n as u64));
             }
         }
-        self.post_target_click(&cover.canonical_key(), x, y)
+        self.post_target_click_repeat(&cover.canonical_key(), x, y, n)
     }
 
     fn click_chip(&self, denom_cents: u64, cal: &Calibration) -> Result<(), ExecError> {
@@ -737,7 +768,9 @@ pub fn place(
     // Seleciona a ficha no chip-rack apenas quando a denominação muda, evitando cliques redundantes entre as coberturas.
     let mut last_denom: Option<u64> = None;
     let mut cumulative_expected: u64 = 0;
-    let mut verified_so_far: u64 = 0;
+    // Acumulados legítimos intermediários: o slip anima ficha por ficha, então ver 80¢ enquanto
+    // o esperado já é 90¢ (a cobertura anterior inteira) não é divergência — é o pano desenhando.
+    let mut legit_prefixes: Vec<u64> = vec![0];
     let apply_started = std::time::Instant::now();
     let applied = (|| -> Result<(), ExecError> {
     for (cover, cents) in &plan.covers {
@@ -752,21 +785,20 @@ pub fn place(
                 cdp.click_chip(denom, cal)?;
                 last_denom = Some(denom);
             }
-            for _ in 0..n {
-                cdp.click_cover(cover, cal)?;
-            }
+            cdp.click_cover_repeat(cover, cal, u32::from(n))?;
         }
 
         // 2.1 Confere o acumulado APÓS CADA cobertura: é assim que uma dúzia de 40¢ ao lado de uma de 20¢
         // é detectada antes de confirmar, em vez de escondida atrás de um total que fecha por coincidência.
         cumulative_expected += *cents;
+        legit_prefixes.push(cumulative_expected);
         let seen = read_settled(cdp, cumulative_expected)?;
         if seen == cumulative_expected {
-            verified_so_far = seen;
             continue;
         }
-        // Preview ainda não reagiu a esta cobertura (mesa lenta): validação fica para o total final.
-        if seen == verified_so_far {
+        // Preview ainda não reagiu a esta cobertura (mesa lenta) ou mostra o acumulado de uma
+        // cobertura anterior: validação fica para o total final, não é divergência.
+        if legit_prefixes.contains(&seen) {
             continue;
         }
         let elapsed_ms = apply_started.elapsed().as_millis();

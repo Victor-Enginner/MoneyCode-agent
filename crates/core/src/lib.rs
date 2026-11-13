@@ -178,6 +178,97 @@ mod tests {
         assert_eq!(orphans, 0, "Gate Fase 5 exige zero órfãos após 200 entradas");
     }
 
+    /// Espião que conta se o executor pediu a cobertura em lote (`click_cover_repeat`) ou
+    /// ficha por ficha (`click_cover`). Resolver o alvo por ficha custava varredura de DOM +
+    /// espera de janela + 280 ms cada e estourava a janela de aposta no meio da cobertura.
+    struct RepeatSpy {
+        inner: DryRunActuator,
+        repeats: std::sync::Mutex<Vec<u32>>,
+        singles: std::sync::Mutex<u32>,
+    }
+
+    impl RepeatSpy {
+        fn new() -> Self {
+            Self {
+                inner: DryRunActuator::new(),
+                repeats: std::sync::Mutex::new(Vec::new()),
+                singles: std::sync::Mutex::new(0),
+            }
+        }
+    }
+
+    impl CdpActuator for RepeatSpy {
+        fn click(&self, x: i32, y: i32) -> Result<(), ExecError> {
+            self.inner.click(x, y)
+        }
+        fn click_cover(&self, cover: &Cover, cal: &Calibration) -> Result<(), ExecError> {
+            if let Ok(mut n) = self.singles.lock() {
+                *n += 1;
+            }
+            self.inner.click_cover(cover, cal)
+        }
+        fn click_cover_repeat(
+            &self,
+            cover: &Cover,
+            cal: &Calibration,
+            n: u32,
+        ) -> Result<(), ExecError> {
+            if let Ok(mut v) = self.repeats.lock() {
+                v.push(n);
+            }
+            self.inner.click_cover_repeat(cover, cal, n)
+        }
+        fn click_chip(&self, denom_cents: u64, cal: &Calibration) -> Result<(), ExecError> {
+            self.inner.click_chip(denom_cents, cal)
+        }
+        fn read_bet_total(&self) -> Result<u64, ExecError> {
+            self.inner.read_bet_total()
+        }
+        fn clear_bets(&self, cal: &Calibration) -> Result<(), ExecError> {
+            self.inner.clear_bets(cal)
+        }
+        fn confirm(&self, cal: &Calibration) -> Result<(), ExecError> {
+            self.inner.confirm(cal)
+        }
+        fn collect_acks(&self, plan: &Plan) -> Result<Vec<CoverAck>, ExecError> {
+            self.inner.collect_acks(plan)
+        }
+    }
+
+    #[test]
+    fn cobertura_com_varias_fichas_pede_o_lote_uma_vez_so() {
+        let pool = init_pool(":memory:").expect("init in-memory sqlite");
+        let spy = RepeatSpy::new();
+        let cal = Calibration::default();
+        let kill_switch = KillSwitch::new();
+
+        // 30¢ numa dúzia com a menor ficha de 10¢: três fichas depois de um único clique de ficha.
+        let plan = Plan {
+            spin_id: "spin-lote-1".to_string(),
+            strategy_id: "cluster_terminal".to_string(),
+            ladder_step: 1,
+            stake_per_cover_cents: 30,
+            total_cents: 30,
+            ev_cents: -1,
+            confidence: 0.75,
+            covers: vec![(Cover::Dozen(1), 30)],
+            chips_per_cover: vec![(10, 3)],
+        };
+
+        let fills = place(&pool, &spy, &plan, &cal, &kill_switch, 1_730_000_020_000)
+            .expect("entrada de uma cobertura deve fechar com preview correto");
+        assert_eq!(fills.preview_cents, 30);
+
+        let repeats = spy.repeats.lock().map(|v| v.clone()).unwrap_or_default();
+        assert_eq!(
+            repeats,
+            vec![3],
+            "a cobertura deve resolver o alvo UMA vez e despachar 3 fichas nele"
+        );
+        let singles = spy.singles.lock().map(|n| *n).unwrap_or(u32::MAX);
+        assert_eq!(singles, 0, "nenhuma ficha pode ser clicada com resolução própria");
+    }
+
     #[test]
     fn preview_mismatch_clears_bets_and_aborts_before_confirm() {
         let pool = init_pool(":memory:").expect("init in-memory sqlite");
