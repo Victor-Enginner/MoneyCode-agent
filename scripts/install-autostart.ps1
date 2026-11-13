@@ -12,6 +12,10 @@ $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 # Rechecagem a cada 5 min: se o watchdog morrer (console fechado, crash), o Windows o religa.
 # O lock do proprio watchdog faz a instancia extra sair na hora.
 $trigger.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)).Repetition
+# A repeticao presa ao logon so comeca a contar no PROXIMO logon. Este segundo gatilho comeca
+# agora e repete a cada 5 min para sempre: o watchdog e religado mesmo sem sair do Windows.
+$now = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5)
+$trigger = @($trigger, $now)
 $settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
 Register-ScheduledTask -TaskName 'MONSTER Watchdog' -Action $action -Trigger $trigger -Settings $settings `
