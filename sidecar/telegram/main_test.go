@@ -57,3 +57,32 @@ func TestLadderTextMarksActiveStep(t *testing.T) {
 		t.Fatalf("degrau ativo não marcado: %q", out)
 	}
 }
+
+func TestSettlementTextNoFormatoDeGrupo(t *testing.T) {
+	var tk tick
+	bank := int64(5127)
+	pnl := int64(120)
+	tk.Session.BankrollCents = &bank
+	tk.Session.PnlCents = &pnl
+	win := settlement{StrategyID: "quebra_permanencia_duzia", Won: true, DeltaCents: 20, Step: 1, MaxSteps: 3, Number: 15, Ts: 10}
+	out := settlementText(tk, win, 3, 1)
+	for _, want := range []string{
+		"🟢 OPERAÇÃO BEM SUCEDIDA ✅",
+		"🎲 Número: 15",
+		"degrau 1/3",
+		"+R$ 0,20",
+		"🟢 3 | 🔴 1",
+		"taxa 75.0%",
+		"Banca R$ 51,27",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("mensagem sem %q:\n%s", want, out)
+		}
+	}
+
+	loss := settlement{StrategyID: "cluster_terminal", Won: false, DeltaCents: -40, Step: 2, MaxSteps: 3, Number: 0, Ts: 11}
+	out = settlementText(tk, loss, 0, 1)
+	if !strings.Contains(out, "🔴 OPERAÇÃO MAL SUCEDIDA ❌") || !strings.Contains(out, "-R$ 0,40") {
+		t.Fatalf("derrota formatada errado:\n%s", out)
+	}
+}

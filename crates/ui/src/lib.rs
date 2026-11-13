@@ -141,6 +141,28 @@ pub enum UiError {
     InvalidParam(String),
 }
 
+/// Resultado de uma entrada já resolvida pela mesa.
+///
+/// Existe para quem precisa confirmar a operação fora da UI (Telegram): o tick carrega
+/// o último resultado com o delta real do reconciliador, nunca uma dedução de saldo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettlementDto {
+    /// Estratégia que estava em jogo.
+    pub strategy_id: String,
+    /// Vitória em pelo menos uma cobertura confirmada.
+    pub won: bool,
+    /// Delta líquido esperado em centavos (`+stake` na vitória, perda da exposição na derrota).
+    pub delta_cents: i64,
+    /// Degrau jogado.
+    pub step: u8,
+    /// Número sorteado.
+    pub number: u8,
+    /// Degraus da escada vigentes na hora (`1` = sem escada).
+    pub max_steps: u8,
+    /// Timestamp do spin que resolveu a entrada.
+    pub ts: i64,
+}
+
 /// DTO do painel A / C / D (`get_session`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionDto {
@@ -170,6 +192,9 @@ pub struct SessionDto {
     pub remaining_window_ms: Option<u32>,
     /// Texto do banner de 28px quando em `DEGRADED` / `ERRO` / `KILLED`.
     pub banner_detail: Option<String>,
+    /// Último resultado de entrada resolvida (`None` enquanto nada foi jogado).
+    #[serde(default)]
+    pub last_settlement: Option<SettlementDto>,
 }
 
 /// DTO de saúde das 4 fontes (`get_health`).
@@ -372,6 +397,7 @@ impl FuiController {
         Self {
             inner: Arc::new(Mutex::new(RuntimeUiState {
                 session: SessionDto {
+                    last_settlement: None,
                     state: GlobalState::Observando,
                     uptime_sec: None,
                     bankroll_cents: None,
@@ -718,6 +744,13 @@ impl FuiController {
         g.health.exec = LedStatus::Bad;
         warn!(shortcut = GLOBAL_KILL_SHORTCUT, "FUI entrou em estado KILLED");
         Ok(g.session.state)
+    }
+
+    /// Publica o resultado da entrada resolvida para quem confirma operação fora da UI.
+    pub fn sync_settlement(&self, settlement: SettlementDto) -> Result<(), UiError> {
+        let mut g = self.inner.lock().map_err(|_| UiError::StateLock)?;
+        g.session.last_settlement = Some(settlement);
+        Ok(())
     }
 
     /// Comando IPC de escrita: `set_base` (§7).

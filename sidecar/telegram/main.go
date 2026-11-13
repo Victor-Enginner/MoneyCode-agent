@@ -52,16 +52,17 @@ type update struct {
 type tick struct {
 	Seq     uint64 `json:"seq"`
 	Session struct {
-		State             string  `json:"state"`
-		UptimeSec         *uint64 `json:"uptime_sec"`
-		BankrollCents     *int64  `json:"bankroll_cents"`
-		PnlCents          *int64  `json:"pnl_cents"`
-		TableBetCents     *uint64 `json:"table_bet_cents"`
-		LastWinCents      *uint64 `json:"last_win_cents"`
-		ActiveCoverLabel  *string `json:"active_cover_label"`
-		ExposureCents     *uint64 `json:"exposure_cents"`
-		RemainingWindowMs *uint32 `json:"remaining_window_ms"`
-		BannerDetail      *string `json:"banner_detail"`
+		State             string      `json:"state"`
+		UptimeSec         *uint64     `json:"uptime_sec"`
+		BankrollCents     *int64      `json:"bankroll_cents"`
+		PnlCents          *int64      `json:"pnl_cents"`
+		TableBetCents     *uint64     `json:"table_bet_cents"`
+		LastWinCents      *uint64     `json:"last_win_cents"`
+		ActiveCoverLabel  *string     `json:"active_cover_label"`
+		ExposureCents     *uint64     `json:"exposure_cents"`
+		RemainingWindowMs *uint32     `json:"remaining_window_ms"`
+		BannerDetail      *string     `json:"banner_detail"`
+		Settlement        *settlement `json:"last_settlement"`
 	} `json:"session"`
 	Health struct {
 		Ws         string  `json:"ws"`
@@ -490,6 +491,30 @@ func postCmd(core, cmd string) error {
 	return nil
 }
 
+// settlementText monta a confirmação no formato de grupo: emoji, número, padrão,
+// resultado e o placar acumulado desde que este bot subiu.
+func settlementText(t tick, s settlement, wins, losses int) string {
+	head := "🔴 OPERAÇÃO MAL SUCEDIDA ❌"
+	if s.Won {
+		head = "🟢 OPERAÇÃO BEM SUCEDIDA ✅"
+	}
+	sign := ""
+	if s.DeltaCents >= 0 {
+		sign = "+"
+	}
+	total := wins + losses
+	rate := 0.0
+	if total > 0 {
+		rate = float64(wins) / float64(total) * 100
+	}
+	return fmt.Sprintf(
+		"%s\n🎲 Número: %d\n🎯 %s · degrau %d/%d\n💰 Resultado: %s%s\n📊 Partidas: 🟢 %d | 🔴 %d · taxa %.1f%%\n🏦 Banca %s · P&L %s",
+		head, s.Number, s.StrategyID, s.Step, s.MaxSteps,
+		sign, centsI(s.DeltaCents),
+		wins, losses, rate,
+		cents(t.Session.BankrollCents), cents(t.Session.PnlCents))
+}
+
 func statusText(t tick) string {
 	win := "—"
 	if t.Session.RemainingWindowMs != nil {
@@ -534,11 +559,25 @@ func stepsLabel(t tick) string {
 
 // ---- alertas (zero ruído: só os cinco eventos do §11) ----
 
+// settlement é o resultado que o core publica depois de reconciliar a entrada.
+type settlement struct {
+	StrategyID string `json:"strategy_id"`
+	Won        bool   `json:"won"`
+	DeltaCents int64  `json:"delta_cents"`
+	Step       uint8  `json:"step"`
+	Number     uint8  `json:"number"`
+	MaxSteps   uint8  `json:"max_steps"`
+	Ts         int64  `json:"ts"`
+}
+
 type watcher struct {
-	seen      map[int64]struct{}
-	seeded    bool
-	lastState string
-	lastDead  string
+	seen           map[int64]struct{}
+	seeded         bool
+	lastState      string
+	lastDead       string
+	lastSettlement int64
+	wins           int
+	losses         int
 }
 
 func watchAlerts(cfg config, send *sender, every time.Duration) {
@@ -563,6 +602,9 @@ func (w *watcher) scan(cfg config, send *sender, t tick) {
 		w.seeded = true
 		w.lastState = t.Session.State
 		w.lastDead = derefS(t.Health.DeadSource)
+		if t.Session.Settlement != nil {
+			w.lastSettlement = t.Session.Settlement.Ts
+		}
 		return
 	}
 
@@ -574,8 +616,10 @@ func (w *watcher) scan(cfg config, send *sender, t tick) {
 			w.seen[d.ID] = struct{}{}
 			switch strings.ToLower(d.Decision) {
 			case "placed":
-				send.send(cfg.ChatID, fmt.Sprintf("ENTRADA · %s · conf %s\n%s",
-					d.StrategyID, conf(d.Confidence), derefS(d.Reason)))
+				send.send(cfg.ChatID, fmt.Sprintf(
+					"🍀 ENTRADA CONFIRMADA 🍀\n🎯 %s · confiança %s\n🧾 %s\n🏦 Banca %s · P&L %s",
+					d.StrategyID, conf(d.Confidence), derefS(d.Reason),
+					cents(t.Session.BankrollCents), cents(t.Session.PnlCents)))
 			case "aborted", "orphan":
 				reason := strings.ToLower(derefS(d.Reason))
 				if strings.Contains(reason, "ladderblown") || strings.Contains(reason, "estouro") ||
@@ -590,6 +634,18 @@ func (w *watcher) scan(cfg config, send *sender, t tick) {
 				send.send(cfg.ChatID, fmt.Sprintf("ALERTA · estado %s\n%s", t.Session.State, derefS(t.Session.BannerDetail)))
 			}
 			w.lastState = t.Session.State
+		}
+
+		// Resultado confirmado: mesma linguagem dos grupos de operação, mas com o
+		// delta do reconciliador — nada de deduzir vitória pelo saldo.
+		if s := t.Session.Settlement; s != nil && s.Ts != w.lastSettlement {
+			w.lastSettlement = s.Ts
+			if s.Won {
+				w.wins++
+			} else {
+				w.losses++
+			}
+			send.send(cfg.ChatID, settlementText(t, *s, w.wins, w.losses))
 		}
 
 		dead := derefS(t.Health.DeadSource)

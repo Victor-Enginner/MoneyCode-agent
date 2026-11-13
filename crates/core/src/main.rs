@@ -13,14 +13,15 @@ use monster_core::{
     PlayedEntry, Window30, HISTORY_CAPACITY, WINDOW_CAPACITY,
 };
 use monster_risk::{
-    run_monte_carlo, run_monte_carlo_numbers, Cfg, McParams, NumbersMcParams, State, Verdict,
+    cum_loss_cents, run_monte_carlo, run_monte_carlo_numbers, stake_cents, Cfg, McParams,
+    NumbersMcParams, State, Verdict,
 };
 use monster_store::{
     all_ladder_steps, init_pool, insert_intent, insert_spin, IntentDecision, NewIntent, NewSpin,
     SpinSource, SqlitePool,
 };
 use monster_strategy_native::{Matcher, MatcherTuning, MATCHER_IDS};
-use monster_ui::FuiController;
+use monster_ui::{FuiController, SettlementDto};
 use std::env;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -84,6 +85,58 @@ fn matchers_now(shared: &Arc<Mutex<MatcherTuning>>) -> Vec<Arc<dyn Matcher>> {
         Ok(g) => g.matchers(),
         Err(poisoned) => poisoned.into_inner().matchers(),
     }
+}
+
+/// Ficha de entrada escolhida na dashboard: o valor sobrevive ao restart.
+const STAKE_PATH: &str = "O:/Archives/Eistein/FUI AGENT ROULLET/config/stake.json";
+
+/// Fichas que o operador pode escolher na FUI (centavos). Fora desta lista é recusado:
+/// cada valor muda a escada e precisa passar pelo Monte Carlo do §13.
+const ALLOWED_BASES: [u64; 4] = [10, 20, 50, 100];
+
+/// Lê a ficha salva; valor inválido ou não permitido volta ao padrão do `Cfg`.
+fn load_stake_base(path: &str, fallback: u64) -> u64 {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return fallback;
+    };
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(v) => match v.get("base_cents").and_then(|b| b.as_u64()) {
+            Some(base) if ALLOWED_BASES.contains(&base) => base,
+            _ => fallback,
+        },
+        Err(_) => fallback,
+    }
+}
+
+/// Persiste a ficha escolhida para o próximo boot.
+fn save_stake_base(path: &str, base_cents: u64) -> std::io::Result<()> {
+    if let Some(dir) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, format!("{{\n  \"base_cents\": {base_cents}\n}}\n"))
+}
+
+/// Copia a config vigente: a ficha pode mudar em runtime, então nada guarda `Cfg` fixo.
+fn cfg_snapshot(shared: &Arc<Mutex<Cfg>>) -> Cfg {
+    match shared.lock() {
+        Ok(g) => g.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+/// Escada de uma ficha, para a dashboard mostrar o custo antes de aplicar.
+fn ladder_rows(base_cents: u64, max_steps: u8) -> Vec<serde_json::Value> {
+    (1..=max_steps)
+        .map(|step| {
+            let stake = stake_cents(step, base_cents);
+            serde_json::json!({
+                "step": step,
+                "stake_per_cover_cents": stake,
+                "exposure_cents": stake * 2,
+                "cum_loss_cents": cum_loss_cents(step, base_cents),
+            })
+        })
+        .collect()
 }
 
 /// Lê a requisição inteira (cabeçalho + corpo) respeitando `Content-Length`, para o
@@ -170,16 +223,31 @@ fn reload_live_history(
     }
 }
 
-fn spawn_fui_http_server(
+/// Dependências do servidor HTTP da FUI, agrupadas: são oito e a ordem posicional
+/// não diz nada na chamada.
+struct FuiServerDeps {
     pool: SqlitePool,
     fui: FuiController,
     kill_switch: KillSwitch,
     history: Arc<Mutex<HistoryBuffer>>,
-    cfg: Cfg,
+    live_cfg: Arc<Mutex<Cfg>>,
+    bankroll: Arc<AtomicI64>,
     tuning: Arc<Mutex<MatcherTuning>>,
     tuning_path: String,
-) {
+}
+
+fn spawn_fui_http_server(deps: FuiServerDeps) {
     thread::spawn(move || {
+        let FuiServerDeps {
+            pool,
+            fui,
+            kill_switch,
+            history,
+            live_cfg,
+            bankroll,
+            tuning,
+            tuning_path,
+        } = deps;
         let boot_instant = std::time::Instant::now();
         let Ok(listener) = TcpListener::bind("127.0.0.1:8791") else {
             eprintln!("[FUI-HTTP] porta 127.0.0.1:8791 já em uso");
@@ -221,6 +289,7 @@ fn spawn_fui_http_server(
                     .map(|h| h.to_chronological_vec())
                     .unwrap_or_default();
                 let matchers = matchers_now(&tuning);
+                let cfg = cfg_snapshot(&live_cfg);
                 let stats = evaluate_all_matchers_history(&matchers, &chrono, &cfg);
                 if let Ok(body) = serde_json::to_string(&stats) {
                     let resp = format!(
@@ -238,6 +307,7 @@ fn spawn_fui_http_server(
                     .map(|h| h.to_chronological_vec())
                     .unwrap_or_default();
                 let matchers = matchers_now(&tuning);
+                let cfg = cfg_snapshot(&live_cfg);
                 let snap = build_brain_snapshot(&matchers, &chrono, &cfg);
                 if let Ok(body) = serde_json::to_string(&snap) {
                     let resp = format!(
@@ -304,6 +374,93 @@ fn spawn_fui_http_server(
                     Err(err) => (
                         "400 Bad Request",
                         serde_json::json!({"ok": false, "error": format!("JSON inválido: {err}")}),
+                    ),
+                };
+                let json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+                let out = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    json.len(),
+                    json
+                );
+                let _ = stream.write_all(out.as_bytes());
+            } else if first_line.starts_with("GET /api/base") {
+                let cfg = cfg_snapshot(&live_cfg);
+                let payload = serde_json::json!({
+                    "base_cents": cfg.base_cents,
+                    "max_steps": cfg.max_steps,
+                    "allowed": ALLOWED_BASES,
+                    "bank_cents": bankroll.load(Ordering::Relaxed),
+                    "ladder": ladder_rows(cfg.base_cents, cfg.max_steps),
+                });
+                let body = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+                let out = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(out.as_bytes());
+            } else if first_line.starts_with("POST /api/base") {
+                let pedido = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v.get("base_cents").and_then(|b| b.as_u64()));
+                let (status, payload) = match pedido {
+                    Some(base) if ALLOWED_BASES.contains(&base) => {
+                        let current = cfg_snapshot(&live_cfg);
+                        let bank = bankroll.load(Ordering::Relaxed).max(1);
+                        let mut candidate = current.clone();
+                        candidate.base_cents = base;
+                        // §13: ficha nova só entra depois do Monte Carlo com a banca de agora.
+                        let mc = run_monte_carlo(&McParams {
+                            initial_bankroll_cents: bank,
+                            cfg: candidate,
+                            ..McParams::default()
+                        });
+                        if mc.p_ruin >= 0.05 {
+                            (
+                                "409 Conflict",
+                                serde_json::json!({
+                                    "ok": false,
+                                    "p_ruin": mc.p_ruin,
+                                    "error": format!(
+                                        "Monte Carlo reprovou {}¢ com banca de {}¢: P(ruína)={:.2}% (limite 5%)",
+                                        base, bank, mc.p_ruin * 100.0
+                                    ),
+                                }),
+                            )
+                        } else {
+                            if let Ok(mut g) = live_cfg.lock() {
+                                g.base_cents = base;
+                            }
+                            let _ = fui.set_base(base);
+                            if let Err(err) = save_stake_base(STAKE_PATH, base) {
+                                eprintln!("[STAKE] aplicada em memória, não salva: {err}");
+                            }
+                            println!(
+                                "[STAKE] ficha {}¢ -> {}¢ | P(ruína)={:.2}% | DD p95={}¢",
+                                current.base_cents,
+                                base,
+                                mc.p_ruin * 100.0,
+                                mc.drawdown_p95_cents
+                            );
+                            (
+                                "200 OK",
+                                serde_json::json!({
+                                    "ok": true,
+                                    "base_cents": base,
+                                    "p_ruin": mc.p_ruin,
+                                    "drawdown_p95_cents": mc.drawdown_p95_cents,
+                                    "max_steps": current.max_steps,
+                                    "ladder": ladder_rows(base, current.max_steps),
+                                }),
+                            )
+                        }
+                    }
+                    _ => (
+                        "400 Bad Request",
+                        serde_json::json!({
+                            "ok": false,
+                            "error": format!("ficha inválida; escolha entre {:?}", ALLOWED_BASES),
+                        }),
                     ),
                 };
                 let json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
@@ -402,6 +559,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         i += 1;
     }
 
+    // Ficha salva pela dashboard vence o padrão do binário; o MC abaixo já roda com ela.
+    cfg.base_cents = load_stake_base(STAKE_PATH, cfg.base_cents);
+    println!("[STAKE] ficha de entrada: {}¢ por cobertura", cfg.base_cents);
+
     // 1. Validação obrigatória de Monte Carlo antes de iniciar (§13 e §15.4).
     let mc_report = run_monte_carlo(&McParams {
         initial_bankroll_cents: bankroll_cents,
@@ -467,6 +628,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let live_actuator = LiveHttpActuator::new(stream_addr.clone());
     let kill_switch = KillSwitch::new();
     let fui = FuiController::new(cfg.clone());
+    // A ficha pode ser trocada pela dashboard em runtime: o DAG e o executor leem daqui
+    // a cada giro, nunca de uma cópia presa no boot.
+    let live_cfg = Arc::new(Mutex::new(cfg.clone()));
     let boot_instant = std::time::Instant::now();
 
     // Histórico inicial exclusivamente do banco (sincronizado com a fita da mesa): nada de números inventados.
@@ -582,15 +746,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    spawn_fui_http_server(
-        pool.clone(),
-        fui.clone(),
-        kill_switch.clone(),
-        history.clone(),
-        cfg.clone(),
-        tuning.clone(),
-        TUNING_PATH.to_string(),
-    );
+    spawn_fui_http_server(FuiServerDeps {
+        pool: pool.clone(),
+        fui: fui.clone(),
+        kill_switch: kill_switch.clone(),
+        history: history.clone(),
+        live_cfg: live_cfg.clone(),
+        bankroll: shared_bankroll_cents.clone(),
+        tuning: tuning.clone(),
+        tuning_path: TUNING_PATH.to_string(),
+    });
 
     let mut spins_since_blow = cfg.cooldown_spins;
     // A escada vive em `ladder_state`, uma linha por estratégia (§5.3). Carrega o estado persistido
@@ -632,6 +797,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         // A mesma rodada pode chegar pelo WS e pela fita DOM: grava uma única vez.
         let already_recorded = has_recent_number(&pool, ev.number, ev.ts, 3_000).unwrap_or(false);
+        // Config vigente do giro: ficha e degraus podem ter mudado pela dashboard.
+        let cfg_now = cfg_snapshot(&live_cfg);
+
         if already_recorded {
             println!(
                 "[DEDUPE] spin={} num={} já registrado nos últimos 3s (WS/fita) — ignorado",
@@ -672,7 +840,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     acks: &prev_acks,
                 },
                 ev.number,
-                &cfg,
+                &cfg_now,
                 None,
                 now_ms,
             ) {
@@ -698,6 +866,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         shared_pnl_cents.load(Ordering::Relaxed),
                         rep.next_step
                     );
+                    // Resultado vai no próximo tick: o Telegram confirma a operação com o
+                    // delta do reconciliador, não com dedução de saldo.
+                    let _ = fui.sync_settlement(SettlementDto {
+                        strategy_id: rep.strategy_id.clone(),
+                        won: rep.won,
+                        delta_cents: rep.expected_delta_cents,
+                        step: prev_plan.ladder_step,
+                        number: ev.number,
+                        max_steps: cfg_now.max_steps,
+                        ts: now_ms,
+                    });
                 }
                 Err(err) => {
                     eprintln!("[RECONCILE-ERR] {err}");
@@ -743,7 +922,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &recent,
             &chrono_hist,
             &matchers,
-            &cfg,
+            &cfg_now,
             &GateCtx {
                 state: &st,
                 ladder_steps: &ladder_steps,
