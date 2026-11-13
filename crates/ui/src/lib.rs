@@ -164,7 +164,7 @@ pub struct SettlementDto {
 }
 
 /// DTO do painel A / C / D (`get_session`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionDto {
     /// Estado global atual da máquina.
     pub state: GlobalState,
@@ -195,6 +195,49 @@ pub struct SessionDto {
     /// Último resultado de entrada resolvida (`None` enquanto nada foi jogado).
     #[serde(default)]
     pub last_settlement: Option<SettlementDto>,
+    /// Leitura dos terminais da timeline (contador puro, não decide entrada).
+    #[serde(default)]
+    pub terminals: Option<TerminalRadarDto>,
+}
+
+/// Contagem de um final dentro da janela lida.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TerminalHitDto {
+    /// Final `0..=9`.
+    pub terminal: u8,
+    /// Quantas vezes saiu na janela.
+    pub hits: usize,
+}
+
+/// Placar ao vivo dos terminais que o operador acompanha (`2,3,6,9`).
+///
+/// É só leitura da fita: nenhum campo aqui influencia a decisão do DAG. Existe para o
+/// operador comparar a própria percepção ("esse final está batendo") com a medição real
+/// sobre os giros gravados, já sem os blocos de replay de fixture do banco.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TerminalRadarDto {
+    /// Janela máxima lida (`100` giros reais).
+    pub window: usize,
+    /// Giros reais usados na conta (`0` -> painel mostra `—`).
+    pub spins: usize,
+    /// Giros da janela que caíram nos finais acompanhados.
+    pub hits: usize,
+    /// Percentual observado (`0..100`).
+    pub share_pct: f64,
+    /// Percentual esperado pelo pano (`15/37 = 40,54%`).
+    pub expected_pct: f64,
+    /// Desvio padrão do observado contra o esperado.
+    pub sigma: f64,
+    /// Giros seguidos nos finais acompanhados, contando `0` como curinga.
+    pub streak: usize,
+    /// Pré-alerta armado (falta 1 repetição para o gatilho do `terminal_quente`).
+    pub armed: bool,
+    /// O `terminal_quente` entraria neste giro.
+    pub firing: bool,
+    /// Giros descartados por serem repetição de fixture, não mesa ao vivo.
+    pub replay_dropped: usize,
+    /// Finais da lista ordenados por frequência na janela.
+    pub top: Vec<TerminalHitDto>,
 }
 
 /// DTO de saúde das 4 fontes (`get_health`).
@@ -410,6 +453,7 @@ impl FuiController {
                     exposure_cents: None,
                     remaining_window_ms: None,
                     banner_detail: None,
+                    terminals: None,
                 },
                 health: HealthDto {
                     ws: LedStatus::Ok,
@@ -751,6 +795,15 @@ impl FuiController {
         let mut g = self.inner.lock().map_err(|_| UiError::StateLock)?;
         g.session.last_settlement = Some(settlement);
         Ok(())
+    }
+
+    /// Publica a leitura dos terminais da timeline (`None` limpa o painel para `—`).
+    ///
+    /// Leitura pura: não altera estado, não decide entrada e nunca bloqueia o executor.
+    pub fn sync_terminal_radar(&self, radar: Option<TerminalRadarDto>) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.session.terminals = radar;
+        }
     }
 
     /// Comando IPC de escrita: `set_base` (§7).

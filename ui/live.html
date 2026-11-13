@@ -113,6 +113,12 @@
     }
     .stake-btn.active { color: #04121a; background: var(--accent); border-color: var(--accent); }
     .stake-meta { grid-column: 1 / -1; display: flex; justify-content: space-between; gap: 12px; font-size: 10px; color: var(--muted); }
+    /* Placar dos terminais: leitura pura da fita real, não decide entrada. */
+    .seq-radar {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px 14px;
+      padding: 8px; background: #0b1016; border: 1px solid var(--line); font-size: 10px;
+    }
+    .seq-radar > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .seq-name { font-size: 11px; font-weight: 600; color: var(--fg); }
     .seq-sub { font-size: 9px; color: var(--muted); }
     .seq-in { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 9px; color: var(--muted); }
@@ -309,6 +315,7 @@
         </div>`;
       }).join('');
       box.innerHTML = `
+        <div class="seq-radar" id="term-radar">—</div>
         <div class="seq-stake">
           <div>
             <div class="metric-label">FICHA DE ENTRADA (POR COBERTURA)</div>
@@ -350,7 +357,31 @@
         if (st) { st.textContent = 'FALHA AO LER /api/tuning'; st.style.color = 'var(--bad)'; }
       }
     }
+    // Placar dos terminais 2-3-6-9 (vem pronto do core em /api/tick, já sem replay de fixture).
+    function renderTermRadar(tick) {
+      const box = document.getElementById('term-radar');
+      if (!box) return;
+      const r = tick && tick.session ? tick.session.terminals : null;
+      if (!r || !r.spins) {
+        box.innerHTML = '<span class="metric-label">TERMINAIS 2-3-6-9</span>' +
+          '<span style="color:var(--dim)">aguardando giros reais</span>' +
+          '<span style="color:var(--dim)">—</span>';
+        return;
+      }
+      const ruido = Math.abs(r.sigma) < 2;
+      const cor = ruido ? 'var(--muted)' : (r.sigma > 0 ? 'var(--accent)' : 'var(--dim)');
+      const estado = r.firing ? '● ENTRARIA AGORA' : (r.armed ? '◐ ARMADO (falta 1)' : '○ FRIO');
+      const top = (r.top || []).map((h) => h.terminal + ' (' + h.hits + 'x)').join(' · ');
+      box.innerHTML =
+        '<span class="metric-label">TERMINAIS 2-3-6-9 · ' + r.spins + ' GIROS REAIS</span>' +
+        '<span class="num">saíram ' + r.share_pct.toFixed(1) + '% · esperado ' + r.expected_pct.toFixed(1) + '%</span>' +
+        '<span class="num" style="color:' + cor + '">' + (r.sigma >= 0 ? '+' : '') + r.sigma.toFixed(2) + 'σ · ' + (ruido ? 'dentro do ruído' : 'fora do ruído') + '</span>' +
+        '<span class="num">série ' + r.streak + ' · ' + estado + '</span>' +
+        '<span class="num" style="color:var(--muted)">finais: ' + top + '</span>' +
+        '<span class="num" style="color:var(--dim)">' + (r.replay_dropped > 0 ? r.replay_dropped + ' giros de fixture descartados' : 'fita limpa') + '</span>';
+    }
     function updateSeqLive(spins) {
+      renderTermRadar(lastTick);
       const live = seqLive(spins || []);
       MATCHERS.filter((m) => m.k).forEach((m) => {
         const el = document.getElementById('seq-live-' + m.k);

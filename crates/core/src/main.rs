@@ -7,7 +7,8 @@ use monster_capture::{CaptureSource, SpinBus, StreamClient, DEFAULT_STREAM_ADDR}
 use monster_core::{
     boot_reconcile, build_brain_snapshot, evaluate_all_matchers_history,
     evaluate_dag_with_history, has_recent_number, load_chronological_history, place, reconcile_spin,
-    sync_strip_to_db, write_gbrain_file, Calibration, CdpActuator, CoverAck, DryRunActuator,
+    sync_strip_to_db, terminal_radar, write_gbrain_file, Calibration, CdpActuator, CoverAck,
+    DryRunActuator, OPERATOR_TERMINALS,
     window_budget_ms, ExecutionMode, GateCtx, HistoryBuffer, KillSwitch, LadderSteps,
     LiveHttpActuator, Plan,
     PlayedEntry, Window30, HISTORY_CAPACITY, WINDOW_CAPACITY,
@@ -897,6 +898,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .lock()
             .map(|h| h.to_chronological_vec())
             .unwrap_or_default();
+
+        // Placar ao vivo dos terminais 2-3-6-9: leitura pura da fita real (sem replay de
+        // fixture). Serve para o operador comparar a percepção com a medição.
+        fui.sync_terminal_radar(Some(terminal_radar(
+            &chrono_hist,
+            100,
+            OPERATOR_TERMINALS,
+            3,
+            0.44,
+        )));
 
         let cur_bank = shared_bankroll_cents.load(Ordering::Relaxed);
         let cur_pnl = shared_pnl_cents.load(Ordering::Relaxed);
