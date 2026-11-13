@@ -215,7 +215,7 @@ como medir a troca de regime, e nenhum aponta para literatura.
 
 | # | Passo | Gate |
 |---|---|---|
-| 1 | BOCPD de 3 estados sobre finais em Rust (`regime.classifier` estendido) | p95 do DAG continua < 400 ms |
+| 1 | ~~BOCPD de 3 estados sobre finais em Rust~~ — feito (`crates/core/src/bocpd.rs`, ADR 0004) | p95 do DAG continua < 400 ms (medido ao vivo: 3,8–6,6 ms) |
 | 2 | e-value / martingale de permutabilidade sobre os spins gravados | roda em 10 mil giros sem falso positivo em sequência sintética uniforme |
 | 3 | CTW/PPM em Python como juiz de log-loss | log-loss do CTW ≤ log-loss uniforme − 1% para autorizar `--live` |
 | 4 | HSMM offline para duração de bloco → número no cartão | duração média por família com IC 95% |

@@ -107,7 +107,11 @@ fantasma — arredondar para cima e registrar o total real no plano.
       (15 plenos, preview somando, acerto/erro e degrau subindo 1→2→3).
 - [ ] **FUI**: overlay de cobertura para número/terminal e tabela da escada ciente do tipo.
 - [ ] **Backtest de 500 giros** com χ² por final e e-value (o cartão define; o número não existe).
-- [ ] **Monte Carlo** com a escada de números antes de `--live` (§13).
+- [x] **Veto de regime** por BOCPD (`crates/core/src/bocpd.rs`, ADR 0004): família fora de fase
+      não recebe entrada de cluster.
+- [x] **Monte Carlo** com a escada de números (`mc_numbers.rs`, `P_RUIN_GATE = 5%`). Resultado com
+      a banca default de R$ 50,88 e `max_steps=4`: P(ruína) ≈ 19% → **gate reprovado**; operar em
+      números exige banca maior, stop menor ou menos degraus.
 
 ## 6. Vocabulário (para não confundir na UI e no código)
 
