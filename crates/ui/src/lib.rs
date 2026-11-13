@@ -198,6 +198,42 @@ pub struct SessionDto {
     /// Leitura dos terminais da timeline (contador puro, não decide entrada).
     #[serde(default)]
     pub terminals: Option<TerminalRadarDto>,
+    /// Distribuição das famílias de fora (colunas, dúzias, cores) na mesma janela real.
+    #[serde(default)]
+    pub families: Vec<FamilyRadarDto>,
+}
+
+/// Frequência de uma opção de família (uma coluna, uma dúzia, uma cor).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct FamilyShareDto {
+    /// Rótulo curto (`C1`, `D2`, `VERMELHO`).
+    pub label: String,
+    /// Giros da janela que caíram nesta opção.
+    pub hits: usize,
+    /// Percentual observado (`0..100`).
+    pub share_pct: f64,
+    /// Desvio do observado contra o esperado do pano.
+    pub sigma: f64,
+}
+
+/// Placar de uma família de fora (`COLUNAS`, `DÚZIAS`, `CORES`).
+///
+/// Mesma leitura do [`TerminalRadarDto`]: fita real (sem replay de fixture), janela de 100
+/// giros, e nada aqui decide aposta — é o espelho que o operador compara com a percepção.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct FamilyRadarDto {
+    /// Nome da família exibido no painel.
+    pub category: String,
+    /// Giros reais considerados.
+    pub spins: usize,
+    /// Rótulo da opção que está em série agora (`—` quando o último giro é `0`).
+    pub streak_label: String,
+    /// Tamanho da série atual.
+    pub streak: usize,
+    /// Percentual esperado por opção (`12/37` ou `18/37`).
+    pub expected_pct: f64,
+    /// Opções da família, sempre na ordem fixa (`C1,C2,C3`).
+    pub options: Vec<FamilyShareDto>,
 }
 
 /// Contagem de um final dentro da janela lida.
@@ -454,6 +490,7 @@ impl FuiController {
                     remaining_window_ms: None,
                     banner_detail: None,
                     terminals: None,
+                    families: Vec::new(),
                 },
                 health: HealthDto {
                     ws: LedStatus::Ok,
@@ -803,6 +840,13 @@ impl FuiController {
     pub fn sync_terminal_radar(&self, radar: Option<TerminalRadarDto>) {
         if let Ok(mut g) = self.inner.lock() {
             g.session.terminals = radar;
+        }
+    }
+
+    /// Publica o placar das famílias de fora (colunas, dúzias, cores). Leitura pura.
+    pub fn sync_family_radars(&self, families: Vec<FamilyRadarDto>) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.session.families = families;
         }
     }
 

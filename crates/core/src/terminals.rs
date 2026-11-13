@@ -3,7 +3,7 @@
 //! Filtra blocos de replay de fixture do banco e devolve a distribuição real dos finais.
 //! Leitura pura: nada aqui decide aposta, altera escada ou toca no executor.
 
-use monster_ui::{TerminalHitDto, TerminalRadarDto};
+use monster_ui::{FamilyRadarDto, FamilyShareDto, TerminalHitDto, TerminalRadarDto};
 
 /// Finais que o operador acompanha — a mesma lista do matcher `terminal_quente`.
 pub const OPERATOR_TERMINALS: [u8; 4] = [2, 3, 6, 9];
@@ -119,6 +119,162 @@ pub fn terminal_radar(
     }
 }
 
+/// Probabilidade esperada de uma coluna ou dúzia (`12` pockets de `37`).
+const EXPECTED_DOZEN: f64 = 12.0 / 37.0;
+
+/// Probabilidade esperada de uma cor (`18` pockets de `37`).
+const EXPECTED_COLOR: f64 = 18.0 / 37.0;
+
+fn share_of(hits: usize, spins: usize, expected: f64) -> (f64, f64) {
+    if spins == 0 {
+        return (0.0, 0.0);
+    }
+    let share = hits as f64 / spins as f64;
+    let sigma = (share - expected) / (expected * (1.0 - expected) / spins as f64).sqrt();
+    (share, sigma)
+}
+
+/// Placar das famílias de fora (`COLUNAS`, `DÚZIAS`, `CORES`) sobre a mesma janela real.
+///
+/// Serve para a pergunta simétrica à dos terminais: "essa coluna está batendo mesmo?".
+/// `0` fica fora de todas as contas, como no pano. Leitura pura, sem decisão de aposta.
+pub fn family_radars(chronological: &[u8], window: usize) -> Vec<FamilyRadarDto> {
+    let start = real_tail_start(chronological);
+    let tail = &chronological[start..];
+    let slice = if tail.len() > window {
+        &tail[tail.len() - window..]
+    } else {
+        tail
+    };
+
+    let mut columns = [0usize; 3];
+    let mut dozens = [0usize; 3];
+    let mut colors = [0usize; 2];
+    let mut spins = 0usize;
+    for &n in slice {
+        if n == 0 || n > 36 {
+            continue;
+        }
+        spins += 1;
+        columns[usize::from(monster_strategy_native::column_of(n)) - 1] += 1;
+        dozens[usize::from(monster_strategy_native::dozen_of(n)) - 1] += 1;
+        colors[usize::from(!monster_strategy_native::is_red_number(n))] += 1;
+    }
+
+    let column_opts = (0..3)
+        .map(|i| {
+            let (share, sigma) = share_of(columns[i], spins, EXPECTED_DOZEN);
+            FamilyShareDto {
+                label: format!("C{}", i + 1),
+                hits: columns[i],
+                share_pct: share * 100.0,
+                sigma,
+            }
+        })
+        .collect::<Vec<_>>();
+    let dozen_opts = (0..3)
+        .map(|i| {
+            let (share, sigma) = share_of(dozens[i], spins, EXPECTED_DOZEN);
+            FamilyShareDto {
+                label: format!("D{}", i + 1),
+                hits: dozens[i],
+                share_pct: share * 100.0,
+                sigma,
+            }
+        })
+        .collect::<Vec<_>>();
+    let color_opts = ["VERMELHO", "PRETO"]
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            let (share, sigma) = share_of(colors[i], spins, EXPECTED_COLOR);
+            FamilyShareDto {
+                label: (*label).to_string(),
+                hits: colors[i],
+                share_pct: share * 100.0,
+                sigma,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    // Série atual: quantos giros seguidos repetem a última coluna/dúzia/cor.
+    let latest = tail.iter().rev().copied().find(|&n| n <= 36).unwrap_or(0);
+    let streak_key = |n: u8| -> Option<u8> {
+        if n == 0 || n > 36 {
+            None
+        } else {
+            Some(n)
+        }
+    };
+    let mut column_streak = 0usize;
+    let mut dozen_streak = 0usize;
+    let mut color_streak = 0usize;
+    if let Some(last) = streak_key(latest) {
+        column_streak = tail
+            .iter()
+            .rev()
+            .take_while(|&&n| n != 0 && monster_strategy_native::column_of(n) == monster_strategy_native::column_of(last))
+            .count();
+        dozen_streak = tail
+            .iter()
+            .rev()
+            .take_while(|&&n| n != 0 && monster_strategy_native::dozen_of(n) == monster_strategy_native::dozen_of(last))
+            .count();
+        color_streak = tail
+            .iter()
+            .rev()
+            .take_while(|&&n| {
+                n != 0
+                    && monster_strategy_native::is_red_number(n)
+                        == monster_strategy_native::is_red_number(last)
+            })
+            .count();
+    }
+
+    vec![
+        FamilyRadarDto {
+            category: "COLUNAS".to_string(),
+            spins,
+            streak_label: if column_streak > 0 {
+                format!("C{}", monster_strategy_native::column_of(latest))
+            } else {
+                "—".to_string()
+            },
+            streak: column_streak,
+            expected_pct: EXPECTED_DOZEN * 100.0,
+            options: column_opts,
+        },
+        FamilyRadarDto {
+            category: "DÚZIAS".to_string(),
+            spins,
+            streak_label: if dozen_streak > 0 {
+                format!("D{}", monster_strategy_native::dozen_of(latest))
+            } else {
+                "—".to_string()
+            },
+            streak: dozen_streak,
+            expected_pct: EXPECTED_DOZEN * 100.0,
+            options: dozen_opts,
+        },
+        FamilyRadarDto {
+            category: "CORES".to_string(),
+            spins,
+            streak_label: if color_streak > 0 {
+                if monster_strategy_native::is_red_number(latest) {
+                    "VERMELHO".to_string()
+                } else {
+                    "PRETO".to_string()
+                }
+            } else {
+                "—".to_string()
+            },
+            streak: color_streak,
+            expected_pct: EXPECTED_COLOR * 100.0,
+            options: color_opts,
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +324,45 @@ mod tests {
         assert_eq!(pre.streak, 2);
         assert!(pre.armed);
         assert!(!pre.firing);
+    }
+
+    #[test]
+    fn familias_medem_coluna_duzia_e_cor_sem_contar_o_zero() {
+        // 0 fica fora; 1..9 entrega 3 números por coluna (1-4-7, 2-5-8, 3-6-9).
+        let fita = [0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let radars = family_radars(&fita, 100);
+        assert_eq!(radars.len(), 3);
+
+        assert_eq!(radars[0].category, "COLUNAS");
+        assert_eq!(radars[0].spins, 9, "o 0 não entra no denominador");
+        let cols: Vec<usize> = radars[0].options.iter().map(|o| o.hits).collect();
+        assert_eq!(cols, vec![3, 3, 3]);
+        assert_eq!(radars[0].options[0].label, "C1");
+        assert!((radars[0].expected_pct - EXPECTED_DOZEN * 100.0).abs() < 1e-9);
+
+        assert_eq!(radars[1].category, "DÚZIAS");
+        assert_eq!(radars[1].options.iter().map(|o| o.hits).sum::<usize>(), 9);
+
+        assert_eq!(radars[2].category, "CORES");
+        assert!((radars[2].expected_pct - EXPECTED_COLOR * 100.0).abs() < 1e-9);
+        assert_eq!(
+            radars[2].options.iter().map(|o| o.hits).sum::<usize>(),
+            9
+        );
+
+        // Último giro é 9 (C3, D1, vermelho): série de 1 em cada família.
+        assert_eq!(radars[0].streak_label, "C3");
+        assert_eq!(radars[0].streak, 1);
+        assert_eq!(radars[2].streak_label, "VERMELHO");
+    }
+
+    #[test]
+    fn serie_de_coluna_para_no_zero() {
+        let fita = [1u8, 4, 7, 0, 10];
+        let radars = family_radars(&fita, 100);
+        // 10 e 0: o zero não pertence a coluna, então a série reinicia no 10.
+        assert_eq!(radars[0].streak, 1);
+        assert_eq!(radars[0].spins, 4);
     }
 
     #[test]

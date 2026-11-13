@@ -40,7 +40,7 @@ pub use executor::{
 pub use reconciler::{
     boot_reconcile, reconcile_spin, BootReconcileReport, PlayedEntry, ReconcileReport,
 };
-pub use terminals::{real_tail_start, terminal_radar, OPERATOR_TERMINALS};
+pub use terminals::{family_radars, real_tail_start, terminal_radar, OPERATOR_TERMINALS};
 pub use timeline_sync::{
     count_new_spins, has_recent_number, load_chronological_history, read_newest_numbers,
     sanitize_strip, sync_strip_to_db, StripSyncReport, MAX_STRIP,

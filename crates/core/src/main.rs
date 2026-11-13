@@ -7,8 +7,8 @@ use monster_capture::{CaptureSource, SpinBus, StreamClient, DEFAULT_STREAM_ADDR}
 use monster_core::{
     boot_reconcile, build_brain_snapshot, evaluate_all_matchers_history,
     evaluate_dag_with_history, has_recent_number, load_chronological_history, place, reconcile_spin,
-    sync_strip_to_db, terminal_radar, write_gbrain_file, Calibration, CdpActuator, CoverAck,
-    DryRunActuator, OPERATOR_TERMINALS,
+    family_radars, sync_strip_to_db, terminal_radar, write_gbrain_file, Calibration, CdpActuator,
+    CoverAck, DryRunActuator, OPERATOR_TERMINALS,
     window_budget_ms, ExecutionMode, GateCtx, HistoryBuffer, KillSwitch, LadderSteps,
     LiveHttpActuator, Plan,
     PlayedEntry, Window30, HISTORY_CAPACITY, WINDOW_CAPACITY,
@@ -908,6 +908,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             3,
             0.44,
         )));
+        fui.sync_family_radars(family_radars(&chrono_hist, 100));
 
         let cur_bank = shared_bankroll_cents.load(Ordering::Relaxed);
         let cur_pnl = shared_pnl_cents.load(Ordering::Relaxed);

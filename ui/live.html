@@ -316,6 +316,7 @@
       }).join('');
       box.innerHTML = `
         <div class="seq-radar" id="term-radar">—</div>
+        <div class="seq-radar" id="family-radar">—</div>
         <div class="seq-stake">
           <div>
             <div class="metric-label">FICHA DE ENTRADA (POR COBERTURA)</div>
@@ -380,8 +381,30 @@
         '<span class="num" style="color:var(--muted)">finais: ' + top + '</span>' +
         '<span class="num" style="color:var(--dim)">' + (r.replay_dropped > 0 ? r.replay_dropped + ' giros de fixture descartados' : 'fita limpa') + '</span>';
     }
+    // Placar das famílias de fora: mesma janela real dos terminais, colunas/dúzias/cores.
+    function renderFamilyRadar(tick) {
+      const box = document.getElementById('family-radar');
+      if (!box) return;
+      const fams = (tick && tick.session ? tick.session.families : null) || [];
+      if (!fams.length || !fams[0].spins) {
+        box.innerHTML = '<span class="metric-label">COLUNAS · DÚZIAS · CORES</span>' +
+          '<span style="color:var(--dim)">aguardando giros reais</span>' +
+          '<span style="color:var(--dim)">—</span>';
+        return;
+      }
+      box.innerHTML = fams.map((f) => {
+        const partes = (f.options || []).map((o) => o.label + ' ' + o.share_pct.toFixed(0) + '%').join(' · ');
+        const mais = (f.options || []).reduce((a, b) => (b.share_pct > a.share_pct ? b : a), f.options[0] || { sigma: 0, share_pct: 0 });
+        const ruido = Math.abs(mais.sigma || 0) < 2;
+        const cor = ruido ? 'var(--muted)' : (mais.sigma > 0 ? 'var(--accent)' : 'var(--dim)');
+        return '<span class="metric-label">' + f.category + ' · ' + f.spins + ' GIROS</span>' +
+          '<span class="num" style="color:var(--muted)">' + partes + '</span>' +
+          '<span class="num" style="color:' + cor + '">série ' + f.streak_label + ' ' + f.streak + 'x · ' + (ruido ? 'dentro do ruído' : 'fora do ruído') + '</span>';
+      }).join('');
+    }
     function updateSeqLive(spins) {
       renderTermRadar(lastTick);
+      renderFamilyRadar(lastTick);
       const live = seqLive(spins || []);
       MATCHERS.filter((m) => m.k).forEach((m) => {
         const el = document.getElementById('seq-live-' + m.k);
