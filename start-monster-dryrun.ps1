@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-# Inicia o ecossistema MONSTER (Fases 0-5) em modo --dry-run (Chrome + Sidecar Go + Core Rust).
+# Inicia o ecossistema MONSTER (Fases 0-5): Chrome + Sidecar Go + Core Rust.
+# Default e --dry-run. Dinheiro real exige `-Live` explicito na linha de comando.
 # Tudo gravado estritamente no disco O: (zero escrita no disco C:).
+
+param(
+    [switch]$Live
+)
 
 $ErrorActionPreference = "Stop"
 $TargetUrl  = "https://www.jogatudo.com/pt-BR/game/playtech-brasileira.roleta-brasileira"
@@ -88,7 +93,12 @@ if (-not $HealthAlive) {
     Start-Sleep -Seconds 3
 }
 
-Write-Host "[MONSTER] Abrindo painel FUI em http://127.0.0.1:8791 e iniciando monster-core em MODO REAL (--live)..." -ForegroundColor Yellow
+Write-Host "[MONSTER] Abrindo painel FUI em http://127.0.0.1:8791 e iniciando monster-core..." -ForegroundColor Yellow
 Start-Process "http://127.0.0.1:8791"
 Set-Location $RootDir
-cargo run --offline -p monster-core -- --live
+if ($Live) {
+    Write-Host "[MONSTER] ATENCAO: -Live passado, o executor VAI APOSTAR DINHEIRO REAL." -ForegroundColor Red
+    cargo run --offline -p monster-core -- --live
+} else {
+    cargo run --offline -p monster-core -- --dry-run
+}
