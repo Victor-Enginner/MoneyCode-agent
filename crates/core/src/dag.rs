@@ -261,6 +261,30 @@ fn apply_permanence_priority(
     before - aggregates.len()
 }
 
+/// Escolhe o vencedor do fan-in (lista já ordenada por confiança decrescente).
+///
+/// Regra do operador: sem nenhuma quebra de permanência disparada (coluna, dúzia, cor,
+/// alto/baixo, par/ímpar), a entrada **por número** tem preferência sobre as outras entradas de
+/// fora que não são permanência (`cluster_terminal`, `fibonacci_lag`, `setor_vies`). Com
+/// permanência disparada os sinais de número já foram removidos por `apply_permanence_priority`.
+fn pick_winner(aggregates: &[Aggregate], min_confidence: f64) -> Option<&Aggregate> {
+    let eligible = |a: &&Aggregate| a.confidence >= min_confidence && !a.cover.is_empty();
+    let permanence_firing = aggregates
+        .iter()
+        .filter(eligible)
+        .any(|a| is_permanence_family(&a.strategy_id));
+    if !permanence_firing {
+        if let Some(n) = aggregates
+            .iter()
+            .filter(eligible)
+            .find(|a| number_coverage(&a.cover).is_some())
+        {
+            return Some(n);
+        }
+    }
+    aggregates.iter().find(eligible)
+}
+
 /// Família de finais que a cobertura de número pretende cobrir (`final % 3`).
 ///
 /// `Terminal(0)` é o curinga e não define família; cobertura sem terminal (coluna, dúzia, cor)
@@ -391,8 +415,12 @@ pub fn evaluate_dag_with_history(
                 let stats = evaluate_matcher_walk_forward(m.as_ref(), chronological_history, cfg);
                 // Para os gatilhos de repetição (quebra de coluna/dúzia 4x e cor/alto-baixo/par-ímpar 6x),
                 // aplica bônus quando positivo no histórico mas nunca bloqueia o gatilho de repetição!
+                // Entrada por número também não é zerada pelo histórico: cobrir 8-15 plenos
+                // quase sempre mostra P&L negativo no walk-forward, e o operador quer a entrada
+                // sempre que não houver permanência. Ela só recebe bônus, como as quebras.
                 let is_core_streak = agg.strategy_id.starts_with("quebra_")
-                    || agg.strategy_id == "setor_vies";
+                    || agg.strategy_id == "setor_vies"
+                    || number_coverage(&agg.cover).is_some();
                 let effective_mult = if is_core_streak {
                     stats.confidence_multiplier.max(1.0)
                 } else {
@@ -417,9 +445,7 @@ pub fn evaluate_dag_with_history(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let best = adjusted_aggregates
-        .iter()
-        .find(|agg| agg.confidence >= min_confidence && !agg.cover.is_empty());
+    let best = pick_winner(&adjusted_aggregates, min_confidence);
 
     let Some(winner) = best else {
         return (
@@ -493,9 +519,7 @@ pub fn evaluate_dag(
     let bocpd = analyze_chronological(&oldest_first, &bocpd_cfg);
     apply_regime_veto(&mut aggregates, &bocpd, &bocpd_cfg);
 
-    let best = aggregates
-        .iter()
-        .find(|agg| agg.confidence >= min_confidence && !agg.cover.is_empty());
+    let best = pick_winner(&aggregates, min_confidence);
 
     let Some(winner) = best else {
         return DagOutput {
@@ -580,6 +604,35 @@ mod tests {
         assert_eq!(apply_permanence_priority(&mut aggs, &LadderSteps::new(), 0.55), 1);
         assert_eq!(aggs.len(), 1);
         assert_eq!(aggs[0].strategy_id, "quebra_permanencia_coluna");
+    }
+
+    #[test]
+    fn sem_permanencia_numero_vence_entrada_de_fora_mais_confiante() {
+        // cluster_terminal (coluna, não é permanência) com 0.95 contra terminal com 0.60.
+        let other = Aggregate {
+            strategy_id: "cluster_terminal".to_string(),
+            confidence: 0.95,
+            cover: vec![Cover::Col(1), Cover::Col(2)],
+            regime_veto: false,
+        };
+        let num = Aggregate { confidence: 0.60, ..number_signal() };
+        let aggs = vec![other, num];
+        assert_eq!(pick_winner(&aggs, 0.55).map(|a| a.strategy_id.as_str()), Some("terminal_quente"));
+    }
+
+    #[test]
+    fn com_permanencia_disparada_ela_vence() {
+        let aggs = vec![permanence_signal(0.70), Aggregate { confidence: 0.60, ..number_signal() }];
+        assert_eq!(
+            pick_winner(&aggs, 0.55).map(|a| a.strategy_id.as_str()),
+            Some("quebra_permanencia_coluna")
+        );
+    }
+
+    #[test]
+    fn numero_abaixo_do_corte_nao_entra() {
+        let aggs = vec![Aggregate { confidence: 0.40, ..number_signal() }];
+        assert!(pick_winner(&aggs, 0.55).is_none());
     }
 
     #[test]

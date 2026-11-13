@@ -122,6 +122,20 @@ if (-not $HealthAlive) {
     Start-Sleep -Seconds 3
 }
 
+# Watchdog 24/48h: grava o modo escolhido (o watchdog reinicia o core NESTE modo) e sobe o
+# supervisor em segundo plano. -Probe nao liga watchdog.
+if (-not $Probe) {
+    $LogsDir = "$RootDir\logs"
+    if (-not (Test-Path $LogsDir)) { New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null }
+    Set-Content -Path "$LogsDir\monster-mode.txt" -Value $(if ($Live) { "live" } else { "dry-run" })
+    Remove-Item "$LogsDir\monster-stop.flag" -ErrorAction SilentlyContinue
+    Start-Process powershell -WindowStyle Hidden -ArgumentList @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$RootDir\scripts\monster-watch.ps1`""
+    ) | Out-Null
+    Write-Host "[MONSTER] Watchdog ligado (reinicia Chrome/captura/core e recarrega a mesa travada)." -ForegroundColor Green
+    Write-Host "[MONSTER] Para parar tudo de vez: stop-monster.bat" -ForegroundColor Green
+}
+
 Write-Host "[MONSTER] Painel: http://127.0.0.1:8791" -ForegroundColor Yellow
 Start-Process "http://127.0.0.1:8791"
 Set-Location $RootDir
