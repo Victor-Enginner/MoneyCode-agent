@@ -921,12 +921,65 @@ impl SequenceTuning {
     }
 }
 
+/// Ids de todos os matchers nativos, na ordem em que o DAG os avalia.
+///
+/// É a allowlist do interruptor da dashboard: desligar exige conhecer o nome
+/// exato, então erro de digitação vira rejeição e não matcher silenciosamente ligado.
+pub const MATCHER_IDS: [&str; 10] = [
+    "quebra_permanencia_coluna",
+    "quebra_permanencia_duzia",
+    "quebra_cor_6x",
+    "quebra_alto_baixo_6x",
+    "quebra_par_impar_6x",
+    "setor_vies",
+    "setor_vies_duzia",
+    "fibonacci_lag",
+    "cluster_terminal",
+    "cluster_final",
+];
+
+/// Ajuste completo da leitura de padrões: faixas de repetição + interruptores.
+///
+/// As faixas vêm achatadas no JSON (`coluna`, `duzia`, ...) para o arquivo ficar
+/// legível; `disabled` é opcional, então um `tuning.json` antigo continua válido.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MatcherTuning {
+    /// Faixas `min..=max` dos cinco matchers de sequência.
+    #[serde(flatten)]
+    pub sequences: SequenceTuning,
+    /// Ids desligados pelo operador: não emitem sinal, mas seguem no binário.
+    #[serde(default)]
+    pub disabled: Vec<String>,
+}
+
+impl MatcherTuning {
+    /// Valida as faixas e recusa id desconhecido no interruptor.
+    pub fn validate(&self) -> Result<(), String> {
+        self.sequences.validate()?;
+        for id in &self.disabled {
+            if !MATCHER_IDS.contains(&id.as_str()) {
+                return Err(format!("matcher desconhecido: {id}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Matchers ligados agora (todos menos os desligados na dashboard).
+    pub fn matchers(&self) -> Vec<Arc<dyn Matcher>> {
+        self.sequences
+            .matchers()
+            .into_iter()
+            .filter(|m| !self.disabled.iter().any(|d| d == m.id()))
+            .collect()
+    }
+}
+
 /// Constrói o conjunto padrão completo de matchers nativos do projeto MONSTER:
 /// - Colunas (`2 to 1`) e Dúzias (`1st/2nd/3rd 12`): pré-alerta em `min - 1` (`0.50`) e entrada a partir de `min` (`>= 0.66`)
 /// - Vermelho/Preto, Baixo/Alto e Par/Ímpar: pré-alerta em `min - 1` (`0.50`) e entrada a partir de `min` (`>= 0.68`)
 /// - Viés de Setor Coluna (`setor_vies`), Viés de Setor Dúzia (`setor_vies_duzia`), Fibonacci Lag e Cluster Terminal.
 pub fn default_matchers() -> Vec<Arc<dyn Matcher>> {
-    SequenceTuning::default().matchers()
+    MatcherTuning::default().matchers()
 }
 
 #[cfg(test)]
@@ -983,6 +1036,38 @@ mod tests {
         let wide = col.evaluate(&[1, 4, 7, 10, 13, 20]).expect("streak 5 entra");
         assert!((wide.confidence - 0.82).abs() < 1e-9);
         assert!(col.evaluate(&[1, 4, 7, 10, 13, 16, 20]).is_none());
+    }
+
+    #[test]
+    fn matcher_ids_cobrem_exatamente_o_conjunto_padrao() {
+        let padrao: Vec<&str> = default_matchers().iter().map(|m| m.id()).collect();
+        assert_eq!(padrao, MATCHER_IDS, "allowlist do interruptor fora de sincronia");
+    }
+
+    #[test]
+    fn interruptor_desliga_so_o_matcher_escolhido_e_valida_id() {
+        let tuning = MatcherTuning {
+            sequences: SequenceTuning { coluna: StreakRange::new(3, 5), ..SequenceTuning::default() },
+            disabled: vec!["cluster_terminal".to_string(), "fibonacci_lag".to_string()],
+        };
+        assert!(tuning.validate().is_ok());
+        let ids: Vec<&str> = tuning.matchers().iter().map(|m| m.id()).collect();
+        assert_eq!(ids.len(), MATCHER_IDS.len() - 2);
+        assert!(!ids.contains(&"cluster_terminal"));
+        assert!(!ids.contains(&"fibonacci_lag"));
+        // As faixas continuam valendo para o que ficou ligado.
+        let col = tuning
+            .matchers()
+            .into_iter()
+            .find(|m| m.id() == "quebra_permanencia_coluna")
+            .expect("coluna segue ligada");
+        assert!(col.evaluate(&[1, 4, 7, 20]).is_some());
+
+        let typo = MatcherTuning {
+            disabled: vec!["cluster_termial".to_string()],
+            ..MatcherTuning::default()
+        };
+        assert!(typo.validate().is_err(), "id com typo precisa ser rejeitado");
     }
 
     #[test]

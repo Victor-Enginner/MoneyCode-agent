@@ -19,7 +19,7 @@ use monster_store::{
     all_ladder_steps, init_pool, insert_intent, insert_spin, IntentDecision, NewIntent, NewSpin,
     SpinSource, SqlitePool,
 };
-use monster_strategy_native::{Matcher, SequenceTuning};
+use monster_strategy_native::{Matcher, MatcherTuning};
 use monster_ui::FuiController;
 use std::env;
 use std::io::{Read, Write};
@@ -36,11 +36,11 @@ const TUNING_PATH: &str = "O:/Archives/Eistein/FUI AGENT ROULLET/config/tuning.j
 
 /// Lê o ajuste salvo; qualquer arquivo corrompido ou fora de faixa volta ao padrão do §8
 /// em vez de derrubar o boot com matcher inválido.
-fn load_sequence_tuning(path: &str) -> SequenceTuning {
+fn load_sequence_tuning(path: &str) -> MatcherTuning {
     let Ok(raw) = std::fs::read_to_string(path) else {
-        return SequenceTuning::default();
+        return MatcherTuning::default();
     };
-    match serde_json::from_str::<SequenceTuning>(&raw) {
+    match serde_json::from_str::<MatcherTuning>(&raw) {
         Ok(t) => match t.validate() {
             Ok(()) => {
                 println!("[TUNING] ajuste de sequências carregado de {path}");
@@ -48,19 +48,19 @@ fn load_sequence_tuning(path: &str) -> SequenceTuning {
             }
             Err(err) => {
                 eprintln!("[TUNING] {path} rejeitado ({err}) — voltando ao padrão");
-                SequenceTuning::default()
+                MatcherTuning::default()
             }
         },
         Err(err) => {
             eprintln!("[TUNING] {path} ilegível ({err}) — voltando ao padrão");
-            SequenceTuning::default()
+            MatcherTuning::default()
         }
     }
 }
 
 /// Persiste o ajuste aplicado. Falha de escrita é reportada mas não reverte a sessão:
 /// o operador prefere o gatilho novo em memória a voltar ao antigo sem aviso.
-fn save_sequence_tuning(path: &str, tuning: &SequenceTuning) -> std::io::Result<()> {
+fn save_sequence_tuning(path: &str, tuning: &MatcherTuning) -> std::io::Result<()> {
     if let Some(dir) = std::path::Path::new(path).parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -70,16 +70,16 @@ fn save_sequence_tuning(path: &str, tuning: &SequenceTuning) -> std::io::Result<
 }
 
 /// Snapshot do ajuste vigente (o guarda é `Copy`, então solta o lock imediatamente).
-fn tuning_snapshot(shared: &Arc<Mutex<SequenceTuning>>) -> SequenceTuning {
+fn tuning_snapshot(shared: &Arc<Mutex<MatcherTuning>>) -> MatcherTuning {
     match shared.lock() {
-        Ok(g) => *g,
-        Err(poisoned) => *poisoned.into_inner(),
+        Ok(g) => g.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
     }
 }
 
 /// Reconstrói os matchers a partir do ajuste vigente. Matcher nunca fica indisponível:
 /// se o lock estiver envenenado, o guard é recuperado em vez de devolver lista vazia.
-fn matchers_now(shared: &Arc<Mutex<SequenceTuning>>) -> Vec<Arc<dyn Matcher>> {
+fn matchers_now(shared: &Arc<Mutex<MatcherTuning>>) -> Vec<Arc<dyn Matcher>> {
     match shared.lock() {
         Ok(g) => g.matchers(),
         Err(poisoned) => poisoned.into_inner().matchers(),
@@ -176,7 +176,7 @@ fn spawn_fui_http_server(
     kill_switch: KillSwitch,
     history: Arc<Mutex<HistoryBuffer>>,
     cfg: Cfg,
-    tuning: Arc<Mutex<SequenceTuning>>,
+    tuning: Arc<Mutex<MatcherTuning>>,
     tuning_path: String,
 ) {
     thread::spawn(move || {
@@ -252,7 +252,7 @@ fn spawn_fui_http_server(
             } else if first_line.starts_with("GET /api/tuning") {
                 let resp = serde_json::json!({
                     "current": tuning_snapshot(&tuning),
-                    "defaults": SequenceTuning::default(),
+                    "defaults": MatcherTuning::default(),
                 });
                 let body = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string());
                 let out = format!(
@@ -262,14 +262,14 @@ fn spawn_fui_http_server(
                 );
                 let _ = stream.write_all(out.as_bytes());
             } else if first_line.starts_with("POST /api/tuning") {
-                let (status, payload) = match serde_json::from_str::<SequenceTuning>(&body) {
+                let (status, payload) = match serde_json::from_str::<MatcherTuning>(&body) {
                     Ok(next) => match next.validate() {
                         Ok(()) => {
                             let mut guard = match tuning.lock() {
                                 Ok(g) => g,
                                 Err(poisoned) => poisoned.into_inner(),
                             };
-                            *guard = next;
+                            *guard = next.clone();
                             drop(guard);
                             let persisted = match save_sequence_tuning(&tuning_path, &next) {
                                 Ok(()) => serde_json::json!({"ok": true, "tuning": next}),
@@ -283,12 +283,13 @@ fn spawn_fui_http_server(
                                 }
                             };
                             println!(
-                                "[TUNING] aplicado | coluna {}..={} | dúzia {}..={} | cor {}..={} | alto/baixo {}..={} | par/ímpar {}..={}",
-                                next.coluna.min, next.coluna.max,
-                                next.duzia.min, next.duzia.max,
-                                next.cor.min, next.cor.max,
-                                next.alto_baixo.min, next.alto_baixo.max,
-                                next.par_impar.min, next.par_impar.max
+                                "[TUNING] aplicado | coluna {}..={} | dúzia {}..={} | cor {}..={} | alto/baixo {}..={} | par/ímpar {}..={} | desligados={:?}",
+                                next.sequences.coluna.min, next.sequences.coluna.max,
+                                next.sequences.duzia.min, next.sequences.duzia.max,
+                                next.sequences.cor.min, next.sequences.cor.max,
+                                next.sequences.alto_baixo.min, next.sequences.alto_baixo.max,
+                                next.sequences.par_impar.min, next.sequences.par_impar.max,
+                                next.disabled
                             );
                             ("200 OK", persisted)
                         }
@@ -450,12 +451,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matchers = matchers_now(&tuning);
     let boot_tuning = tuning_snapshot(&tuning);
     println!(
-        "[TUNING] sequências | coluna {}..={} | dúzia {}..={} | cor {}..={} | alto/baixo {}..={} | par/ímpar {}..={}",
-        boot_tuning.coluna.min, boot_tuning.coluna.max,
-        boot_tuning.duzia.min, boot_tuning.duzia.max,
-        boot_tuning.cor.min, boot_tuning.cor.max,
-        boot_tuning.alto_baixo.min, boot_tuning.alto_baixo.max,
-        boot_tuning.par_impar.min, boot_tuning.par_impar.max
+        "[TUNING] sequências | coluna {}..={} | dúzia {}..={} | cor {}..={} | alto/baixo {}..={} | par/ímpar {}..={} | desligados={:?}",
+        boot_tuning.sequences.coluna.min, boot_tuning.sequences.coluna.max,
+        boot_tuning.sequences.duzia.min, boot_tuning.sequences.duzia.max,
+        boot_tuning.sequences.cor.min, boot_tuning.sequences.cor.max,
+        boot_tuning.sequences.alto_baixo.min, boot_tuning.sequences.alto_baixo.max,
+        boot_tuning.sequences.par_impar.min, boot_tuning.sequences.par_impar.max,
+        boot_tuning.disabled
     );
     let cal = Calibration::default();
     let dry_actuator = DryRunActuator::new();

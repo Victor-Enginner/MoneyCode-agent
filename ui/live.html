@@ -87,9 +87,16 @@
     .seq-editor { display: flex; flex-direction: column; gap: 6px; padding-top: 2px; }
     .seq-note { color: var(--muted); font-size: 10px; padding: 4px 6px; border: 1px solid var(--line); background: #0b0f17; }
     .seq-row {
-      display: grid; grid-template-columns: 1fr 132px 132px 150px; align-items: center; gap: 8px;
+      display: grid; grid-template-columns: 1fr 124px 124px 148px 104px; align-items: center; gap: 8px;
       padding: 6px 8px; background: #111622; border: 1px solid var(--line);
     }
+    .seq-row.off { opacity: 0.55; }
+    .seq-toggle {
+      height: 22px; padding: 0 8px; font-size: 10px; font-weight: 600; cursor: pointer;
+      background: var(--bg); border: 1px solid var(--line);
+    }
+    .seq-toggle.on { color: var(--ok); border-color: var(--ok); }
+    .seq-toggle.off { color: var(--muted); border-color: var(--dim); }
     .seq-name { font-size: 11px; font-weight: 600; color: var(--fg); }
     .seq-sub { font-size: 9px; color: var(--muted); }
     .seq-in { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 9px; color: var(--muted); }
@@ -192,17 +199,31 @@
     const glyphs = { OBSERVANDO:'●', ENTRADA:'◈', PAUSADO:'⏸', DEGRADED:'⚠', ERRO:'✖', KILLED:'■' };
     async function postCmd(cmd) { await fetch('/api/' + cmd, { method: 'POST' }); }
     // ---- Editor de sequências (POST /api/tuning) ----
-    const SEQ_FIELDS = [
-      { k: 'coluna', nome: 'REPETIÇÃO DE COLUNA (2 to 1)', sub: 'entra cobrindo as outras 2 colunas' },
-      { k: 'duzia', nome: 'REPETIÇÃO DE DÚZIA (1st/2nd/3rd 12)', sub: 'entra cobrindo as outras 2 dúzias' },
-      { k: 'cor', nome: 'REPETIÇÃO DE VERMELHO / PRETO', sub: 'entra na cor oposta · 1 cobertura' },
-      { k: 'alto_baixo', nome: 'REPETIÇÃO DE BAIXOS / ALTOS', sub: 'entra na metade oposta · 1 cobertura' },
-      { k: 'par_impar', nome: 'REPETIÇÃO DE PAR / ÍMPAR', sub: 'entra na paridade oposta · 1 cobertura' },
+    // ---- Editor de padrões: faixas de repetição + interruptor por matcher ----
+    const MATCHERS = [
+      { id: 'quebra_permanencia_coluna', k: 'coluna', nome: 'COLUNA (2 to 1)', sub: 'entra cobrindo as outras 2 colunas' },
+      { id: 'quebra_permanencia_duzia', k: 'duzia', nome: 'DÚZIA (1st/2nd/3rd 12)', sub: 'entra cobrindo as outras 2 dúzias' },
+      { id: 'quebra_cor_6x', k: 'cor', nome: 'VERMELHO / PRETO', sub: 'entra na cor oposta' },
+      { id: 'quebra_alto_baixo_6x', k: 'alto_baixo', nome: 'BAIXOS / ALTOS', sub: 'entra na metade oposta' },
+      { id: 'quebra_par_impar_6x', k: 'par_impar', nome: 'PAR / ÍMPAR', sub: 'entra na paridade oposta' },
+      { id: 'setor_vies', nome: 'VIÉS DE SETOR (coluna)', sub: 'temperatura do disco contra a expectativa uniforme' },
+      { id: 'setor_vies_duzia', nome: 'VIÉS DE SETOR (dúzia)', sub: 'temperatura por dúzia no disco' },
+      { id: 'fibonacci_lag', nome: 'FIBONACCI LAG', sub: 'recência do número por distância na roda' },
+      { id: 'cluster_terminal', nome: 'CLUSTER TERMINAL', sub: 'final persistente, cobre números plenos' },
+      { id: 'cluster_final', nome: 'CLUSTER FINAL (família)', sub: 'família 1-4-7 / 2-5-8 / 3-6-9' },
     ];
     const REDS = new Set([1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]);
     let seqLoaded = false;
     let seqDefaults = null;
     let seqCurrent = null;
+    let seqDisabled = [];
+    const matcherEnabled = (id) => !seqDisabled.includes(id);
+    function markDirty() {
+      const st = document.getElementById('seq-status');
+      if (!st) return;
+      st.textContent = 'ALTERADO · ainda não salvo';
+      st.style.color = 'var(--warn)';
+    }
     function seqProps() {
       return {
         coluna: (n) => n === 0 ? 0 : (n - 1) % 3 + 1,
@@ -233,31 +254,54 @@
       return out;
     }
     const seqSummary = (t) => t
-      ? `col ${t.coluna.min}–${t.coluna.max} · dúz ${t.duzia.min}–${t.duzia.max} · cor ${t.cor.min}–${t.cor.max} · A/B ${t.alto_baixo.min}–${t.alto_baixo.max} · P/I ${t.par_impar.min}–${t.par_impar.max}`
+      ? `col ${t.coluna.min}–${t.coluna.max} · dúz ${t.duzia.min}–${t.duzia.max} · cor ${t.cor.min}–${t.cor.max} · A/B ${t.alto_baixo.min}–${t.alto_baixo.max} · P/I ${t.par_impar.min}–${t.par_impar.max} · ${(t.disabled || []).length} desligado(s)`
       : '—';
+    function toggleMatcher(id) {
+      const i = seqDisabled.indexOf(id);
+      if (i >= 0) seqDisabled.splice(i, 1); else seqDisabled.push(id);
+      const on = matcherEnabled(id);
+      const btn = document.getElementById('seq-tg-' + id);
+      if (btn) {
+        btn.textContent = on ? '● LIGADO' : '○ DESLIGADO';
+        btn.className = 'seq-toggle ' + (on ? 'on' : 'off');
+      }
+      const row = document.getElementById('seq-row-' + id);
+      if (row) row.classList.toggle('off', !on);
+      const cnt = document.getElementById('seq-count');
+      if (cnt) cnt.textContent = (MATCHERS.length - seqDisabled.length) + '/' + MATCHERS.length + ' ligados';
+      markDirty();
+    }
     function buildSeqEditor(t) {
       const box = document.getElementById('seq-editor');
+      seqDisabled = (t.disabled || []).slice();
+      const rows = MATCHERS.map((m) => {
+        const on = matcherEnabled(m.id);
+        const controles = m.k
+          ? `<label class="seq-in">ENTRA EM <input type="number" min="2" max="20" step="1" value="${t[m.k].min}" data-k="${m.k}" data-b="min"></label>
+             <label class="seq-in">ATÉ <input type="number" min="2" max="20" step="1" value="${t[m.k].max}" data-k="${m.k}" data-b="max"></label>
+             <div class="seq-live"><span class="metric-label">AGORA</span><span id="seq-live-${m.k}" class="seq-pill">—</span></div>`
+          : `<div class="seq-in" style="justify-content:center;color:var(--dim);">SEM FAIXA</div>
+             <div class="seq-in" style="justify-content:center;color:var(--dim);">—</div>
+             <div class="seq-live"><span class="metric-label">PARÂMETRO</span><span class="seq-pill">ESTATÍSTICO</span></div>`;
+        return `<div class="seq-row${on ? '' : ' off'}" id="seq-row-${m.id}">
+          <div><div class="seq-name">${m.nome}</div><div class="seq-sub">${m.sub}</div></div>
+          ${controles}
+          <button type="button" id="seq-tg-${m.id}" class="seq-toggle ${on ? 'on' : 'off'}" onclick="toggleMatcher('${m.id}')">${on ? '● LIGADO' : '○ DESLIGADO'}</button>
+        </div>`;
+      }).join('');
       box.innerHTML = `
-        <div class="seq-note">Ajuste fino do gatilho. <strong>Entra em</strong> = repetição que dispara a aposta; <strong>até</strong> = última repetição aceita (acima dela o matcher fica em silêncio). O pré-alerta sai em (entra − 1) só como observação: confiança 0,50 fica abaixo do corte de 0,55 e nunca vira aposta. Vale a partir do próximo giro.</div>
-        ${SEQ_FIELDS.map((f) => `
-          <div class="seq-row">
-            <div><div class="seq-name">${f.nome}</div><div class="seq-sub">${f.sub}</div></div>
-            <label class="seq-in">ENTRA EM <input type="number" min="2" max="20" step="1" value="${t[f.k].min}" data-k="${f.k}" data-b="min"></label>
-            <label class="seq-in">ATÉ <input type="number" min="2" max="20" step="1" value="${t[f.k].max}" data-k="${f.k}" data-b="max"></label>
-            <div class="seq-live"><span class="metric-label">AGORA</span><span id="seq-live-${f.k}" class="seq-pill">—</span></div>
-          </div>`).join('')}
+        <div class="seq-note">Duas coisas separadas: <strong>faixa</strong> muda <em>quando</em> o padrão entra (entra em N repetições, aceita até M); <strong>interruptor</strong> tira o padrão do jogo por inteiro, sem mexer no que os outros estão fazendo. O pré-alerta sai em (entra − 1) só como observação, com confiança 0,50 — abaixo do corte de 0,55, nunca vira aposta. Vale a partir do próximo giro.</div>
+        ${rows}
         <div class="seq-foot">
           <span id="seq-status" style="color:var(--muted);">—</span>
+          <span id="seq-count" class="num" style="color:var(--muted);">${MATCHERS.length - seqDisabled.length}/${MATCHERS.length} ligados</span>
           <div style="display:flex;gap:6px;">
             <button type="button" class="btn-ghost" onclick="resetSeqTuning()">RESTAURAR PADRÃO</button>
             <button type="button" class="btn-save" onclick="saveSeqTuning()">SALVAR AJUSTES</button>
           </div>
         </div>`;
-      document.querySelectorAll('#seq-editor input').forEach((i) => i.addEventListener('input', () => {
-        const st = document.getElementById('seq-status');
-        st.textContent = 'ALTERADO · ainda não salvo';
-        st.style.color = 'var(--warn)';
-      }));
+      document.querySelectorAll('#seq-editor input').forEach((i) => i.addEventListener('input', markDirty));
+      if (lastTick) updateSeqLive(lastTick.spins || []);
     }
     async function loadSeqTuning() {
       try {
@@ -268,7 +312,6 @@
         const st = document.getElementById('seq-status');
         st.textContent = 'VIGENTE · ' + seqSummary(j.current);
         st.style.color = 'var(--muted)';
-        if (lastTick) updateSeqLive(lastTick.spins || []);
       } catch (_) {
         const st = document.getElementById('seq-status');
         if (st) { st.textContent = 'FALHA AO LER /api/tuning'; st.style.color = 'var(--bad)'; }
@@ -276,18 +319,23 @@
     }
     function updateSeqLive(spins) {
       const live = seqLive(spins || []);
-      SEQ_FIELDS.forEach((f) => {
-        const el = document.getElementById('seq-live-' + f.k);
+      MATCHERS.filter((m) => m.k).forEach((m) => {
+        const el = document.getElementById('seq-live-' + m.k);
         if (!el) return;
-        const inp = document.querySelector(`#seq-editor input[data-k="${f.k}"][data-b="min"]`);
+        if (!matcherEnabled(m.id)) {
+          el.textContent = 'DESLIGADO';
+          el.className = 'seq-pill';
+          return;
+        }
+        const inp = document.querySelector(`#seq-editor input[data-k="${m.k}"][data-b="min"]`);
         const min = inp ? Number(inp.value) : 0;
-        const cur = live[f.k];
+        const cur = live[m.k];
         el.textContent = cur.len ? `${cur.len}× ${cur.label}` : '—';
         el.className = 'seq-pill' + (min > 0 && cur.len >= min ? ' trigger' : (min > 1 && cur.len === min - 1 ? ' armed' : ''));
       });
     }
     async function saveSeqTuning() {
-      const body = {};
+      const body = { disabled: seqDisabled.slice() };
       document.querySelectorAll('#seq-editor input').forEach((i) => {
         body[i.dataset.k] = body[i.dataset.k] || {};
         body[i.dataset.k][i.dataset.b] = Number(i.value);
@@ -315,7 +363,6 @@
       const st = document.getElementById('seq-status');
       st.textContent = 'PADRÃO CARREGADO · clique em SALVAR AJUSTES para aplicar';
       st.style.color = 'var(--warn)';
-      if (lastTick) updateSeqLive(lastTick.spins || []);
     }
     function setTab(t, btn) {
       currentTab = t;
