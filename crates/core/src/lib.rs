@@ -192,7 +192,9 @@ mod tests {
 
             assert_eq!(fills.preview_cents, plan.total_cents);
             assert!(!fills.naked);
-            assert_eq!(fills.items.len(), 2);
+            // Degrau 3+ leva a ficha de proteção no 0 como terceira cobertura.
+            let expected_items = if plan.ladder_step >= crate::dag::ZERO_INSURANCE_FROM_STEP { 3 } else { 2 };
+            assert_eq!(fills.items.len(), expected_items);
 
             let rec = reconcile_spin(
                 &pool,
@@ -203,7 +205,9 @@ mod tests {
                 },
                 19, // Coluna 2 vence (Col(2) e Col(3) cobertas)
                 &cfg,
-                Some(plan.stake_per_cover_cents as i64),
+                // Extrato real do acerto: +1 ficha da coluna menos a ficha de protecao do 0 (degrau 3+).
+                Some(plan.stake_per_cover_cents as i64
+                    - (plan.total_cents - 2 * plan.stake_per_cover_cents) as i64),
                 now_ms + 500,
             )
             .expect("reconcile spin");
@@ -518,7 +522,8 @@ mod ladder_isolation_tests {
         );
         let terceiro = out3.plan.expect("entrada da própria estratégia");
         assert_eq!(terceiro.ladder_step, 3);
-        assert_eq!(terceiro.total_cents, 180);
+        // Degrau 3 da propria escada: 2 x 90c (base 10c) + 10c de protecao no 0.
+        assert_eq!(terceiro.total_cents, 190);
 
         // Com a escada carregada, um `step` global alto (resíduo de outra estratégia) é ignorado.
         let carregado = State { step: 3, ..state };
@@ -546,6 +551,6 @@ mod ladder_isolation_tests {
             stake_cents(3, cfg.base_cents),
             "degrau 3 = 90¢ por cobertura"
         );
-        assert_eq!(terceiro.total_cents, 180);
+        assert_eq!(terceiro.total_cents, 190, "180 + 10 de protecao no 0");
     }
 }

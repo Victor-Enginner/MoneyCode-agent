@@ -210,11 +210,18 @@ fn compile_plan(spin_id: &str, winner: &Aggregate, ladder_step: u8, cfg: &Cfg) -
             (covers, stake, ev)
         } else {
             let stake = stake_cents(ladder_step, cfg.base_cents);
-            let covers = winner.cover.iter().copied().map(|c| (c, stake)).collect();
+            let mut covers: Vec<(Cover, u64)> =
+                winner.cover.iter().copied().map(|c| (c, stake)).collect();
+            // Proteção do zero a partir do degrau 3: toda aposta por fora perde no 0, e no degrau
+            // alto o 0 estoura a escada. A ficha devolve a aposta inteira se sair o 0.
+            if let Some(z) = zero_insurance_cents(ladder_step, stake * covers.len() as u64) {
+                covers.push((Cover::Straight(0), z));
+            }
             (covers, stake, compute_ev_cents_two_covers(stake))
         };
 
-    let total_cents = stake_per_cover_cents.saturating_mul(covers.len() as u64);
+    // Soma cobertura a cobertura: a ficha de proteção do 0 tem valor próprio.
+    let total_cents = covers.iter().map(|(_, c)| *c).sum::<u64>();
     let chips_per_cover = decompose(stake_per_cover_cents, &cfg.chip_denoms_cents);
     Some(Plan {
         spin_id: spin_id.to_string(),
@@ -227,6 +234,20 @@ fn compile_plan(spin_id: &str, winner: &Aggregate, ladder_step: u8, cfg: &Cfg) -
         covers,
         chips_per_cover,
     })
+}
+
+/// Primeiro degrau em que as entradas por fora levam a ficha de proteção no 0.
+/// Degraus 1 e 2 ficam sem: ali a ficha comeria metade do lucro de cada acerto.
+pub const ZERO_INSURANCE_FROM_STEP: u8 = 3;
+
+/// Ficha no pleno 0 que devolve a aposta por fora inteira se sair o 0: `ceil(total / 36)`,
+/// arredondada para cima em fichas de 10¢ (o 0 paga 35:1 + a ficha = 36x).
+pub const fn zero_insurance_cents(ladder_step: u8, outside_total_cents: u64) -> Option<u64> {
+    if ladder_step < ZERO_INSURANCE_FROM_STEP || outside_total_cents == 0 {
+        return None;
+    }
+    let raw = outside_total_cents.div_ceil(36);
+    Some(raw.div_ceil(10) * 10)
 }
 
 /// Família dos matchers "de fora" (quebra de permanência), dona da prioridade de entrada.
@@ -647,6 +668,37 @@ mod tests {
         assert_eq!(apply_permanence_priority(&mut aggs, &LadderSteps::new(), 0.55), 1);
         assert_eq!(aggs.len(), 1);
         assert_eq!(aggs[0].strategy_id, "quebra_permanencia_coluna");
+    }
+
+    #[test]
+    fn zero_protegido_so_a_partir_do_degrau_3_e_devolve_a_aposta() {
+        assert_eq!(zero_insurance_cents(1, 40), None);
+        assert_eq!(zero_insurance_cents(2, 120), None);
+        assert_eq!(zero_insurance_cents(3, 360), Some(10));
+        assert_eq!(zero_insurance_cents(4, 1080), Some(30));
+        assert_eq!(zero_insurance_cents(5, 3240), Some(90));
+        // O 0 paga 36x a ficha: cobre a aposta por fora inteira.
+        for (step, total) in [(3u8, 360u64), (4, 1080), (5, 3240)] {
+            let z = zero_insurance_cents(step, total).expect("z");
+            assert!(36 * z >= total, "degrau {step}: 36*{z} < {total}");
+        }
+    }
+
+    #[test]
+    fn plano_de_coluna_no_degrau_3_inclui_o_zero() {
+        let w = Aggregate {
+            strategy_id: "quebra_permanencia_coluna".to_string(),
+            confidence: 0.7,
+            cover: vec![Cover::Col(1), Cover::Col(3)],
+            regime_veto: false,
+        };
+        let cfg = Cfg { base_cents: 20, ..Cfg::default() };
+        let p1 = compile_plan("s", &w, 1, &cfg).expect("plano");
+        assert!(!p1.covers.iter().any(|(c, _)| *c == Cover::Straight(0)));
+        assert_eq!(p1.total_cents, 40);
+        let p3 = compile_plan("s", &w, 3, &cfg).expect("plano");
+        assert!(p3.covers.contains(&(Cover::Straight(0), 10)));
+        assert_eq!(p3.total_cents, 180 + 180 + 10);
     }
 
     #[test]

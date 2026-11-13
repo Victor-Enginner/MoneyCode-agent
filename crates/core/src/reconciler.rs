@@ -112,7 +112,23 @@ pub fn reconcile_spin(
     let played_step = entry.ladder_step.max(1);
     let mut ladder_blown = false;
 
-    let (next_step, next_loss_cents, reset_at) = if won {
+    // Zero protegido: entrada por fora com a ficha de proteção no 0, e saiu o 0. A aposta voltou
+    // (≈ empate), então a escada REPETE o degrau em vez de zerar: a perda dos degraus anteriores
+    // continua para ser recuperada.
+    let outside_entry = acks
+        .iter()
+        .any(|a| !matches!(a.cover, Cover::Straight(_) | Cover::Terminal(_)));
+    let zero_protected = winning_number == 0
+        && outside_entry
+        && acks.iter().any(|a| a.acked && a.cover == Cover::Straight(0));
+    let (next_step, next_loss_cents, reset_at) = if zero_protected {
+        let leftover = u64::try_from((-expected_delta_cents).max(0)).unwrap_or(0);
+        (
+            played_step.saturating_sub(1),
+            current.loss_cents.saturating_add(leftover),
+            current.reset_at,
+        )
+    } else if won {
         (0u8, 0u64, Some(now_ms))
     } else {
         let spin_loss = expected_delta_cents.unsigned_abs();
@@ -253,6 +269,32 @@ mod tests {
             .expect("reconcile degrau final");
         assert!(r.ladder_blown);
         assert_eq!(r.next_step, 0);
+    }
+
+    #[test]
+    fn zero_protegido_repete_o_degrau_em_vez_de_zerar() {
+        let pool = init_pool(":memory:").expect("pool");
+        let cfg = Cfg::default();
+        // Degrau 4 de coluna (5,40 por coluna) + 0,30 no zero; sai o 0.
+        let acks = [
+            CoverAck { cover: Cover::Col(1), stake_cents: 540, acked: true },
+            CoverAck { cover: Cover::Col(3), stake_cents: 540, acked: true },
+            CoverAck { cover: Cover::Straight(0), stake_cents: 30, acked: true },
+        ];
+        let r = reconcile_spin(&pool, entrada("quebra_permanencia_coluna", 4, &acks), 0, &cfg, None, 1)
+            .expect("reconcile");
+        assert_eq!(r.next_step, 3, "joga o degrau 4 de novo");
+        assert_eq!(r.expected_delta_cents, 30 * 35 - 1080);
+        assert!(!r.ladder_blown);
+        // Sem o zero (degrau 1/2), o 0 continua sendo perda normal.
+        let acks2 = [
+            CoverAck { cover: Cover::Col(1), stake_cents: 20, acked: true },
+            CoverAck { cover: Cover::Col(3), stake_cents: 20, acked: true },
+        ];
+        let r2 = reconcile_spin(&pool, entrada("quebra_permanencia_duzia", 1, &acks2), 0, &cfg, None, 1)
+            .expect("reconcile");
+        assert!(!r2.won);
+        assert_eq!(r2.next_step, 1);
     }
 
     #[test]
