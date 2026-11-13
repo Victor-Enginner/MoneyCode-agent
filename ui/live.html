@@ -83,6 +83,32 @@
       background: rgba(34, 211, 238, 0.18); border-color: var(--accent); color: var(--accent);
     }
     .wheel-grid .cell.last, .wheel-zero.last { box-shadow: inset 0 0 0 1px #fff; color: #fff; }
+    /* Editor de sequências: faixas min..=max por matcher, com a sequência atual ao lado. */
+    .seq-editor { display: flex; flex-direction: column; gap: 6px; padding-top: 2px; }
+    .seq-note { color: var(--muted); font-size: 10px; padding: 4px 6px; border: 1px solid var(--line); background: #0b0f17; }
+    .seq-row {
+      display: grid; grid-template-columns: 1fr 132px 132px 150px; align-items: center; gap: 8px;
+      padding: 6px 8px; background: #111622; border: 1px solid var(--line);
+    }
+    .seq-name { font-size: 11px; font-weight: 600; color: var(--fg); }
+    .seq-sub { font-size: 9px; color: var(--muted); }
+    .seq-in { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 9px; color: var(--muted); }
+    .seq-in input {
+      width: 44px; height: 20px; background: var(--bg); color: var(--accent); border: 1px solid var(--line);
+      font-size: 11px; font-weight: 600; text-align: right; padding: 0 4px;
+    }
+    .seq-in input:focus { outline: none; border-color: var(--accent); }
+    .seq-live { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+    .seq-pill { font-size: 10px; font-weight: 600; padding: 1px 6px; border: 1px solid var(--line); color: var(--muted); }
+    .seq-pill.armed { color: var(--accent); border-color: var(--accent); }
+    .seq-pill.trigger { color: var(--warn); border-color: var(--warn); background: #1b160a; }
+    .seq-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 4px; }
+    .btn-ghost, .btn-save {
+      height: 22px; padding: 0 10px; font-size: 10px; font-weight: 600; cursor: pointer;
+      background: var(--bg); color: var(--muted); border: 1px solid var(--line);
+    }
+    .btn-save { color: #04121a; background: var(--accent); border-color: var(--accent); }
+    .btn-ghost:hover { color: var(--fg); border-color: var(--muted); }
   </style>
 </head>
 <body>
@@ -129,7 +155,7 @@
       </div>
     </section>
     <section class="panel-d">
-      <div class="panel-header"><span>ESCADA ×3 (4 DEGRAUS)</span><span class="num">FONTE: LADDER_STATE</span></div>
+      <div class="panel-header"><span id="ladder-title">ESCADA ×3</span><span class="num">FONTE: LADDER_STATE</span></div>
       <table class="num">
         <thead><tr><th>#</th><th>FICHA/COL</th><th>EXPOSIÇÃO</th><th>PERDA ACUM.</th></tr></thead>
         <tbody id="ladder-body"></tbody>
@@ -147,9 +173,11 @@
         <button class="tab-btn" onclick="setTab('ERROS', this)">[4] ERROS</button>
         <button class="tab-btn" onclick="setTab('PADROES', this)">[5] PADROES (WALK-FORWARD)</button>
         <button class="tab-btn" onclick="setTab('BRAIN', this)">[6] BRAIN &amp; DATALAB (24/7)</button>
+        <button class="tab-btn" onclick="setTab('SEQUENCIAS', this)">[7] SEQUÊNCIAS (AJUSTE)</button>
       </div>
       <div style="overflow-y:auto;flex:1;">
-        <table class="num"><thead id="tab-head"></thead><tbody id="tab-body"></tbody></table>
+        <table class="num" id="tab-table"><thead id="tab-head"></thead><tbody id="tab-body"></tbody></table>
+        <div id="seq-editor" class="seq-editor num" style="display:none;"></div>
       </div>
     </section>
   </main>
@@ -163,10 +191,140 @@
     const fmtClock = (s) => (s === null || s === undefined) ? '—' : String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
     const glyphs = { OBSERVANDO:'●', ENTRADA:'◈', PAUSADO:'⏸', DEGRADED:'⚠', ERRO:'✖', KILLED:'■' };
     async function postCmd(cmd) { await fetch('/api/' + cmd, { method: 'POST' }); }
+    // ---- Editor de sequências (POST /api/tuning) ----
+    const SEQ_FIELDS = [
+      { k: 'coluna', nome: 'REPETIÇÃO DE COLUNA (2 to 1)', sub: 'entra cobrindo as outras 2 colunas' },
+      { k: 'duzia', nome: 'REPETIÇÃO DE DÚZIA (1st/2nd/3rd 12)', sub: 'entra cobrindo as outras 2 dúzias' },
+      { k: 'cor', nome: 'REPETIÇÃO DE VERMELHO / PRETO', sub: 'entra na cor oposta · 1 cobertura' },
+      { k: 'alto_baixo', nome: 'REPETIÇÃO DE BAIXOS / ALTOS', sub: 'entra na metade oposta · 1 cobertura' },
+      { k: 'par_impar', nome: 'REPETIÇÃO DE PAR / ÍMPAR', sub: 'entra na paridade oposta · 1 cobertura' },
+    ];
+    const REDS = new Set([1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]);
+    let seqLoaded = false;
+    let seqDefaults = null;
+    let seqCurrent = null;
+    function seqProps() {
+      return {
+        coluna: (n) => n === 0 ? 0 : (n - 1) % 3 + 1,
+        duzia: (n) => n === 0 ? 0 : Math.floor((n - 1) / 12) + 1,
+        cor: (n) => n === 0 ? 0 : (REDS.has(n) ? 1 : 2),
+        alto_baixo: (n) => n === 0 ? 0 : (n <= 18 ? 1 : 2),
+        par_impar: (n) => n === 0 ? 0 : (n % 2 === 0 ? 1 : 2),
+      };
+    }
+    function seqLive(spins) {
+      const props = seqProps();
+      const labels = {
+        coluna: (v) => 'C' + v, duzia: (v) => 'D' + v,
+        cor: (v) => v === 1 ? 'VERMELHO' : 'PRETO',
+        alto_baixo: (v) => v === 1 ? 'BAIXO' : 'ALTO',
+        par_impar: (v) => v === 1 ? 'PAR' : 'ÍMPAR',
+      };
+      const out = {};
+      Object.keys(props).forEach((k) => {
+        const f = props[k];
+        const target = spins.length ? f(spins[0].number) : 0;
+        let len = 0;
+        if (target !== 0) {
+          for (const s of spins) { if (f(s.number) !== target) break; len++; }
+        }
+        out[k] = { len, label: target === 0 ? 'ZERO' : labels[k](target) };
+      });
+      return out;
+    }
+    const seqSummary = (t) => t
+      ? `col ${t.coluna.min}–${t.coluna.max} · dúz ${t.duzia.min}–${t.duzia.max} · cor ${t.cor.min}–${t.cor.max} · A/B ${t.alto_baixo.min}–${t.alto_baixo.max} · P/I ${t.par_impar.min}–${t.par_impar.max}`
+      : '—';
+    function buildSeqEditor(t) {
+      const box = document.getElementById('seq-editor');
+      box.innerHTML = `
+        <div class="seq-note">Ajuste fino do gatilho. <strong>Entra em</strong> = repetição que dispara a aposta; <strong>até</strong> = última repetição aceita (acima dela o matcher fica em silêncio). O pré-alerta sai em (entra − 1) só como observação: confiança 0,50 fica abaixo do corte de 0,55 e nunca vira aposta. Vale a partir do próximo giro.</div>
+        ${SEQ_FIELDS.map((f) => `
+          <div class="seq-row">
+            <div><div class="seq-name">${f.nome}</div><div class="seq-sub">${f.sub}</div></div>
+            <label class="seq-in">ENTRA EM <input type="number" min="2" max="20" step="1" value="${t[f.k].min}" data-k="${f.k}" data-b="min"></label>
+            <label class="seq-in">ATÉ <input type="number" min="2" max="20" step="1" value="${t[f.k].max}" data-k="${f.k}" data-b="max"></label>
+            <div class="seq-live"><span class="metric-label">AGORA</span><span id="seq-live-${f.k}" class="seq-pill">—</span></div>
+          </div>`).join('')}
+        <div class="seq-foot">
+          <span id="seq-status" style="color:var(--muted);">—</span>
+          <div style="display:flex;gap:6px;">
+            <button type="button" class="btn-ghost" onclick="resetSeqTuning()">RESTAURAR PADRÃO</button>
+            <button type="button" class="btn-save" onclick="saveSeqTuning()">SALVAR AJUSTES</button>
+          </div>
+        </div>`;
+      document.querySelectorAll('#seq-editor input').forEach((i) => i.addEventListener('input', () => {
+        const st = document.getElementById('seq-status');
+        st.textContent = 'ALTERADO · ainda não salvo';
+        st.style.color = 'var(--warn)';
+      }));
+    }
+    async function loadSeqTuning() {
+      try {
+        const j = await (await fetch('/api/tuning')).json();
+        seqDefaults = j.defaults; seqCurrent = j.current;
+        buildSeqEditor(j.current);
+        seqLoaded = true;
+        const st = document.getElementById('seq-status');
+        st.textContent = 'VIGENTE · ' + seqSummary(j.current);
+        st.style.color = 'var(--muted)';
+        if (lastTick) updateSeqLive(lastTick.spins || []);
+      } catch (_) {
+        const st = document.getElementById('seq-status');
+        if (st) { st.textContent = 'FALHA AO LER /api/tuning'; st.style.color = 'var(--bad)'; }
+      }
+    }
+    function updateSeqLive(spins) {
+      const live = seqLive(spins || []);
+      SEQ_FIELDS.forEach((f) => {
+        const el = document.getElementById('seq-live-' + f.k);
+        if (!el) return;
+        const inp = document.querySelector(`#seq-editor input[data-k="${f.k}"][data-b="min"]`);
+        const min = inp ? Number(inp.value) : 0;
+        const cur = live[f.k];
+        el.textContent = cur.len ? `${cur.len}× ${cur.label}` : '—';
+        el.className = 'seq-pill' + (min > 0 && cur.len >= min ? ' trigger' : (min > 1 && cur.len === min - 1 ? ' armed' : ''));
+      });
+    }
+    async function saveSeqTuning() {
+      const body = {};
+      document.querySelectorAll('#seq-editor input').forEach((i) => {
+        body[i.dataset.k] = body[i.dataset.k] || {};
+        body[i.dataset.k][i.dataset.b] = Number(i.value);
+      });
+      const st = document.getElementById('seq-status');
+      try {
+        const r = await fetch('/api/tuning', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const j = await r.json();
+        if (j.ok) {
+          seqCurrent = j.tuning;
+          st.textContent = 'APLICADO · ' + (j.warning ? j.warning : 'salvo em config/tuning.json') + ' · ' + seqSummary(j.tuning);
+          st.style.color = 'var(--ok)';
+        } else {
+          st.textContent = 'REJEITADO · ' + j.error;
+          st.style.color = 'var(--bad)';
+        }
+      } catch (e) {
+        st.textContent = 'FALHA DE REDE · ' + e;
+        st.style.color = 'var(--bad)';
+      }
+    }
+    function resetSeqTuning() {
+      if (!seqDefaults) return;
+      buildSeqEditor(seqDefaults);
+      const st = document.getElementById('seq-status');
+      st.textContent = 'PADRÃO CARREGADO · clique em SALVAR AJUSTES para aplicar';
+      st.style.color = 'var(--warn)';
+      if (lastTick) updateSeqLive(lastTick.spins || []);
+    }
     function setTab(t, btn) {
       currentTab = t;
       document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
       if (btn) btn.classList.add('active');
+      const isSeq = t === 'SEQUENCIAS';
+      document.getElementById('tab-table').style.display = isSeq ? 'none' : 'table';
+      document.getElementById('seq-editor').style.display = isSeq ? 'flex' : 'none';
+      if (isSeq && !seqLoaded) loadSeqTuning();
       if (lastTick) render(lastTick);
     }
     window.addEventListener('keydown', (e) => {
@@ -179,6 +337,7 @@
       else if (e.key === '4') setTab('ERROS', document.querySelectorAll('.tab-btn')[3]);
       else if (e.key === '5') setTab('PADROES', document.querySelectorAll('.tab-btn')[4]);
       else if (e.key === '6') setTab('BRAIN', document.querySelectorAll('.tab-btn')[5]);
+      else if (e.key === '7') setTab('SEQUENCIAS', document.querySelectorAll('.tab-btn')[6]);
     });
     function render(t) {
       lastTick = t;
@@ -190,6 +349,7 @@
       document.getElementById('m-bank').textContent = fmtCents(t.session?.bankroll_cents);
       document.getElementById('m-pnl').textContent = fmtCents(t.session?.pnl_cents);
       document.getElementById('m-step').textContent = (t.ladder?.current_step !== null && t.ladder?.max_steps !== null) ? `${t.ladder.current_step}/${t.ladder.max_steps}` : '—';
+      document.getElementById('ladder-title').textContent = 'ESCADA ×3 (' + fmtVal(t.ladder?.max_steps) + ' DEGRAUS)';
       document.getElementById('m-bet').textContent = fmtCents(t.session?.table_bet_cents);
       document.getElementById('m-win').textContent = fmtCents(t.session?.last_win_cents);
       document.getElementById('c-cover').textContent = fmtVal(t.session?.active_cover_label);
@@ -227,6 +387,10 @@
       }
       const lb = document.getElementById('ladder-body');
       lb.innerHTML = (t.ladder?.rows || []).map(r => `<tr class="${r.active?'ladder-row-active':''}"><td>${r.active?'▸ '+r.step:r.step}</td><td>${fmtCents(r.stake_per_cover_cents)}</td><td>${fmtCents(r.exposure_cents)}</td><td>${fmtCents(r.cum_loss_cents)}</td></tr>`).join('');
+      if (currentTab === 'SEQUENCIAS') {
+        updateSeqLive(spins);
+        return;
+      }
       const th = document.getElementById('tab-head');
       const tb = document.getElementById('tab-body');
       if (currentTab === 'DECISOES') {

@@ -19,7 +19,7 @@ use monster_store::{
     all_ladder_steps, init_pool, insert_intent, insert_spin, IntentDecision, NewIntent, NewSpin,
     SpinSource, SqlitePool,
 };
-use monster_strategy_native::default_matchers;
+use monster_strategy_native::{Matcher, SequenceTuning};
 use monster_ui::FuiController;
 use std::env;
 use std::io::{Read, Write};
@@ -30,6 +30,99 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const LIVE_FUI_HTML: &str = include_str!("../../../ui/live.html");
+
+/// Ajuste das sequências editado na dashboard: vive em disco para sobreviver ao restart.
+const TUNING_PATH: &str = "O:/Archives/Eistein/FUI AGENT ROULLET/config/tuning.json";
+
+/// Lê o ajuste salvo; qualquer arquivo corrompido ou fora de faixa volta ao padrão do §8
+/// em vez de derrubar o boot com matcher inválido.
+fn load_sequence_tuning(path: &str) -> SequenceTuning {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return SequenceTuning::default();
+    };
+    match serde_json::from_str::<SequenceTuning>(&raw) {
+        Ok(t) => match t.validate() {
+            Ok(()) => {
+                println!("[TUNING] ajuste de sequências carregado de {path}");
+                t
+            }
+            Err(err) => {
+                eprintln!("[TUNING] {path} rejeitado ({err}) — voltando ao padrão");
+                SequenceTuning::default()
+            }
+        },
+        Err(err) => {
+            eprintln!("[TUNING] {path} ilegível ({err}) — voltando ao padrão");
+            SequenceTuning::default()
+        }
+    }
+}
+
+/// Persiste o ajuste aplicado. Falha de escrita é reportada mas não reverte a sessão:
+/// o operador prefere o gatilho novo em memória a voltar ao antigo sem aviso.
+fn save_sequence_tuning(path: &str, tuning: &SequenceTuning) -> std::io::Result<()> {
+    if let Some(dir) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let body = serde_json::to_string_pretty(tuning)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    std::fs::write(path, body)
+}
+
+/// Snapshot do ajuste vigente (o guarda é `Copy`, então solta o lock imediatamente).
+fn tuning_snapshot(shared: &Arc<Mutex<SequenceTuning>>) -> SequenceTuning {
+    match shared.lock() {
+        Ok(g) => *g,
+        Err(poisoned) => *poisoned.into_inner(),
+    }
+}
+
+/// Reconstrói os matchers a partir do ajuste vigente. Matcher nunca fica indisponível:
+/// se o lock estiver envenenado, o guard é recuperado em vez de devolver lista vazia.
+fn matchers_now(shared: &Arc<Mutex<SequenceTuning>>) -> Vec<Arc<dyn Matcher>> {
+    match shared.lock() {
+        Ok(g) => g.matchers(),
+        Err(poisoned) => poisoned.into_inner().matchers(),
+    }
+}
+
+/// Lê a requisição inteira (cabeçalho + corpo) respeitando `Content-Length`, para o
+/// `POST /api/tuning` não perder o JSON quando ele não chega no primeiro pacote.
+fn read_http_request(stream: &mut std::net::TcpStream) -> std::io::Result<(String, String)> {
+    let mut raw: Vec<u8> = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        raw.extend_from_slice(&chunk[..n]);
+        if let Some(head_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&raw[..head_end]).to_string();
+            let len = head
+                .lines()
+                .find_map(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    lower
+                        .strip_prefix("content-length:")
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            if raw.len() >= head_end + 4 + len {
+                let body = String::from_utf8_lossy(&raw[head_end + 4..]).to_string();
+                return Ok((head, body));
+            }
+        }
+        if raw.len() > 64 * 1024 {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&raw).to_string();
+    match text.find("\r\n\r\n") {
+        Some(i) => Ok((text[..i].to_string(), text[i + 4..].to_string())),
+        None => Ok((text, String::new())),
+    }
+}
 
 fn now_unix_ms() -> i64 {
     SystemTime::now()
@@ -83,10 +176,11 @@ fn spawn_fui_http_server(
     kill_switch: KillSwitch,
     history: Arc<Mutex<HistoryBuffer>>,
     cfg: Cfg,
+    tuning: Arc<Mutex<SequenceTuning>>,
+    tuning_path: String,
 ) {
     thread::spawn(move || {
         let boot_instant = std::time::Instant::now();
-        let matchers = default_matchers();
         let Ok(listener) = TcpListener::bind("127.0.0.1:8791") else {
             eprintln!("[FUI-HTTP] porta 127.0.0.1:8791 já em uso");
             return;
@@ -97,15 +191,15 @@ fn spawn_fui_http_server(
             let Ok(mut stream) = stream_res else {
                 continue;
             };
-            let mut buf = [0u8; 2048];
-            let Ok(n) = stream.read(&mut buf) else {
+            // Timeout curto: um cliente que abre e não fala não pode travar o painel.
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+            let Ok((head, body)) = read_http_request(&mut stream) else {
                 continue;
             };
-            if n == 0 {
+            if head.is_empty() {
                 continue;
             }
-            let req = String::from_utf8_lossy(&buf[..n]);
-            let first_line = req.lines().next().unwrap_or("");
+            let first_line = head.lines().next().unwrap_or("");
 
             if first_line.starts_with("GET /api/tick") {
                 fui.touch_uptime(boot_instant.elapsed().as_secs());
@@ -126,6 +220,7 @@ fn spawn_fui_http_server(
                     .lock()
                     .map(|h| h.to_chronological_vec())
                     .unwrap_or_default();
+                let matchers = matchers_now(&tuning);
                 let stats = evaluate_all_matchers_history(&matchers, &chrono, &cfg);
                 if let Ok(body) = serde_json::to_string(&stats) {
                     let resp = format!(
@@ -142,6 +237,7 @@ fn spawn_fui_http_server(
                     .lock()
                     .map(|h| h.to_chronological_vec())
                     .unwrap_or_default();
+                let matchers = matchers_now(&tuning);
                 let snap = build_brain_snapshot(&matchers, &chrono, &cfg);
                 if let Ok(body) = serde_json::to_string(&snap) {
                     let resp = format!(
@@ -153,6 +249,66 @@ fn spawn_fui_http_server(
                     continue;
                 }
                 let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n");
+            } else if first_line.starts_with("GET /api/tuning") {
+                let resp = serde_json::json!({
+                    "current": tuning_snapshot(&tuning),
+                    "defaults": SequenceTuning::default(),
+                });
+                let body = serde_json::to_string(&resp).unwrap_or_else(|_| "{}".to_string());
+                let out = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(out.as_bytes());
+            } else if first_line.starts_with("POST /api/tuning") {
+                let (status, payload) = match serde_json::from_str::<SequenceTuning>(&body) {
+                    Ok(next) => match next.validate() {
+                        Ok(()) => {
+                            let mut guard = match tuning.lock() {
+                                Ok(g) => g,
+                                Err(poisoned) => poisoned.into_inner(),
+                            };
+                            *guard = next;
+                            drop(guard);
+                            let persisted = match save_sequence_tuning(&tuning_path, &next) {
+                                Ok(()) => serde_json::json!({"ok": true, "tuning": next}),
+                                Err(err) => {
+                                    eprintln!("[TUNING] falha ao persistir {tuning_path}: {err}");
+                                    serde_json::json!({
+                                        "ok": true,
+                                        "tuning": next,
+                                        "warning": format!("aplicado em memória, não salvo: {err}")
+                                    })
+                                }
+                            };
+                            println!(
+                                "[TUNING] aplicado | coluna {}..={} | dúzia {}..={} | cor {}..={} | alto/baixo {}..={} | par/ímpar {}..={}",
+                                next.coluna.min, next.coluna.max,
+                                next.duzia.min, next.duzia.max,
+                                next.cor.min, next.cor.max,
+                                next.alto_baixo.min, next.alto_baixo.max,
+                                next.par_impar.min, next.par_impar.max
+                            );
+                            ("200 OK", persisted)
+                        }
+                        Err(err) => (
+                            "400 Bad Request",
+                            serde_json::json!({"ok": false, "error": err}),
+                        ),
+                    },
+                    Err(err) => (
+                        "400 Bad Request",
+                        serde_json::json!({"ok": false, "error": format!("JSON inválido: {err}")}),
+                    ),
+                };
+                let json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+                let out = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    json.len(),
+                    json
+                );
+                let _ = stream.write_all(out.as_bytes());
             } else if first_line.starts_with("POST /api/kill") {
                 kill_switch.trip();
                 let _ = fui.kill();
@@ -290,7 +446,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mode, boot.orphans_swept, boot.singleton_lock_removed
     );
 
-    let matchers = default_matchers();
+    let tuning = Arc::new(Mutex::new(load_sequence_tuning(TUNING_PATH)));
+    let matchers = matchers_now(&tuning);
+    let boot_tuning = tuning_snapshot(&tuning);
+    println!(
+        "[TUNING] sequências | coluna {}..={} | dúzia {}..={} | cor {}..={} | alto/baixo {}..={} | par/ímpar {}..={}",
+        boot_tuning.coluna.min, boot_tuning.coluna.max,
+        boot_tuning.duzia.min, boot_tuning.duzia.max,
+        boot_tuning.cor.min, boot_tuning.cor.max,
+        boot_tuning.alto_baixo.min, boot_tuning.alto_baixo.max,
+        boot_tuning.par_impar.min, boot_tuning.par_impar.max
+    );
     let cal = Calibration::default();
     let dry_actuator = DryRunActuator::new();
     let live_actuator = LiveHttpActuator::new(stream_addr.clone());
@@ -417,6 +583,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         kill_switch.clone(),
         history.clone(),
         cfg.clone(),
+        tuning.clone(),
+        TUNING_PATH.to_string(),
     );
 
     let mut spins_since_blow = cfg.cooldown_spins;
@@ -562,6 +730,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             step: 0,
         };
 
+        // Ajuste de sequências pode mudar a qualquer momento pela dashboard: os matchers
+        // são reconstruídos a cada giro para o gatilho novo valer no próximo sinal.
+        let matchers = matchers_now(&tuning);
         let (dag_out, best_hist) = evaluate_dag_with_history(
             &ev.spin_id,
             &recent,

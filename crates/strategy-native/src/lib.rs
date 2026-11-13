@@ -204,7 +204,8 @@ impl Matcher for QuebraColuna {
             .map(column_of)
             .take_while(|&c| c == alvo)
             .count();
-        if streak == 3 && self.min == 4 {
+        // Pré-alerta de observação: uma repetição antes do gatilho, sempre `0.50` (< `min_confidence`).
+        if self.min >= 3 && streak + 1 == self.min {
             return Some(BetIntent {
                 v: 1,
                 strategy_id: self.id().to_string(),
@@ -260,7 +261,7 @@ impl Matcher for QuebraDuzia {
             .map(dozen_of)
             .take_while(|&d| d == alvo)
             .count();
-        if streak == 3 && self.min == 4 {
+        if self.min >= 3 && streak + 1 == self.min {
             return Some(BetIntent {
                 v: 1,
                 strategy_id: self.id().to_string(),
@@ -807,23 +808,125 @@ pub fn number_coverage(covers: &[Cover]) -> Option<Vec<u8>> {
     Some(numbers)
 }
 
+/// Faixa de repetições (`min..=max`) que dispara um matcher de sequência.
+///
+/// O operador ajusta isto pela dashboard (`POST /api/tuning`) conforme o que a mesa
+/// está entregando: se a coluna quebra sempre na 4ª repetição, o gatilho desce; se a
+/// mesa passa meia hora em 6x, o gatilho sobe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreakRange {
+    /// Repetições mínimas para entrar (pré-alerta em `min - 1`, sem aposta).
+    pub min: usize,
+    /// Repetições máximas: acima disso a sequência é longa demais e o matcher cala.
+    pub max: usize,
+}
+
+impl StreakRange {
+    /// Cria a faixa `min..=max`.
+    pub const fn new(min: usize, max: usize) -> Self {
+        Self { min, max }
+    }
+
+    /// Rejeita faixas que o motor não consegue operar (janela da mesa é de 20 giros).
+    pub fn validate(&self, label: &str) -> Result<(), String> {
+        if self.min < 2 {
+            return Err(format!("{label}: mínimo precisa ser 2 ou mais"));
+        }
+        if self.max < self.min {
+            return Err(format!(
+                "{label}: máximo ({}) é menor que o mínimo ({})",
+                self.max, self.min
+            ));
+        }
+        if self.max > 20 {
+            return Err(format!(
+                "{label}: máximo {} não cabe na janela de 20 giros",
+                self.max
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Ajuste operacional dos cinco matchers de sequência (coluna, dúzia, cor, alto/baixo, par/ímpar).
+///
+/// É o único ponto de configuração que a dashboard altera em tempo real; os demais matchers
+/// (setor, Fibonacci, cluster) têm parâmetros estatísticos e não faixas de repetição.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SequenceTuning {
+    /// Repetição da coluna real `2 to 1` (padrão `4..=6`).
+    pub coluna: StreakRange,
+    /// Repetição da dúzia `1st/2nd/3rd 12` (padrão `4..=6`).
+    pub duzia: StreakRange,
+    /// Repetição de Vermelho/Preto (padrão `6..=12`).
+    pub cor: StreakRange,
+    /// Repetição de Baixos/Altos (padrão `6..=12`).
+    pub alto_baixo: StreakRange,
+    /// Repetição de Par/Ímpar (padrão `6..=12`).
+    pub par_impar: StreakRange,
+}
+
+impl Default for SequenceTuning {
+    fn default() -> Self {
+        Self {
+            coluna: StreakRange::new(4, 6),
+            duzia: StreakRange::new(4, 6),
+            cor: StreakRange::new(6, 12),
+            alto_baixo: StreakRange::new(6, 12),
+            par_impar: StreakRange::new(6, 12),
+        }
+    }
+}
+
+impl SequenceTuning {
+    /// Valida todas as faixas antes de aplicar (a dashboard mostra a mensagem de erro).
+    pub fn validate(&self) -> Result<(), String> {
+        self.coluna.validate("coluna")?;
+        self.duzia.validate("dúzia")?;
+        self.cor.validate("cor")?;
+        self.alto_baixo.validate("alto/baixo")?;
+        self.par_impar.validate("par/ímpar")?;
+        Ok(())
+    }
+
+    /// Monta o conjunto completo de matchers com estas faixas aplicadas.
+    pub fn matchers(&self) -> Vec<Arc<dyn Matcher>> {
+        vec![
+            Arc::new(QuebraColuna {
+                min: self.coluna.min,
+                max: self.coluna.max,
+            }),
+            Arc::new(QuebraDuzia {
+                min: self.duzia.min,
+                max: self.duzia.max,
+            }),
+            Arc::new(QuebraCor {
+                min: self.cor.min,
+                max: self.cor.max,
+            }),
+            Arc::new(QuebraAltoBaixo {
+                min: self.alto_baixo.min,
+                max: self.alto_baixo.max,
+            }),
+            Arc::new(QuebraParImpar {
+                min: self.par_impar.min,
+                max: self.par_impar.max,
+            }),
+            Arc::new(SetorVies::default()),
+            Arc::new(SetorViesDuzia::default()),
+            Arc::new(FibonacciLag),
+            Arc::new(ClusterTerminal::default()),
+            Arc::new(ClusterFinal::default()),
+        ]
+    }
+}
+
 /// Constrói o conjunto padrão completo de matchers nativos do projeto MONSTER:
-/// - Colunas (`2 to 1`) e Dúzias (`1st/2nd/3rd 12`): pré-alerta em 3x (`0.50`) e entrada imediata a partir de 4x (`>= 0.66`)
-/// - Vermelho/Preto, Baixo/Alto e Par/Ímpar: pré-alerta em 5x (`0.50`) e entrada imediata a partir de 6x (`>= 0.68`)
+/// - Colunas (`2 to 1`) e Dúzias (`1st/2nd/3rd 12`): pré-alerta em `min - 1` (`0.50`) e entrada a partir de `min` (`>= 0.66`)
+/// - Vermelho/Preto, Baixo/Alto e Par/Ímpar: pré-alerta em `min - 1` (`0.50`) e entrada a partir de `min` (`>= 0.68`)
 /// - Viés de Setor Coluna (`setor_vies`), Viés de Setor Dúzia (`setor_vies_duzia`), Fibonacci Lag e Cluster Terminal.
 pub fn default_matchers() -> Vec<Arc<dyn Matcher>> {
-    vec![
-        Arc::new(QuebraColuna::default()),
-        Arc::new(QuebraDuzia::default()),
-        Arc::new(QuebraCor::default()),
-        Arc::new(QuebraAltoBaixo::default()),
-        Arc::new(QuebraParImpar::default()),
-        Arc::new(SetorVies::default()),
-        Arc::new(SetorViesDuzia::default()),
-        Arc::new(FibonacciLag),
-        Arc::new(ClusterTerminal::default()),
-        Arc::new(ClusterFinal::default()),
-    ]
+    SequenceTuning::default().matchers()
 }
 
 #[cfg(test)]
@@ -852,6 +955,53 @@ mod tests {
 
         // Streak de 7 excede max=6: não dispara
         assert!(matcher.evaluate(&[2, 5, 8, 11, 14, 17, 20, 1]).is_none());
+    }
+
+    #[test]
+    fn tuning_antecipa_o_gatilho_da_coluna_e_da_duzia() {
+        let tuning = SequenceTuning {
+            coluna: StreakRange::new(3, 5),
+            duzia: StreakRange::new(3, 5),
+            ..SequenceTuning::default()
+        };
+        assert!(tuning.validate().is_ok());
+        let matchers = tuning.matchers();
+        let col = matchers
+            .iter()
+            .find(|m| m.id() == "quebra_permanencia_coluna")
+            .expect("matcher de coluna presente");
+
+        // Com min=3: streak 2 é pré-alerta (0.50, nunca aposta) e streak 3 já entra.
+        // [1, 4] são coluna 1 e 20 é coluna 2: o streak é 2.
+        let pre = col.evaluate(&[1, 4, 20]).expect("streak 2 pre-alert");
+        assert!((pre.confidence - 0.50).abs() < 1e-9);
+        let entry = col.evaluate(&[1, 4, 7, 20]).expect("streak 3 entra");
+        assert!((entry.confidence - 0.68).abs() < 1e-9);
+        assert_eq!(entry.cover, vec![Cover::Col(2), Cover::Col(3)]);
+
+        // O teto ajustado corta em 5: streak 6 deixa de disparar.
+        let wide = col.evaluate(&[1, 4, 7, 10, 13, 20]).expect("streak 5 entra");
+        assert!((wide.confidence - 0.82).abs() < 1e-9);
+        assert!(col.evaluate(&[1, 4, 7, 10, 13, 16, 20]).is_none());
+    }
+
+    #[test]
+    fn tuning_rejeita_faixas_impossiveis() {
+        let inverted = SequenceTuning {
+            cor: StreakRange::new(9, 6),
+            ..SequenceTuning::default()
+        };
+        assert!(inverted.validate().is_err(), "max < min precisa ser rejeitado");
+        let too_long = SequenceTuning {
+            alto_baixo: StreakRange::new(4, 21),
+            ..SequenceTuning::default()
+        };
+        assert!(too_long.validate().is_err(), "max acima da janela de 20 giros");
+        let too_small = SequenceTuning {
+            par_impar: StreakRange::new(1, 6),
+            ..SequenceTuning::default()
+        };
+        assert!(too_small.validate().is_err(), "min 1 não é sequência");
     }
 
     #[test]
