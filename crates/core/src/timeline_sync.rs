@@ -12,6 +12,23 @@ pub const MAX_STRIP: usize = 12;
 /// É a trava entre os dois caminhos que gravam giros (fita `live-` e observer `rid-`).
 pub const SAME_SPIN_WINDOW_MS: i64 = 35_000;
 
+/// Observer vivo = gravou um giro `rid-` neste intervalo. Enquanto ele vive, é a autoridade
+/// da TIMELINE e a fita não grava nada (a fita relia o mesmo giro ~36 s depois e o duplicava).
+pub const OBSERVER_ALIVE_MS: i64 = 120_000;
+
+/// `true` se o observer (`rid-`) gravou algum giro nos últimos `OBSERVER_ALIVE_MS`.
+pub fn observer_alive(pool: &SqlitePool, now_ms: i64) -> Result<bool, StoreError> {
+    pool.with_conn(|conn| {
+        let hits: i64 = conn.query_row(
+            "SELECT COUNT(1) FROM spins WHERE spin_id LIKE 'rid-%' AND ts >= ?1",
+            [now_ms - OBSERVER_ALIVE_MS],
+            |r| r.get(0),
+        )?;
+        Ok(hits > 0)
+    })
+    .map_err(StoreError::Database)
+}
+
 /// Resultado de uma sincronização da fita com o banco.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StripSyncReport {
@@ -139,6 +156,10 @@ pub fn sync_strip_to_db(
 ) -> Result<StripSyncReport, StoreError> {
     let strip = sanitize_strip(strip);
     if strip.len() < 4 {
+        return Ok(StripSyncReport::default());
+    }
+    // Observer vivo grava cada giro no instante real: a fita só preenche quando ele cai.
+    if observer_alive(pool, now_ms)? {
         return Ok(StripSyncReport::default());
     }
     let newest = read_newest_numbers(pool, MAX_STRIP)?;
@@ -298,6 +319,26 @@ mod tests {
         let r2 = sync_strip_to_db(&pool, &strip, "gc", t0 + 52_000).expect("sync");
         assert_eq!(r2.inserted, 0);
         assert_eq!(read_newest_numbers(&pool, 50).expect("read").len(), 7);
+    }
+
+    #[test]
+    fn observer_vivo_impede_a_fita_de_regravar_o_mesmo_giro_36s_depois() {
+        // Caso real de 13/11 08:17: rid grava o 10, a fita relê o 10 no topo 36 s depois.
+        let pool = init_pool(":memory:").expect("pool");
+        let t0 = 1_730_000_000_000;
+        for (i, n) in [13u8, 28, 20, 25].iter().enumerate() {
+            insert_spin(&pool, &NewSpin {
+                spin_id: format!("rid-{i}"), number: *n, ts: t0 + i as i64 * 39_000,
+                source: SpinSource::Mo, received_at: t0, latency_ms: Some(0),
+            }).expect("rid");
+        }
+        insert_spin(&pool, &NewSpin {
+            spin_id: "rid-x".into(), number: 10, ts: t0 + 4 * 39_000,
+            source: SpinSource::Mo, received_at: t0, latency_ms: Some(0),
+        }).expect("rid");
+        let r = sync_strip_to_db(&pool, &[10u8, 25, 20, 28, 13, 7], "gc", t0 + 4 * 39_000 + 36_000).expect("sync");
+        assert_eq!(r.inserted, 0, "observer vivo: a fita não grava");
+        assert_eq!(read_newest_numbers(&pool, 50).expect("read").len(), 5);
     }
 
     #[test]
