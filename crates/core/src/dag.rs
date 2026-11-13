@@ -277,11 +277,17 @@ fn pick_winner(aggregates: &[Aggregate], min_confidence: f64) -> Option<&Aggrega
             && number_coverage(&a.cover)
                 .is_none_or(|n| n.len() <= usize::from(monster_risk::MAX_NUMBER_COVERS))
     };
-    let permanence_firing = aggregates
+    // Quebra de permanência disparando SEMPRE vence (foco do operador). Antes o desempate era por
+    // confiança e o cluster_terminal (aposta a favor da continuação) ganhava da quebra de coluna:
+    // coluna 2 repetiu 3x e a entrada saiu em 2+3 em vez de 1+3.
+    if let Some(p) = aggregates
         .iter()
         .filter(eligible)
-        .any(|a| is_permanence_family(&a.strategy_id));
-    if !permanence_firing {
+        .find(|a| is_permanence_family(&a.strategy_id))
+    {
+        return Some(p);
+    }
+    {
         if let Some(n) = aggregates
             .iter()
             .filter(eligible)
@@ -291,6 +297,33 @@ fn pick_winner(aggregates: &[Aggregate], min_confidence: f64) -> Option<&Aggrega
         }
     }
     aggregates.iter().find(eligible)
+}
+
+/// Janela (giros) usada para medir se os terminais estão concentrados.
+pub const TERMINAL_GATE_WINDOW: usize = 12;
+/// Máximo de finais distintos na janela para liberar entrada por número.
+/// Numa roleta justa, ≤ 5 finais em 12 giros acontece só ~5% do tempo (média = 7).
+pub const TERMINAL_GATE_MAX_DISTINCT: usize = 5;
+
+/// Finais distintos nos últimos `TERMINAL_GATE_WINDOW` giros (`window[0]` = mais recente).
+pub fn distinct_terminals(window: &[u8]) -> usize {
+    let mut seen = [false; 10];
+    for &n in window.iter().take(TERMINAL_GATE_WINDOW) {
+        seen[usize::from(n % 10)] = true;
+    }
+    seen.iter().filter(|&&b| b).count()
+}
+
+/// Regra do operador: número só entra em momento de terminais concentrados (cluster real).
+/// Mesa "bagunçada" (muitos finais diferentes) é terreno da quebra de permanência, não de número.
+/// Devolve quantos sinais de número foram descartados.
+fn apply_terminal_concentration(aggregates: &mut Vec<Aggregate>, window: &[u8]) -> usize {
+    if window.len() < TERMINAL_GATE_WINDOW || distinct_terminals(window) <= TERMINAL_GATE_MAX_DISTINCT {
+        return 0;
+    }
+    let before = aggregates.len();
+    aggregates.retain(|a| number_coverage(&a.cover).is_none());
+    before - aggregates.len()
 }
 
 /// Família de finais que a cobertura de número pretende cobrir (`final % 3`).
@@ -404,6 +437,7 @@ pub fn evaluate_dag_with_history(
     let regime = classify(window);
     let mut raw_aggregates = fan_in(window, matchers);
     apply_permanence_priority(&mut raw_aggregates, gate.ladder_steps, min_confidence);
+    apply_terminal_concentration(&mut raw_aggregates, window);
 
     let bocpd_cfg = BocpdCfg::default();
     let bocpd = if chronological_history.len() >= 2 {
@@ -520,6 +554,7 @@ pub fn evaluate_dag(
     let regime = classify(window);
     let mut aggregates = fan_in(window, matchers);
     apply_permanence_priority(&mut aggregates, &LadderSteps::new(), min_confidence);
+    apply_terminal_concentration(&mut aggregates, window);
 
     let bocpd_cfg = BocpdCfg::default();
     let mut oldest_first = window.to_vec();
@@ -615,6 +650,22 @@ mod tests {
     }
 
     #[test]
+    fn mesa_baguncada_bloqueia_numero_e_concentrada_libera() {
+        // Fita real de 13/11 (mais recente primeiro): 9 finais distintos em 12 giros.
+        let baguncada = [7u8, 35, 13, 19, 4, 12, 20, 11, 6, 25, 34, 10];
+        assert_eq!(distinct_terminals(&baguncada), 9);
+        let mut aggs = vec![number_signal(), permanence_signal(0.40)];
+        assert_eq!(apply_terminal_concentration(&mut aggs, &baguncada), 1);
+        assert_eq!(aggs.len(), 1, "a entrada de fora continua");
+
+        // Cluster: só finais 1, 3, 7, 9 e 0 → 5 distintos: número liberado.
+        let concentrada = [1u8, 11, 3, 21, 13, 7, 17, 31, 9, 19, 10, 33];
+        assert_eq!(distinct_terminals(&concentrada), 5);
+        let mut aggs = vec![number_signal()];
+        assert_eq!(apply_terminal_concentration(&mut aggs, &concentrada), 0);
+    }
+
+    #[test]
     fn sem_permanencia_numero_vence_entrada_de_fora_mais_confiante() {
         // cluster_terminal (coluna, não é permanência) com 0.95 contra terminal com 0.60.
         let other = Aggregate {
@@ -626,6 +677,27 @@ mod tests {
         let num = Aggregate { confidence: 0.60, ..number_signal() };
         let aggs = vec![other, num];
         assert_eq!(pick_winner(&aggs, 0.55).map(|a| a.strategy_id.as_str()), Some("terminal_quente"));
+    }
+
+    #[test]
+    fn quebra_de_coluna_vence_cluster_terminal_mais_confiante() {
+        // Caso real 13/11 09:40: coluna 2 repetiu 3x (26, 2, 8).
+        let cluster = Aggregate {
+            strategy_id: "cluster_terminal".to_string(),
+            confidence: 0.90,
+            cover: vec![Cover::Col(2), Cover::Col(3)],
+            regime_veto: false,
+        };
+        let quebra = Aggregate {
+            strategy_id: "quebra_permanencia_coluna".to_string(),
+            confidence: 0.66,
+            cover: vec![Cover::Col(1), Cover::Col(3)],
+            regime_veto: false,
+        };
+        let aggs = vec![cluster, quebra];
+        let w = pick_winner(&aggs, 0.55).expect("vencedor");
+        assert_eq!(w.strategy_id, "quebra_permanencia_coluna");
+        assert_eq!(w.cover, vec![Cover::Col(1), Cover::Col(3)]);
     }
 
     #[test]
