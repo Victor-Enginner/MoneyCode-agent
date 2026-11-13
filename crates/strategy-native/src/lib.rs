@@ -317,24 +317,17 @@ impl Matcher for ClusterTerminal {
             .copied()
             .filter(|&n| n != 0 && (n % 10) == term)
             .count();
-        let col_latest = column_of(latest);
-        let second_col = if col_latest == 3 { 1 } else { col_latest + 1 };
-        if hits == 3 && self.min_hits == 4 {
-            return Some(BetIntent {
-                v: 1,
-                strategy_id: self.id().to_string(),
-                cover: vec![Cover::Col(col_latest), Cover::Col(second_col)],
-                confidence: 0.50,
-            });
-        }
         if hits < self.min_hits {
             return None;
         }
+        // Final repetido é jogada de NÚMERO (os plenos daquele final), nunca de coluna:
+        // a versão antiga apostava na coluna do último giro + a seguinte, sem relação
+        // nenhuma com o final, e ainda disparava com 3 hits. Regra do operador (13/11).
         let confidence = (0.64 + 0.07 * ((hits - self.min_hits) as f64)).min(0.90);
         Some(BetIntent {
             v: 1,
             strategy_id: self.id().to_string(),
-            cover: vec![Cover::Col(col_latest), Cover::Col(second_col)],
+            cover: vec![Cover::Terminal(term)],
             confidence,
         })
     }
@@ -1590,4 +1583,19 @@ mod tests {
         assert!(m.evaluate(&[7, 2, 4]).is_none()); // topo é quebrante
     }
 
+    #[test]
+    fn cluster_terminal_aposta_nos_numeros_do_final_nunca_em_coluna() {
+        let m = ClusterTerminal::default();
+        // Fita real de 13/11: 25, 12, 36, 34, 29, 15, 5, 15 → final 5 quatro vezes.
+        let w = [25, 12, 36, 34, 29, 15, 5, 15, 16, 32, 12, 36];
+        let intent = m.evaluate(&w).expect("final 5 com 4 hits dispara");
+        assert_eq!(intent.cover, vec![Cover::Terminal(5)]);
+        assert!(intent.cover.iter().all(|c| !matches!(c, Cover::Col(_))));
+    }
+
+    #[test]
+    fn cluster_terminal_nao_dispara_com_3_hits() {
+        let m = ClusterTerminal::default();
+        assert!(m.evaluate(&[15, 5, 12, 25, 36, 1, 2, 3]).is_none());
+    }
 }

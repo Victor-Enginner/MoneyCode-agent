@@ -18,7 +18,7 @@ use monster_risk::{
     NumbersMcParams, State, Verdict,
 };
 use monster_store::{
-    all_ladder_steps, init_pool, insert_intent, insert_spin, IntentDecision, NewIntent, NewSpin,
+    all_ladder_steps, init_pool, upsert_ladder_state, insert_intent, insert_spin, IntentDecision, NewIntent, NewSpin,
     SpinSource, SqlitePool,
 };
 use monster_strategy_native::{Matcher, MatcherTuning, MATCHER_IDS};
@@ -118,6 +118,17 @@ const MIN_ENTRY_GAP_MS: i64 = 15_000;
 /// não a mesma rodada. Sem esse teto o bot ignorou sinais por 33 min (13/11, código preso).
 const ROUND_KEY_TTL_MS: i64 = 45_000;
 
+/// Escadas com degrau pendente que NÃO acabaram de perder neste giro: devem ser zeradas.
+fn stale_ladders(steps: &LadderSteps, gale_alive: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = steps
+        .iter()
+        .filter(|(sid, &step)| step > 0 && Some(sid.as_str()) != gale_alive)
+        .map(|(sid, _)| sid.clone())
+        .collect();
+    out.sort();
+    out
+}
+
 /// Regra "uma entrada por rodada" tolerante a Game Code congelado no DOM.
 fn is_same_round(round_key: &str, last_round: &str, last_entry_at_ms: i64, now_ms: i64) -> bool {
     if last_entry_at_ms <= 0 {
@@ -127,31 +138,6 @@ fn is_same_round(round_key: &str, last_round: &str, last_entry_at_ms: i64, now_m
     since < MIN_ENTRY_GAP_MS || (!round_key.is_empty() && last_round == round_key && since < ROUND_KEY_TTL_MS)
 }
 
-#[cfg(test)]
-mod round_tests {
-    use super::is_same_round;
-
-    #[test]
-    fn mesmo_codigo_dentro_da_rodada_bloqueia() {
-        assert!(is_same_round("A", "A", 1_000, 31_000));
-    }
-
-    #[test]
-    fn codigo_congelado_no_dom_nao_trava_para_sempre() {
-        assert!(!is_same_round("3845027974", "3845027974", 1_000, 1_000 + 484_930));
-    }
-
-    #[test]
-    fn intervalo_minimo_vale_sem_codigo() {
-        assert!(is_same_round("", "", 1_000, 10_000));
-        assert!(!is_same_round("", "", 1_000, 20_000));
-    }
-
-    #[test]
-    fn sem_entrada_anterior_nunca_bloqueia() {
-        assert!(!is_same_round("A", "A", 0, 5_000));
-    }
-}
 
 /// Lê a ficha salva; valor inválido ou não permitido volta ao padrão do `Cfg`.
 fn load_stake_base(path: &str, fallback: u64) -> u64 {
@@ -945,6 +931,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Reconcilia entrada pendente do spin anterior, se houver (§9).
         // Um evento duplicado da MESMA rodada (WS + fita) não pode mexer na escada: sem esta
         // guarda a perda era contada duas vezes e a entrada seguinte pulava um degrau.
+        // Estratégia que acabou de perder NESTE giro: é a única com direito a gale agora.
+        let mut gale_alive: Option<String> = None;
         if already_recorded {
             if pending_entry.is_some() {
                 println!(
@@ -973,6 +961,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         shared_pnl_cents.fetch_add(rep.expected_delta_cents, Ordering::Relaxed);
                     }
                     ladder_steps.insert(rep.strategy_id.clone(), rep.next_step);
+                    if rep.next_step > 0 {
+                        gale_alive = Some(rep.strategy_id.clone());
+                    }
                     if rep.ladder_blown {
                         spins_since_blow = 0;
                     } else {
@@ -1007,6 +998,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         } else {
             spins_since_blow = spins_since_blow.saturating_add(1);
+        }
+
+        // Gale só existe no giro seguinte à perda. Escada parada (padrão sumiu, entrada
+        // bloqueada, kill switch) é abandonada: padrão novo sempre começa no degrau 1.
+        // Sem isso, em 13/11 a perda de um padrão de 10 giros antes entrou como "4º gale"
+        // (R$ 22,20) no primeiro giro de um padrão novo.
+        if !already_recorded {
+            for sid in stale_ladders(&ladder_steps, gale_alive.as_deref()) {
+                ladder_steps.insert(sid.clone(), 0);
+                match upsert_ladder_state(&pool, &sid, 0, 0, Some(now_ms)) {
+                    Ok(()) => println!("[LADDER] escada de {sid} zerada: gale interrompido não passa para outro padrão"),
+                    Err(err) => eprintln!("[LADDER-ERR] falha ao zerar {sid}: {err}"),
+                }
+            }
         }
 
         // Buffers reconstruídos do banco (já sincronizado com a fita da Playtech):
@@ -1192,4 +1197,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod round_tests {
+    use super::{is_same_round, stale_ladders, LadderSteps};
+
+    #[test]
+    fn gale_so_continua_para_quem_acabou_de_perder() {
+        let mut steps = LadderSteps::new();
+        steps.insert("quebra_permanencia_coluna".into(), 3);
+        steps.insert("quebra_alto_baixo_6x".into(), 3);
+        steps.insert("quebra_cor_6x".into(), 0);
+        let stale = stale_ladders(&steps, Some("quebra_alto_baixo_6x"));
+        assert_eq!(stale, vec!["quebra_permanencia_coluna".to_string()]);
+    }
+
+    #[test]
+    fn sem_perda_neste_giro_toda_escada_pendente_zera() {
+        let mut steps = LadderSteps::new();
+        steps.insert("quebra_permanencia_coluna".into(), 3);
+        steps.insert("quebra_cor_6x".into(), 4);
+        assert_eq!(stale_ladders(&steps, None).len(), 2);
+    }
+
+    #[test]
+    fn mesmo_codigo_dentro_da_rodada_bloqueia() {
+        assert!(is_same_round("A", "A", 1_000, 31_000));
+    }
+
+    #[test]
+    fn codigo_congelado_no_dom_nao_trava_para_sempre() {
+        assert!(!is_same_round("3845027974", "3845027974", 1_000, 1_000 + 484_930));
+    }
+
+    #[test]
+    fn intervalo_minimo_vale_sem_codigo() {
+        assert!(is_same_round("", "", 1_000, 10_000));
+        assert!(!is_same_round("", "", 1_000, 20_000));
+    }
+
+    #[test]
+    fn sem_entrada_anterior_nunca_bloqueia() {
+        assert!(!is_same_round("A", "A", 0, 5_000));
+    }
 }

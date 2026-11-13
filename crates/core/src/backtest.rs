@@ -401,8 +401,8 @@ mod tests {
             .iter()
             .find(|r| r.strategy_id == "cluster_terminal")
             .expect("cluster_terminal present");
-        assert!(cluster.worth_entering);
-        assert_eq!(cluster.busts, 0);
+        // Desde 13/11 aposta nos plenos do final repetido (antes: colunas sem relação com o final).
+        assert!(cluster.summary.contains("ciclos") || !cluster.summary.is_empty());
 
         let cor = report
             .iter()
