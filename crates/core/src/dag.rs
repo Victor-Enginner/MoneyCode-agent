@@ -247,13 +247,15 @@ fn apply_permanence_priority(
     ladder_steps: &LadderSteps,
     min_confidence: f64,
 ) -> usize {
-    let ladder_open = ladder_steps
-        .iter()
-        .any(|(id, step)| *step > 0 && is_permanence_family(id));
+    // Só bloqueia quando uma permanência está DISPARANDO neste giro. Uma escada de fora aberta
+    // (degrau > 0) apenas espera o MESMO padrão voltar a disparar — o gale dela só sai nesse
+    // giro, e aí `firing` já é verdadeiro. Antes, `quebra_numero_repetido` parado no degrau 1
+    // (padrão raro) bloqueava todas as entradas por número por horas.
+    let _ = ladder_steps;
     let firing = aggregates
         .iter()
         .any(|a| is_permanence_family(&a.strategy_id) && a.confidence >= min_confidence);
-    if !ladder_open && !firing {
+    if !firing {
         return 0;
     }
     let before = aggregates.len();
@@ -650,13 +652,18 @@ mod tests {
     }
 
     #[test]
-    fn escada_de_fora_aberta_tambem_bloqueia_numero() {
-        // Escada de coluna no degrau 2: recuperar a perda manda mais que abrir número.
+    fn escada_de_fora_parada_nao_bloqueia_numero() {
+        // Caso real 13/11: quebra_numero_repetido parado no degrau 1 sem disparar.
+        // Número entra; o gale da dúzia só sai quando a dúzia disparar de novo.
         let mut steps = LadderSteps::new();
-        steps.insert("quebra_permanencia_duzia".to_string(), 2);
+        steps.insert("quebra_numero_repetido".to_string(), 1);
         let mut aggs = vec![number_signal()];
+        assert_eq!(apply_permanence_priority(&mut aggs, &steps, 0.55), 0);
+        assert_eq!(aggs.len(), 1);
+
+        // Com a permanência disparando no mesmo giro (gale saindo), o número espera.
+        let mut aggs = vec![number_signal(), permanence_signal(0.70)];
         assert_eq!(apply_permanence_priority(&mut aggs, &steps, 0.55), 1);
-        assert!(aggs.is_empty());
 
         // Escada de número aberta não bloqueia número.
         let mut own = LadderSteps::new();
