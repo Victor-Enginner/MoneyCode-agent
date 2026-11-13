@@ -8,6 +8,10 @@ use monster_store::{insert_spin, NewSpin, SpinSource, SqlitePool, StoreError};
 /// Quantidade máxima de números exibidos na fita horizontal da Playtech.
 pub const MAX_STRIP: usize = 12;
 
+/// Uma rodada real leva 40-60 s: o mesmo número não sai duas vezes dentro desta janela.
+/// É a trava entre os dois caminhos que gravam giros (fita `live-` e observer `rid-`).
+pub const SAME_SPIN_WINDOW_MS: i64 = 35_000;
+
 /// Resultado de uma sincronização da fita com o banco.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StripSyncReport {
@@ -83,7 +87,28 @@ pub fn sanitize_strip(strip: &[u8]) -> Vec<u8> {
 ///
 /// A fita é ordenada do mais recente (`[0]`) para o mais antigo, assim como `newest`.
 /// Se `newest[0]` aparece em `strip[p]` e o restante do trecho coincide, então exatamente
-/// `p` giros novos chegaram à mesa. Sem sobreposição confiável, a fita inteira é tratada como nova.
+/// `p` giros novos chegaram à mesa. Sem sobreposição confiável devolve `None`: a fita NÃO é
+/// regravada (era isso que duplicava 12 giros a cada reconexão e inventava "repetições").
+pub fn overlap_new_spins(strip: &[u8], newest: &[u8]) -> Option<usize> {
+    if strip.len() < 4 {
+        return Some(0);
+    }
+    if newest.is_empty() {
+        return Some(strip.len());
+    }
+    for p in 0..strip.len() {
+        let overlap = (strip.len() - p).min(newest.len());
+        if overlap < 3 {
+            continue;
+        }
+        if strip[p..p + overlap] == newest[..overlap] {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Compatibilidade: quantos giros do topo seriam novos (`strip.len()` quando não há sobreposição).
 pub fn count_new_spins(strip: &[u8], newest: &[u8]) -> usize {
     if strip.len() < 4 {
         return 0;
@@ -117,7 +142,12 @@ pub fn sync_strip_to_db(
         return Ok(StripSyncReport::default());
     }
     let newest = read_newest_numbers(pool, MAX_STRIP)?;
-    let new_count = count_new_spins(&strip, &newest);
+    // Sem sobreposição com histórico existente (reconexão, fita reordenada pelo SPA): grava no
+    // máximo o giro do topo — e só se ele não entrou nos últimos 35 s. Nunca regrava a fita.
+    let (new_count, rebuilt) = match overlap_new_spins(&strip, &newest) {
+        Some(n) => (n, newest.is_empty() && n == strip.len()),
+        None => (1, false),
+    };
     if new_count == 0 {
         return Ok(StripSyncReport::default());
     }
@@ -133,7 +163,7 @@ pub fn sync_strip_to_db(
     for idx in (0..new_count).rev() {
         let number = strip[idx];
         let ts = now_ms - (idx as i64) * 1_000;
-        if has_recent_number(pool, number, ts, 3_000)? {
+        if has_recent_number(pool, number, ts, SAME_SPIN_WINDOW_MS)? {
             continue;
         }
         batch.push((
@@ -161,10 +191,7 @@ pub fn sync_strip_to_db(
         }
     }
 
-    Ok(StripSyncReport {
-        inserted,
-        rebuilt: new_count == strip.len(),
-    })
+    Ok(StripSyncReport { inserted, rebuilt })
 }
 
 #[cfg(test)]
@@ -252,10 +279,39 @@ mod tests {
     }
 
     #[test]
-    fn fita_sem_correlacao_e_regravada_como_baseline() {
+    fn fita_sem_correlacao_nao_e_regravada() {
         let newest = [1u8, 2, 3, 4, 5, 6];
         let strip = [30u8, 31, 32, 33, 34, 35];
-        assert_eq!(count_new_spins(&strip, &newest), strip.len());
+        assert_eq!(overlap_new_spins(&strip, &newest), None);
+    }
+
+    #[test]
+    fn reconexao_sem_sobreposicao_grava_so_o_topo_e_nunca_a_fita() {
+        let pool = init_pool(":memory:").expect("pool");
+        let t0 = 1_730_000_000_000;
+        sync_strip_to_db(&pool, &[1u8, 2, 3, 4, 5, 6], "gc", t0).expect("baseline");
+        // Reconexão: a fita volta embaralhada/sem encaixe com o banco.
+        let strip = [30u8, 31, 32, 33, 34, 35, 36, 7, 8, 9, 10, 11];
+        let r = sync_strip_to_db(&pool, &strip, "gc", t0 + 50_000).expect("sync");
+        assert_eq!(r.inserted, 1, "só o giro do topo pode entrar");
+        // A mesma fita relida segundos depois não grava nada (topo já está nos últimos 35 s).
+        let r2 = sync_strip_to_db(&pool, &strip, "gc", t0 + 52_000).expect("sync");
+        assert_eq!(r2.inserted, 0);
+        assert_eq!(read_newest_numbers(&pool, 50).expect("read").len(), 7);
+    }
+
+    #[test]
+    fn giro_ja_gravado_pelo_observer_nao_duplica_pela_fita() {
+        let pool = init_pool(":memory:").expect("pool");
+        let t0 = 1_730_000_000_000;
+        sync_strip_to_db(&pool, &[9u8, 20, 31, 2, 14, 7], "gc", t0).expect("baseline");
+        // Observer (rid-) grava o 17 no instante real; a fita chega 20 s depois com o 17 no topo.
+        insert_spin(&pool, &NewSpin {
+            spin_id: "rid-x".into(), number: 17, ts: t0 + 45_000,
+            source: SpinSource::Mo, received_at: t0 + 45_000, latency_ms: Some(0),
+        }).expect("rid");
+        let r = sync_strip_to_db(&pool, &[17u8, 9, 20, 31, 2, 14], "gc", t0 + 65_000).expect("sync");
+        assert_eq!(r.inserted, 0);
     }
 
     #[test]
