@@ -153,6 +153,10 @@ func (h *Hub) Publish(ev SpinEvent) (bool, error) {
 
 	h.totalSpins.Add(1)
 	h.lastEventAt.Store(time.Now().UnixMilli())
+	// Um spin publicado prova que a captura voltou: `degraded` é estado atual, não histórico.
+	// Sem isso a flag sobe no primeiro close de CDP e nunca desce, e o /health mente
+	// dizendo fonte morta enquanto a fita continua andando.
+	h.degraded.Store(false)
 	return true, nil
 }
 
@@ -529,7 +533,31 @@ type captureOptions struct {
 	frozenPath string
 }
 
+// runCaptureLoop mantém a captura viva enquanto o processo existir: cada sessão de CDP é
+// descartável, e quando o socket fecha (Chrome reiniciou, crash do renderer, close 1006) uma
+// nova sessão é aberta em vez de deixar o sidecar surdo. `corr` e `hub` sobrevivem à troca de
+// sessão; só os contadores de diagnóstico reiniciam.
 func runCaptureLoop(ctx context.Context, opts captureOptions, corr *wsdecap.Correlator, hub *Hub) {
+	const reconnectDelay = 3 * time.Second
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		runCaptureSession(ctx, opts, corr, hub)
+		if ctx.Err() != nil {
+			return
+		}
+		hub.degraded.Store(true)
+		log.Printf("[cdp] sessão encerrada — reconectando em %s", reconnectDelay)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(reconnectDelay):
+		}
+	}
+}
+
+func runCaptureSession(ctx context.Context, opts captureOptions, corr *wsdecap.Correlator, hub *Hub) {
 	var seq atomic.Uint64
 	var recvDiagCount atomic.Uint64
 	var sentOpCount atomic.Uint64
