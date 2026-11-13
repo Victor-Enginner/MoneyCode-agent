@@ -427,6 +427,21 @@ pub struct BusTickPayload {
     pub orphans: Vec<OrphanItemDto>,
     /// Últimos 50 erros.
     pub errors: Vec<ErrorItemDto>,
+    /// Frequência por casa nos últimos `HEAT_WINDOW` giros (mapa de calor da roda).
+    #[serde(default)]
+    pub heat: HeatDto,
+}
+
+/// Janela do mapa de calor: 20 giros é ruído puro para 37 casas; 200 dá ~5,4 por casa.
+pub const HEAT_WINDOW: usize = 200;
+
+/// Contagem por casa `0..=36` nos últimos `spins` giros reais do SQLite.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeatDto {
+    /// Giros efetivamente contados (`<= HEAT_WINDOW`).
+    pub spins: usize,
+    /// `counts[n]` = vezes que o número `n` saiu na janela (37 posições).
+    pub counts: Vec<u32>,
 }
 
 /// Formata centavos opcionais garantindo que `None` retorne `"—"` e nunca `"0"` (§2.2 e §9).
@@ -647,6 +662,31 @@ impl FuiController {
             .map_err(|e| UiError::Store(StoreError::Database(e)))?;
 
         Ok(list)
+    }
+
+    /// Comando IPC de leitura: `get_heat` — contagem por casa nos últimos `HEAT_WINDOW` giros.
+    pub fn get_heat(&self, pool: &SqlitePool) -> Result<HeatDto, UiError> {
+        pool.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT number FROM spins ORDER BY ts DESC, id DESC LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([HEAT_WINDOW as i64], |r| r.get::<_, i64>(0))?;
+            let mut heat = HeatDto {
+                spins: 0,
+                counts: vec![0; 37],
+            };
+            for n in rows {
+                let n = n?;
+                if let Ok(i) = usize::try_from(n) {
+                    if let Some(c) = heat.counts.get_mut(i) {
+                        *c += 1;
+                        heat.spins += 1;
+                    }
+                }
+            }
+            Ok(heat)
+        })
+        .map_err(|e| UiError::Store(StoreError::Database(e)))
     }
 
     /// Comando IPC de leitura: `get_ladder` — monta a tabela da escada ×3 a partir de `ladder_state` e `Cfg` (§5.D e §7).
@@ -891,6 +931,7 @@ impl FuiController {
             fills: self.get_fills(pool)?,
             orphans: self.get_orphans(pool)?,
             errors: self.get_errors(pool)?,
+            heat: self.get_heat(pool)?,
         })
     }
 }
