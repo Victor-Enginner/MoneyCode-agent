@@ -918,6 +918,160 @@ impl Matcher for TerminalQuente {
     }
 }
 
+/// Mapa de terminais da Estratégia Invictor: múltiplos `2,4,6,8`, quebrantes `1,3,5,7,9`
+/// e protetivo `0` (sempre coberto). `0` como número sorteado é neutro: não abre nem quebra
+/// sequência de múltiplos.
+pub mod invictor {
+    /// Finais múltiplos.
+    pub const MULTIPLOS: [u8; 4] = [2, 4, 6, 8];
+    /// Finais quebrantes.
+    pub const QUEBRANTES: [u8; 5] = [1, 3, 5, 7, 9];
+
+    /// Final é múltiplo (`2,4,6,8`).
+    pub const fn is_multiplo(n: u8) -> bool {
+        n <= 36 && matches!(n % 10, 2 | 4 | 6 | 8)
+    }
+
+    /// Final é quebrante (`1,3,5,7,9`).
+    pub const fn is_quebrante(n: u8) -> bool {
+        n <= 36 && n % 2 == 1
+    }
+
+    /// Quebrantes ordenados do mais "devente" (há mais giros sem sair) ao menos devente.
+    /// Final ausente da janela inteira vale `len` giros; empate resolve pelo menor final.
+    pub fn quebrantes_por_atraso(w: &[u8]) -> Vec<u8> {
+        let mut v: Vec<(usize, u8)> = QUEBRANTES
+            .iter()
+            .map(|&t| {
+                let gap = w
+                    .iter()
+                    .position(|&n| n <= 36 && n % 10 == t)
+                    .unwrap_or(w.len());
+                (gap, t)
+            })
+            .collect();
+        v.sort_by_key(|&(gap, t)| (std::cmp::Reverse(gap), t));
+        v.into_iter().map(|(_, t)| t).collect()
+    }
+}
+
+fn push_terminal(cover: &mut Vec<Cover>, t: u8) {
+    if !cover.contains(&Cover::Terminal(t)) {
+        cover.push(Cover::Terminal(t));
+    }
+}
+
+/// `matcher.invictor_conservadora`: gatilho **quebrante seguido de múltiplo** (`w[1]`
+/// quebrante, `w[0]` múltiplo). Cobre: protetivo `0`, o último quebrante que saiu, o
+/// quebrante mais devente da janela e o múltiplo que acabou de sair — até 4 finais.
+#[derive(Debug, Clone, Copy)]
+pub struct InvictorConservadora {
+    /// Janela para medir o quebrante mais devente (`20`).
+    pub window: usize,
+}
+
+impl Default for InvictorConservadora {
+    fn default() -> Self {
+        Self { window: 20 }
+    }
+}
+
+impl Matcher for InvictorConservadora {
+    fn id(&self) -> &'static str {
+        "invictor_conservadora"
+    }
+
+    fn evaluate(&self, w: &[u8]) -> Option<BetIntent> {
+        let (&latest, &prev) = (w.first()?, w.get(1)?);
+        if latest == 0 || !invictor::is_multiplo(latest) || !invictor::is_quebrante(prev) {
+            return None;
+        }
+        let slice = &w[..w.len().min(self.window)];
+        let mut cover = vec![Cover::Terminal(0)];
+        push_terminal(&mut cover, prev % 10);
+        if let Some(&devente) = invictor::quebrantes_por_atraso(slice)
+            .iter()
+            .find(|&&t| t != prev % 10)
+        {
+            push_terminal(&mut cover, devente);
+        }
+        push_terminal(&mut cover, latest % 10);
+        Some(BetIntent {
+            v: 1,
+            strategy_id: self.id().to_string(),
+            cover,
+            confidence: 0.60,
+        })
+    }
+}
+
+/// `matcher.invictor_arrojada`: sequência de múltiplos no topo da timeline (`0` neutro).
+/// Padrão **Curto** (`2..=3`) ou **Alongado** (`5..=8`) → entra só nos quebrantes, os
+/// `max_quebrantes` mais deventes, mais o protetivo `0`. Run de 4 ou > 8 não dispara.
+#[derive(Debug, Clone, Copy)]
+pub struct InvictorArrojada {
+    /// Janela para medir atraso dos quebrantes (`20`).
+    pub window: usize,
+    /// Padrão curto (`2..=3`).
+    pub curto: StreakRange,
+    /// Padrão alongado (`5..=8`).
+    pub alongado: StreakRange,
+    /// Quantos quebrantes cobrir (`3` → 10 plenos + 4 do zero).
+    pub max_quebrantes: usize,
+}
+
+impl Default for InvictorArrojada {
+    fn default() -> Self {
+        Self {
+            window: 20,
+            curto: StreakRange::new(2, 3),
+            alongado: StreakRange::new(5, 8),
+            max_quebrantes: 3,
+        }
+    }
+}
+
+impl Matcher for InvictorArrojada {
+    fn id(&self) -> &'static str {
+        "invictor_arrojada"
+    }
+
+    fn evaluate(&self, w: &[u8]) -> Option<BetIntent> {
+        let latest = *w.first()?;
+        if !invictor::is_multiplo(latest) || latest == 0 {
+            return None;
+        }
+        let run = w
+            .iter()
+            .copied()
+            .take_while(|&n| n == 0 || invictor::is_multiplo(n))
+            .filter(|&n| n != 0)
+            .count();
+        let in_range = |r: StreakRange| run >= r.min && run <= r.max;
+        let confidence = if in_range(self.alongado) {
+            0.62
+        } else if in_range(self.curto) {
+            0.56
+        } else {
+            return None;
+        };
+        let slice = &w[..w.len().min(self.window)];
+        let mut cover = vec![Cover::Terminal(0)];
+        for t in invictor::quebrantes_por_atraso(slice)
+            .into_iter()
+            .take(self.max_quebrantes.clamp(1, 5))
+        {
+            push_terminal(&mut cover, t);
+        }
+        Some(BetIntent {
+            v: 1,
+            strategy_id: self.id().to_string(),
+            cover,
+            confidence,
+        })
+    }
+}
+
 /// Números distintos cobertos por uma lista de coberturas de número (`Straight`/`Terminal`).
 ///
 /// Devolve `None` quando a lista mistura número com coluna/dúzia/cor: são geometrias de
@@ -1054,6 +1208,8 @@ impl SequenceTuning {
             Arc::new(ClusterFinal::default()),
             Arc::new(QuebraNumeroRepetido::default()),
             Arc::new(TerminalQuente::default()),
+            Arc::new(InvictorConservadora::default()),
+            Arc::new(InvictorArrojada::default()),
         ]
     }
 }
@@ -1062,7 +1218,7 @@ impl SequenceTuning {
 ///
 /// É a allowlist do interruptor da dashboard: desligar exige conhecer o nome
 /// exato, então erro de digitação vira rejeição e não matcher silenciosamente ligado.
-pub const MATCHER_IDS: [&str; 12] = [
+pub const MATCHER_IDS: [&str; 14] = [
     "quebra_permanencia_coluna",
     "quebra_permanencia_duzia",
     "quebra_cor_6x",
@@ -1075,6 +1231,8 @@ pub const MATCHER_IDS: [&str; 12] = [
     "cluster_final",
     "quebra_numero_repetido",
     "terminal_quente",
+    "invictor_conservadora",
+    "invictor_arrojada",
 ];
 
 /// Ajuste completo da leitura de padrões: faixas de repetição + interruptores.
@@ -1405,4 +1563,31 @@ mod tests {
             r#"{"v":1,"strategy_id":"quebra_permanencia_coluna","cover":[{"col":2},{"col":3}],"confidence":0.79}"#
         );
     }
+    #[test]
+    fn invictor_conservadora_quebrante_seguido_de_multiplo() {
+        // w[0] mais recente: saiu 7 (quebrante) e depois 12 (múltiplo).
+        let w = [12, 7, 4, 2, 8, 6, 22, 14];
+        let i = InvictorConservadora::default().evaluate(&w).expect("dispara");
+        assert_eq!(i.strategy_id, "invictor_conservadora");
+        assert_eq!(i.cover[0], Cover::Terminal(0));
+        assert_eq!(i.cover[1], Cover::Terminal(7));
+        assert_eq!(i.cover[2], Cover::Terminal(1)); // 1,3,5,9 ausentes: menor final empata
+        assert_eq!(i.cover[3], Cover::Terminal(2));
+        assert!(InvictorConservadora::default().evaluate(&[7, 12, 3]).is_none());
+        assert!(InvictorConservadora::default().evaluate(&[12, 4, 3]).is_none());
+    }
+
+    #[test]
+    fn invictor_arrojada_curto_alongado_e_buraco_em_4() {
+        let m = InvictorArrojada::default();
+        let curto = m.evaluate(&[2, 14, 7, 9]).expect("curto 2");
+        assert_eq!(curto.cover.len(), 4);
+        assert_eq!(curto.cover[0], Cover::Terminal(0));
+        assert!(curto.cover[1..].iter().all(|c| matches!(c, Cover::Terminal(t) if t % 2 == 1)));
+        assert!(m.evaluate(&[2, 4, 6, 8, 1]).is_none()); // run 4
+        assert!(m.evaluate(&[2, 4, 0, 6, 8, 12, 1]).is_some()); // 0 neutro, run 5
+        assert!(m.evaluate(&[2, 7]).is_none()); // run 1
+        assert!(m.evaluate(&[7, 2, 4]).is_none()); // topo é quebrante
+    }
+
 }
