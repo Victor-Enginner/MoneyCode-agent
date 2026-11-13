@@ -177,6 +177,7 @@ try {
         Write-Host "[MONSTER] Parando sem cortar aposta em andamento..." -ForegroundColor Yellow
         Stop-MonsterSafely "ctrl-c"
         Get-Process monster-core, monster-capture, monster-telegram -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        & (Join-Path $RootDir "scripts\close-chrome.ps1")
         Write-Host ""
         Write-Host "[MONSTER] Parado por Ctrl+C. Para voltar: atalho MONSTER LIVE." -ForegroundColor Yellow
     }
