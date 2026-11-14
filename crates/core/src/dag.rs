@@ -181,9 +181,19 @@ pub const fn compute_ev_cents_numbers(numbers: u64, stake_per_number_cents: u64)
 
 /// Gate do §6 aplicado à geometria do vencedor: cobertura de número usa `k·x` de exposição
 /// e ficha por número no limite de mesa; o resto segue a regra de duas colunas (`2x`).
+/// Números apostados de uma cobertura de número. Regra do operador (14/11/2026): toda
+/// entrada em número cobre o 0 — ele entra com a mesma ficha quando a estratégia não o tem.
+pub fn bet_numbers(cover: &[Cover]) -> Option<Vec<u8>> {
+    let mut numbers = number_coverage(cover)?;
+    if !numbers.contains(&0) {
+        numbers.insert(0, 0);
+    }
+    Some(numbers)
+}
+
 fn gate_for(winner: &Aggregate, cfg: &Cfg, state: &State) -> Verdict {
     let cfg = &cfg_for_strategy(cfg, &winner.strategy_id);
-    match number_coverage(&winner.cover) {
+    match bet_numbers(&winner.cover) {
         Some(numbers) => {
             let nl = NumberLadder::new(numbers.len() as u8, cfg.number_base_cents);
             authorize_numbers(cfg, &nl, state)
@@ -214,7 +224,7 @@ pub fn cfg_for_strategy(cfg: &Cfg, strategy_id: &str) -> Cfg {
 /// com um `terminal:` que o pano não sabe resolver. Coluna/dúzia/cor seguem a escada ×3 do §6.
 fn compile_plan(spin_id: &str, winner: &Aggregate, ladder_step: u8, cfg: &Cfg) -> Option<Plan> {
     let (covers, stake_per_cover_cents, ev_cents): (Vec<(Cover, u64)>, u64, i64) =
-        if let Some(numbers) = number_coverage(&winner.cover) {
+        if let Some(numbers) = bet_numbers(&winner.cover) {
             let nl = NumberLadder::new(numbers.len() as u8, cfg.number_base_cents);
             let stake = nl.stake_cents(ladder_step);
             let covers = numbers
@@ -278,6 +288,9 @@ pub const fn zero_insurance_from(from_step: u8, ladder_step: u8, outside_total_c
 }
 
 /// Família dos matchers "de fora" (quebra de permanência), dona da prioridade de entrada.
+/// Confiança do pré-alerta de permanência (OBSERVANDO): a partir dela a quebra está se formando.
+pub const PERMANENCE_PRE_ALERT: f64 = 0.40;
+
 fn is_permanence_family(id: &str) -> bool {
     id.starts_with("quebra_")
 }
@@ -295,15 +308,18 @@ fn apply_permanence_priority(
     ladder_steps: &LadderSteps,
     min_confidence: f64,
 ) -> usize {
-    // Só bloqueia quando uma permanência está DISPARANDO neste giro. Uma escada de fora aberta
-    // (degrau > 0) apenas espera o MESMO padrão voltar a disparar — o gale dela só sai nesse
-    // giro, e aí `firing` já é verdadeiro. Antes, `quebra_numero_repetido` parado no degrau 1
-    // (padrão raro) bloqueava todas as entradas por número por horas.
-    let _ = ladder_steps;
-    let firing = aggregates
+    // Regra do operador (14/11/2026): número é para quando NÃO há permanência acontecendo.
+    // Bloqueia com a quebra disparando, com o pré-alerta armado (uma repetição antes do
+    // gatilho, o OBSERVANDO do painel) e com a escada de uma quebra em gale. Escada parada
+    // não existe mais: `stale_ladders` zera o gale que não saiu no giro seguinte.
+    let _ = min_confidence;
+    let armed = aggregates
         .iter()
-        .any(|a| is_permanence_family(&a.strategy_id) && a.confidence >= min_confidence);
-    if !firing {
+        .any(|a| is_permanence_family(&a.strategy_id) && a.confidence >= PERMANENCE_PRE_ALERT);
+    let in_gale = ladder_steps
+        .iter()
+        .any(|(id, &step)| step > 0 && is_permanence_family(id));
+    if !armed && !in_gale {
         return 0;
     }
     let before = aggregates.len();
@@ -322,7 +338,7 @@ fn pick_winner(aggregates: &[Aggregate], min_confidence: f64) -> Option<&Aggrega
     let eligible = |a: &&Aggregate| {
         a.confidence >= min_confidence
             && !a.cover.is_empty()
-            && number_coverage(&a.cover)
+            && bet_numbers(&a.cover)
                 .is_none_or(|n| n.len() <= usize::from(monster_risk::MAX_NUMBER_COVERS))
     };
     // Quebra de permanência disparando SEMPRE vence (foco do operador). Antes o desempate era por
@@ -371,7 +387,9 @@ fn apply_terminal_concentration(aggregates: &mut Vec<Aggregate>, window: &[u8]) 
         return 0;
     }
     let before = aggregates.len();
-    aggregates.retain(|a| number_coverage(&a.cover).is_none());
+    // Scripts do operador têm gatilho próprio (caderno): saiu espelho/gêmeo ou final da família,
+    // entra. Decisão do operador em 14/11/2026 após o 31 ficar sem entrada.
+    aggregates.retain(|a| number_coverage(&a.cover).is_none() || a.strategy_id.starts_with("script_"));
     before - aggregates.len()
 }
 
@@ -821,22 +839,24 @@ mod tests {
     }
 
     #[test]
-    fn numero_entra_quando_so_ha_pre_alerta_de_permanencia() {
-        // Pré-alerta (0.50) não é entrada: o número continua elegível.
+    fn pre_alerta_de_permanencia_segura_o_numero() {
+        // 14/11: "número é para quando não houver padrão de permanência" — o OBSERVANDO já conta.
         let mut aggs = vec![number_signal(), permanence_signal(0.50)];
-        assert_eq!(apply_permanence_priority(&mut aggs, &LadderSteps::new(), 0.55), 0);
-        assert_eq!(aggs.len(), 2);
+        assert_eq!(apply_permanence_priority(&mut aggs, &LadderSteps::new(), 0.55), 1);
+        assert_eq!(aggs.len(), 1);
+        // Sem permanência nenhuma, o número segue.
+        let mut so_numero = vec![number_signal()];
+        assert_eq!(apply_permanence_priority(&mut so_numero, &LadderSteps::new(), 0.55), 0);
     }
 
     #[test]
-    fn escada_de_fora_parada_nao_bloqueia_numero() {
-        // Caso real 13/11: quebra_numero_repetido parado no degrau 1 sem disparar.
-        // Número entra; o gale da dúzia só sai quando a dúzia disparar de novo.
+    fn gale_de_quebra_segura_o_numero() {
+        // Quebra em gale (escada > 0 só existe no giro seguinte à perda): o número espera.
         let mut steps = LadderSteps::new();
         steps.insert("quebra_numero_repetido".to_string(), 1);
         let mut aggs = vec![number_signal()];
-        assert_eq!(apply_permanence_priority(&mut aggs, &steps, 0.55), 0);
-        assert_eq!(aggs.len(), 1);
+        assert_eq!(apply_permanence_priority(&mut aggs, &steps, 0.55), 1);
+        assert!(aggs.is_empty());
 
         // Com a permanência disparando no mesmo giro (gale saindo), o número espera.
         let mut aggs = vec![number_signal(), permanence_signal(0.70)];
@@ -847,6 +867,30 @@ mod tests {
         own.insert("terminal_quente".to_string(), 1);
         let mut aggs = vec![number_signal()];
         assert_eq!(apply_permanence_priority(&mut aggs, &own, 0.55), 0);
+    }
+
+    #[test]
+    fn espelho_31_entra_mesmo_com_terminais_espalhados() {
+        // Caso real de 14/11: saiu o 31 com a mesa pulando finais; o espelho ficou sem entrada.
+        let window = [31u8, 0, 18, 8, 33, 26, 30, 32, 19, 16, 12, 30];
+        assert!(distinct_terminals(&window) > TERMINAL_GATE_MAX_DISTINCT);
+        let matchers: Vec<Arc<dyn Matcher>> = vec![
+            Arc::new(monster_strategy_native::OPERATOR_SCRIPTS[0]),
+            Arc::new(monster_strategy_native::InvictorConservadora::default()),
+        ];
+        let mut aggs = fan_in(&window, &matchers);
+        let _ = apply_terminal_concentration(&mut aggs, &window);
+        assert!(aggs.iter().any(|a| a.strategy_id == "script_espelhos_gemeos"));
+        assert!(aggs.iter().all(|a| a.strategy_id.starts_with("script_") || number_coverage(&a.cover).is_none()));
+    }
+
+    #[test]
+    fn toda_entrada_em_numero_cobre_o_zero() {
+        let sem_zero = [Cover::Straight(2), Cover::Straight(12), Cover::Straight(22)];
+        assert_eq!(bet_numbers(&sem_zero), Some(vec![0, 2, 12, 22]));
+        let com_zero = [Cover::Terminal(0), Cover::Straight(5)];
+        assert_eq!(bet_numbers(&com_zero).map(|n| n.len()), Some(5), "0 não duplica");
+        assert_eq!(bet_numbers(&[Cover::Col(1)]), None, "coluna não é número");
     }
 
     #[test]

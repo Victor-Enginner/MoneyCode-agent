@@ -11,16 +11,16 @@ source: "Script do operador enviado em 14/11/2026 (caderno / grupo Telegram)"
 
 trigger:
   rule: last_spin_in
-  numbers: [11, 12, 13, 21, 22, 23, 31, 32, 33]
+  numbers: [11, 12, 13, 20, 21, 22, 23, 31, 32, 33]
   source_text: "Quando sair qualquer espelho ou gêmeo"
 
 cover:
   type: straight_set
-  entry: [11, 12, 13, 21, 22, 23, 31, 32, 33]
+  entry: [11, 12, 13, 20, 21, 22, 23, 31, 32, 33]
   protections: [3, 9, 36, 35, 27, 30, 8, 10, 4, 2, 26]
-  pockets: [2, 3, 4, 8, 9, 10, 11, 12, 13, 21, 22, 23, 26, 27, 30, 31, 32, 33, 35, 36]
-  k: 20
-  p_hit_uniform: 0.5405   # 20/37
+  pockets: [0, 2, 3, 4, 8, 9, 10, 11, 12, 13, 20, 21, 22, 23, 26, 27, 30, 31, 32, 33, 35, 36]
+  k: 22
+  p_hit_uniform: 0.5946   # 22/37  (20 e 0 incluídos pelo operador em 14/11)
 
 staking:
   mode: flat

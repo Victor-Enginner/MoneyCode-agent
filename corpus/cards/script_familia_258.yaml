@@ -11,9 +11,9 @@ source: "Script do operador enviado em 14/11/2026 (caderno / grupo Telegram)"
 
 trigger:
   rule: last_n_finals_in_family
-  n: 2
+  n: 1
   finals: [2, 5, 8]
-  interpretation: "INTERPRETAÇÃO (o script diz só 'leitura forte'): família ativa quando os 2 últimos giros terminam num dos finais da família. Ajuste aqui se a leitura do caderno for outra."
+  interpretation: "Regra do operador (14/11/2026): UM giro terminando num final da família já é gatilho. Espelhos & Gêmeos têm prioridade quando disparam juntos."
 
 cover:
   type: straight_set

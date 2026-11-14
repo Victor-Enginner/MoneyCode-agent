@@ -11,17 +11,17 @@ source: "Script do operador enviado em 14/11/2026 (caderno / grupo Telegram)"
 
 trigger:
   rule: last_n_finals_in_family
-  n: 2
+  n: 1
   finals: [3, 6, 9]
-  interpretation: "INTERPRETAÇÃO (o script diz só 'leitura forte'): família ativa quando os 2 últimos giros terminam num dos finais da família. Ajuste aqui se a leitura do caderno for outra."
+  interpretation: "Regra do operador (14/11/2026): UM giro terminando num final da família já é gatilho. Espelhos & Gêmeos têm prioridade quando disparam juntos."
 
 cover:
   type: straight_set
   entry: [3, 6, 9, 13, 16, 19, 23, 26, 29, 33, 36]
   protections: [15, 32, 27, 18, 22, 8, 31, 35]
-  pockets: [3, 6, 8, 9, 13, 15, 16, 18, 19, 22, 23, 26, 27, 29, 31, 32, 33, 35, 36]
-  k: 19
-  p_hit_uniform: 0.5135   # 19/37
+  pockets: [0, 3, 6, 8, 9, 13, 15, 16, 18, 19, 22, 23, 26, 27, 29, 31, 32, 33, 35, 36]
+  k: 20
+  p_hit_uniform: 0.5405   # 20/37  (0 incluído pelo operador em 14/11)
 
 staking:
   mode: flat

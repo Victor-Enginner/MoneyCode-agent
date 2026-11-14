@@ -27,7 +27,7 @@ use monster_store::{
     all_ladder_steps, init_pool, insert_error, upsert_ladder_state, insert_intent, insert_spin, IntentDecision, NewIntent, NewSpin,
     SpinSource, SqlitePool,
 };
-use monster_strategy_native::{Matcher, MatcherTuning, MATCHER_IDS};
+use monster_strategy_native::{operator_script, Matcher, MatcherTuning, ScriptGale, MATCHER_IDS};
 use monster_ui::{DivergenceDto, FuiController, SettlementDto, ShadowDto};
 use std::env;
 use std::io::{Read, Write};
@@ -207,6 +207,32 @@ fn shadow_dtos(shadows: &[ShadowRunner]) -> Vec<ShadowDto> {
             }
         })
         .collect()
+}
+
+/// Giros de pausa de um script depois de 2 ciclos perdidos seguidos (trava do caderno).
+const SCRIPT_PAUSE_SPINS: u64 = 30;
+
+/// Conta ciclos do script; 2 perdidos seguidos param o script por `SCRIPT_PAUSE_SPINS` giros.
+fn note_script_cycle(
+    id: &str,
+    won: bool,
+    spin_counter: u64,
+    lost: &mut std::collections::HashMap<String, u8>,
+    paused: &mut std::collections::HashMap<String, u64>,
+) {
+    if won {
+        lost.insert(id.to_string(), 0);
+        return;
+    }
+    let streak = lost.entry(id.to_string()).or_insert(0);
+    *streak += 1;
+    if *streak >= 2 {
+        *streak = 0;
+        paused.insert(id.to_string(), spin_counter + SCRIPT_PAUSE_SPINS);
+        println!(
+            "[SCRIPT-TRAVA] {id} perdeu 2 ciclos seguidos — parado por {SCRIPT_PAUSE_SPINS} giros (\"a mesa não está aderente ao padrão\")"
+        );
+    }
 }
 
 /// Publica mudança do modo cautela no log e no painel (o Telegram lê do painel).
@@ -1133,6 +1159,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut spins_since_blow = cfg.cooldown_spins;
     // Freio de risco: com gale recorrente, degrau 4 ou sequência longa, só coluna e dúzia.
     let mut caution = Caution::default();
+    // Trava do caderno por script: 2 ciclos perdidos seguidos -> script parado por 30 giros.
+    let mut script_lost_streak: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
+    let mut script_paused_until: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut spin_counter: u64 = 0;
     // Scripts do operador em observação: simulam a escada sem apostar (logs/shadow.jsonl).
     let mut shadows: Vec<ShadowRunner> = SHADOW_CARDS.iter().map(|c| ShadowRunner::new(*c)).collect();
     restore_shadow_stats(&mut shadows);
@@ -1300,6 +1330,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if rep.next_step > 0 && gale_ok {
                         gale_alive = Some(rep.strategy_id.clone());
                     }
+                    if rep.strategy_id.starts_with("script_") && (rep.won || rep.ladder_blown) {
+                        note_script_cycle(
+                            &rep.strategy_id,
+                            rep.won,
+                            spin_counter,
+                            &mut script_lost_streak,
+                            &mut script_paused_until,
+                        );
+                    }
                     let change = if rep.won || rep.ladder_blown {
                         caution.on_cycle_end(prev_plan.ladder_step, rep.won)
                     } else {
@@ -1351,6 +1390,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for sid in stale_ladders(&ladder_steps, gale_alive.as_deref()) {
                 // Gale interrompido = ciclo encerrado sem acerto.
                 let lost_step = ladder_steps.get(&sid).copied().unwrap_or(1);
+                if sid.starts_with("script_") {
+                    note_script_cycle(&sid, false, spin_counter, &mut script_lost_streak, &mut script_paused_until);
+                }
                 let change = caution.on_cycle_end(lost_step.max(1), false);
                 report_caution(&fui, &caution, change);
                 ladder_steps.insert(sid.clone(), 0);
@@ -1386,6 +1428,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .lock()
             .map(|h| h.to_chronological_vec())
             .unwrap_or_default();
+        if !already_recorded {
+            spin_counter += 1;
+        }
         let change = caution.on_spin(&recent);
         report_caution(&fui, &caution, change);
         if !already_recorded {
@@ -1431,10 +1476,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Ajuste de sequências pode mudar a qualquer momento pela dashboard: os matchers
         // são reconstruídos a cada giro para o gatilho novo valer no próximo sinal.
         // Modo cautela tira números e apostas 1:1 da disputa: coluna/dúzia seguem concorrendo.
-        let matchers: Vec<Arc<dyn Matcher>> = matchers_now(&tuning)
-            .into_iter()
-            .filter(|m| caution.allows(m.id()))
-            .collect();
+        // Script do operador que acabou de perder: o giro é do gale dele, com ou sem gatilho novo
+        // (regra do caderno). Ele concorre sozinho; os gates de risco continuam valendo.
+        let forced_gale = gale_alive
+            .as_deref()
+            .filter(|id| caution.allows(id))
+            .and_then(operator_script);
+        let matchers: Vec<Arc<dyn Matcher>> = match forced_gale {
+            Some(script) => {
+                println!(
+                    "[GALE] {} perdeu no giro anterior — próximo degrau sai agora, sem esperar gatilho novo",
+                    script.id
+                );
+                vec![Arc::new(ScriptGale(script))]
+            }
+            None => matchers_now(&tuning)
+                .into_iter()
+                .filter(|m| caution.allows(m.id()))
+                .filter(|m| script_paused_until.get(m.id()).is_none_or(|&until| spin_counter >= until))
+                .collect(),
+        };
         let (dag_out, best_hist) = evaluate_dag_with_history(
             &ev.spin_id,
             &recent,
@@ -1590,7 +1651,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod round_tests {
-    use super::{is_same_round, stale_ladders, LadderSteps};
+    use super::{is_same_round, note_script_cycle, stale_ladders, LadderSteps};
 
     #[test]
     fn gale_so_continua_para_quem_acabou_de_perder() {
@@ -1629,5 +1690,19 @@ mod round_tests {
     #[test]
     fn sem_entrada_anterior_nunca_bloqueia() {
         assert!(!is_same_round("A", "A", 0, 5_000));
+    }
+
+    #[test]
+    fn script_perde_dois_ciclos_seguidos_e_para_30_giros() {
+        let mut lost = std::collections::HashMap::new();
+        let mut paused = std::collections::HashMap::new();
+        note_script_cycle("script_familia_369", false, 10, &mut lost, &mut paused);
+        assert!(paused.is_empty(), "1 ciclo perdido não trava");
+        note_script_cycle("script_familia_369", true, 12, &mut lost, &mut paused);
+        note_script_cycle("script_familia_369", false, 14, &mut lost, &mut paused);
+        assert!(paused.is_empty(), "vitória no meio zera a contagem");
+        note_script_cycle("script_familia_369", false, 18, &mut lost, &mut paused);
+        assert_eq!(paused.get("script_familia_369"), Some(&48));
+        assert!(!paused.contains_key("script_espelhos_gemeos"), "trava é por script");
     }
 }

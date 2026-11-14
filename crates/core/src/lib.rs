@@ -466,6 +466,47 @@ mod ladder_isolation_tests {
     /// O degrau pertence à estratégia: a perda de um padrão não pode aumentar a primeira
     /// entrada de outro (foi assim que a escada entrou em degrau 2 sem nenhuma perda dele).
     #[test]
+    fn gale_do_script_sai_no_giro_seguinte_sem_gatilho_novo() {
+        // 13/11: Espelhos perderam no 19 e o gale não saiu porque 19 não é espelho.
+        let cfg = Cfg::default();
+        let state = estado_neutro();
+        let espelhos = monster_strategy_native::operator_script("script_espelhos_gemeos").expect("script");
+        let window = [19u8, 31, 7, 4, 1, 28, 5, 14, 9, 36, 17, 0];
+        assert!(monster_strategy_native::Matcher::evaluate(&espelhos, &window).is_none(), "19 não é gatilho");
+        let matchers: Vec<std::sync::Arc<dyn monster_strategy_native::Matcher>> =
+            vec![std::sync::Arc::new(monster_strategy_native::ScriptGale(espelhos))];
+        let mut steps = LadderSteps::new();
+        steps.insert("script_espelhos_gemeos".to_string(), 1);
+        let (out, _) = evaluate_dag_with_history(
+            "gale-script",
+            &window,
+            &[],
+            &matchers,
+            &cfg,
+            &GateCtx { state: &state, ladder_steps: &steps },
+            0.55,
+        );
+        let plan = out.plan.expect("gale sai");
+        assert_eq!(plan.strategy_id, "script_espelhos_gemeos");
+        assert_eq!(plan.ladder_step, 2);
+        assert_eq!(plan.covers.len(), 22);
+        assert_eq!(plan.stake_per_cover_cents, 20);
+
+        // No degrau 3 perdido, o script estoura: não existe degrau 4.
+        steps.insert("script_espelhos_gemeos".to_string(), 3);
+        let (out4, _) = evaluate_dag_with_history(
+            "gale-script-4",
+            &window,
+            &[],
+            &matchers,
+            &cfg,
+            &GateCtx { state: &state, ladder_steps: &steps },
+            0.55,
+        );
+        assert!(out4.plan.is_none(), "script para no degrau 3");
+    }
+
+    #[test]
     fn degrau_da_escada_pertence_a_estrategia_vencedora() {
         let matchers = default_matchers();
         let cfg = Cfg::default();

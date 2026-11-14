@@ -34,19 +34,19 @@ pub const SHADOW_CARDS: [ShadowCard; 3] = [
     ShadowCard {
         id: "script_espelhos_gemeos",
         nome: "Espelhos & Gêmeos",
-        trigger: ShadowTrigger::LastSpinIn(&[11, 12, 13, 21, 22, 23, 31, 32, 33]),
-        pockets: &[2, 3, 4, 8, 9, 10, 11, 12, 13, 21, 22, 23, 26, 27, 30, 31, 32, 33, 35, 36],
+        trigger: ShadowTrigger::LastSpinIn(&[11, 12, 13, 20, 21, 22, 23, 31, 32, 33]),
+        pockets: &[0, 2, 3, 4, 8, 9, 10, 11, 12, 13, 20, 21, 22, 23, 26, 27, 30, 31, 32, 33, 35, 36],
     },
     ShadowCard {
         id: "script_familia_369",
         nome: "Família 3-6-9",
-        trigger: ShadowTrigger::LastFinalsIn { n: 2, finals: &[3, 6, 9] },
-        pockets: &[3, 6, 8, 9, 13, 15, 16, 18, 19, 22, 23, 26, 27, 29, 31, 32, 33, 35, 36],
+        trigger: ShadowTrigger::LastFinalsIn { n: 1, finals: &[3, 6, 9] },
+        pockets: &[0, 3, 6, 8, 9, 13, 15, 16, 18, 19, 22, 23, 26, 27, 29, 31, 32, 33, 35, 36],
     },
     ShadowCard {
         id: "script_familia_057",
         nome: "Família 0-5-7",
-        trigger: ShadowTrigger::LastFinalsIn { n: 2, finals: &[0, 5, 7] },
+        trigger: ShadowTrigger::LastFinalsIn { n: 1, finals: &[0, 5, 7] },
         pockets: &[0, 5, 7, 8, 10, 11, 12, 13, 15, 17, 20, 23, 25, 26, 27, 28, 30, 33, 35, 36],
     },
 ];
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn escada_de_20_numeros_segue_a_tabela() {
-        let r = runner("script_espelhos_gemeos");
+        let r = runner("script_familia_057");
         let mut spent = 0;
         let mut chips = vec![];
         for _ in 0..5 {
@@ -235,24 +235,25 @@ mod tests {
         let s = r.on_spin(&[32, 1, 21], SEM_TRAVA).expect("liquidou");
         assert!(s.won);
         assert_eq!(s.step, 2);
-        assert_eq!(s.net_cents, 36 * 20 - 600);
+        // 22 números (com 0 e 20): degrau 1 = 22 x 10c, degrau 2 = 22 x 20c
+        assert_eq!(s.net_cents, 36 * 20 - (22 * 10 + 22 * 20));
         assert_eq!(r.stats.wins, 1);
     }
 
     #[test]
-    fn familia_exige_dois_finais_seguidos() {
+    fn familia_dispara_com_um_final_da_familia() {
         let r = runner("script_familia_369");
-        assert!(!r.card.triggered(&[13, 4]));
-        assert!(r.card.triggered(&[13, 26]));
+        assert!(r.card.triggered(&[13, 4]));
+        assert!(!r.card.triggered(&[14, 13]));
         let z = runner("script_familia_057");
-        assert!(z.card.triggered(&[0, 17]));
-        assert!(!z.card.triggered(&[0]));
+        assert!(z.card.triggered(&[0]));
+        assert!(!z.card.triggered(&[18]));
     }
 
     #[test]
     fn cinco_erros_estouram_o_ciclo() {
         let mut r = runner("script_familia_369");
-        let _ = r.on_spin(&[3, 9], SEM_TRAVA);
+        let _ = r.on_spin(&[3], SEM_TRAVA);
         // números fora da cobertura da 3-6-9
         for n in [1u8, 2, 4, 5] {
             assert_eq!(r.on_spin(&[n], SEM_TRAVA), None);
@@ -260,18 +261,19 @@ mod tests {
         let s = r.on_spin(&[7], SEM_TRAVA).expect("estouro");
         assert!(!s.won);
         assert_eq!(s.step, 5);
-        assert_eq!(s.net_cents, -6080);
+        // 20 números (com o 0): 200 + 400 + 800 + 1800 + 4200
+        assert_eq!(s.net_cents, -7400);
     }
 
     #[test]
     fn trava_de_exposicao_encerra_o_ciclo_antes_do_degrau_caro() {
-        let mut r = runner("script_espelhos_gemeos");
-        let _ = r.on_spin(&[11], 3_850);
-        for n in [1u8, 5, 6] {
+        let mut r = runner("script_familia_057");
+        let _ = r.on_spin(&[30], 3_850);
+        for n in [1u8, 2, 3] {
             let _ = r.on_spin(&[n], 3_850);
         }
         // degrau 4 custaria 1800, ok; degrau 5 custaria 4200 > 3850: para no 4
-        let s = r.on_spin(&[14], 3_850).expect("trava");
+        let s = r.on_spin(&[4], 3_850).expect("trava");
         assert!(s.blocked_by_exposure);
         assert_eq!(s.step, 4);
         assert_eq!(s.net_cents, -3200);

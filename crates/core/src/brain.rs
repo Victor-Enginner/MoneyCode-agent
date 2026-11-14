@@ -179,9 +179,9 @@ mod tests {
         // Recalculado após a separação estrita Coluna (`2to1`) x Dúzia (`1st/2nd/3rd 12`):
         // setor 190 + setor_duzia 120 + coluna 110 + fib 90 + cor 50 + alto_baixo 20.
         // cluster_terminal saiu do Tier1 em 13/11: passou a apostar nos plenos do final, não em coluna.
-        // script_familia_057 entrou em 14/11 (42V/0E, +420c neste trecho).
-        assert_eq!(snap.tier1_count, 7);
-        assert_eq!(snap.tier1_combined_pnl_cents, 1000);
+        // script_familia_057 entrou em 14/11 com gatilho de 2 finais e saiu com o gatilho de 1 final.
+        assert_eq!(snap.tier1_count, 6);
+        assert_eq!(snap.tier1_combined_pnl_cents, 580);
         let md = render_gbrain_markdown(&snap);
         println!("{md}");
         assert!(md.contains("Tier1Invicto"));

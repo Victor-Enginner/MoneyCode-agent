@@ -1021,17 +1021,17 @@ pub struct OperatorScript {
 pub const OPERATOR_SCRIPTS: [OperatorScript; 3] = [
     OperatorScript {
         id: "script_espelhos_gemeos",
-        trigger: ScriptTrigger::LastSpinIn(&[11, 12, 13, 21, 22, 23, 31, 32, 33]),
-        pockets: &[2, 3, 4, 8, 9, 10, 11, 12, 13, 21, 22, 23, 26, 27, 30, 31, 32, 33, 35, 36],
+        trigger: ScriptTrigger::LastSpinIn(&[11, 12, 13, 20, 21, 22, 23, 31, 32, 33]),
+        pockets: &[0, 2, 3, 4, 8, 9, 10, 11, 12, 13, 20, 21, 22, 23, 26, 27, 30, 31, 32, 33, 35, 36],
     },
     OperatorScript {
         id: "script_familia_369",
-        trigger: ScriptTrigger::LastFinalsIn { n: 2, finals: &[3, 6, 9] },
-        pockets: &[3, 6, 8, 9, 13, 15, 16, 18, 19, 22, 23, 26, 27, 29, 31, 32, 33, 35, 36],
+        trigger: ScriptTrigger::LastFinalsIn { n: 1, finals: &[3, 6, 9] },
+        pockets: &[0, 3, 6, 8, 9, 13, 15, 16, 18, 19, 22, 23, 26, 27, 29, 31, 32, 33, 35, 36],
     },
     OperatorScript {
         id: "script_familia_057",
-        trigger: ScriptTrigger::LastFinalsIn { n: 2, finals: &[0, 5, 7] },
+        trigger: ScriptTrigger::LastFinalsIn { n: 1, finals: &[0, 5, 7] },
         pockets: &[0, 5, 7, 8, 10, 11, 12, 13, 15, 17, 20, 23, 25, 26, 27, 28, 30, 33, 35, 36],
     },
 ];
@@ -1051,13 +1051,43 @@ impl Matcher for OperatorScript {
         if !fired {
             return None;
         }
+        // "Espelhos sempre têm prioridade" (caderno): desempata contra as famílias.
+        let confidence = if matches!(self.trigger, ScriptTrigger::LastSpinIn(_)) { 0.62 } else { 0.60 };
         Some(BetIntent {
             v: 1,
             strategy_id: self.id.to_string(),
             cover: self.pockets.iter().map(|&n| Cover::Straight(n)).collect(),
-            confidence: 0.60,
+            confidence,
         })
     }
+}
+
+/// Gale obrigatório de um script do operador: dispara SEMPRE com a cobertura do script.
+///
+/// Regra do caderno: depois do gatilho, as tentativas seguem nos giros seguintes até acertar
+/// ou esgotar, com ou sem gatilho novo. O core usa este matcher sozinho no giro seguinte a uma
+/// perda do script, então nenhuma outra estratégia toma a vez do gale.
+#[derive(Debug, Clone, Copy)]
+pub struct ScriptGale(pub OperatorScript);
+
+impl Matcher for ScriptGale {
+    fn id(&self) -> &'static str {
+        self.0.id
+    }
+
+    fn evaluate(&self, _w: &[u8]) -> Option<BetIntent> {
+        Some(BetIntent {
+            v: 1,
+            strategy_id: self.0.id.to_string(),
+            cover: self.0.pockets.iter().map(|&n| Cover::Straight(n)).collect(),
+            confidence: 0.99,
+        })
+    }
+}
+
+/// Script do operador pelo id (`None` = não é script).
+pub fn operator_script(id: &str) -> Option<OperatorScript> {
+    OPERATOR_SCRIPTS.iter().copied().find(|s| s.id == id)
 }
 
 /// `matcher.invictor_arrojada`: sequência de múltiplos no topo da timeline (`0` neutro).
@@ -1642,14 +1672,24 @@ mod tests {
     fn scripts_do_operador_disparam_como_no_caderno() {
         let espelhos = OPERATOR_SCRIPTS[0];
         let i = espelhos.evaluate(&[33, 33, 3]).expect("33 é gêmeo");
-        assert_eq!(i.cover.len(), 20);
+        assert_eq!(i.cover.len(), 22);
+        assert!(i.cover.contains(&Cover::Straight(0)), "0 incluído pelo operador em 14/11");
+        assert!(espelhos.evaluate(&[20]).is_some(), "20 incluído pelo operador em 14/11");
+        assert!(i.cover.contains(&Cover::Straight(20)));
         assert!(i.cover.contains(&Cover::Straight(26)), "proteção 26 entra");
         assert!(espelhos.evaluate(&[34, 33]).is_none(), "só o último giro dispara");
         let f057 = OPERATOR_SCRIPTS[2];
-        assert!(f057.evaluate(&[30, 10, 4]).is_some(), "30 e 10: finais 0 seguidos");
-        assert!(f057.evaluate(&[30, 4]).is_none());
+        // Regra do operador (14/11): UM giro com final 0, 5 ou 7 já é gatilho.
+        for n in [0u8, 10, 20, 30, 5, 15, 25, 35, 7, 17, 27] {
+            assert!(f057.evaluate(&[n, 4]).is_some(), "{n} dispara a 0-5-7");
+        }
+        assert!(f057.evaluate(&[18, 30]).is_none(), "18 (final 8) não dispara a 0-5-7");
         let f369 = OPERATOR_SCRIPTS[1];
-        assert_eq!(f369.evaluate(&[9, 33]).expect("dispara").cover.len(), 19);
+        assert_eq!(f369.evaluate(&[9, 4]).expect("dispara").cover.len(), 20);
+        assert!(f369.evaluate(&[31]).is_none());
+        // 31 é espelho: dispara os espelhos com prioridade sobre qualquer família
+        let e = espelhos.evaluate(&[31, 0]).expect("31 é espelho");
+        assert!(e.confidence > f057.evaluate(&[30]).expect("família").confidence);
         assert!(MATCHER_IDS.contains(&"script_familia_369"));
     }
 
