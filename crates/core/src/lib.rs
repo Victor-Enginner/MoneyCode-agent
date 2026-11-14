@@ -14,6 +14,7 @@ pub mod executor;
 pub mod lab;
 pub mod reconciler;
 pub mod shadow;
+pub mod table_stats;
 pub mod terminals;
 pub mod timeline_sync;
 

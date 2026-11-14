@@ -595,6 +595,27 @@ fn spawn_fui_http_server(deps: FuiServerDeps) {
                     }
                 }
                 let _ = stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n");
+            } else if first_line.starts_with("GET /api/stats") {
+                // Estatística no formato do painel da Playtech: janela 100/200/500/1000.
+                let n = first_line
+                    .split("n=")
+                    .nth(1)
+                    .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+                    .and_then(|d| d.parse::<usize>().ok())
+                    .filter(|n| monster_core::table_stats::STATS_WINDOWS.contains(n))
+                    .unwrap_or(100);
+                let body = match monster_core::table_stats::load_table_spins(&pool, n) {
+                    Ok(spins) => serde_json::to_string(&monster_core::table_stats::compute(&spins, n))
+                        .unwrap_or_else(|_| "{}".to_string()),
+                    Err(err) => format!("{{\"error\":\"{err}\"}}"),
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                continue;
             } else if first_line.starts_with("GET /api/lab") {
                 let matchers = matchers_now(&tuning);
                 let body = match monster_core::lab::load_clean_spins(&pool) {

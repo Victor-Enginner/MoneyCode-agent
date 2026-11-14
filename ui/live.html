@@ -82,6 +82,13 @@
     @media (max-width: 1280px) { .heat-wrap { grid-template-columns: minmax(0, 1fr) 230px; } .fui-shell { grid-template-columns: 190px minmax(0, 1fr) 300px; } }
     .heat-svg { width: 100%; height: 100%; min-height: 0; }
     .heat-side { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: auto; }
+    .stats-win { display: flex; gap: 4px; }
+    .stats-win button { flex: 1; background: transparent; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 3px 0; font: inherit; font-size: 10px; cursor: pointer; }
+    .stats-win button.on { color: var(--amber); border-color: var(--amber); }
+    .stats-box { display: flex; flex-direction: column; gap: 4px; font-size: 10px; }
+    .stats-row { display: grid; grid-template-columns: repeat(var(--c, 2), 1fr); gap: 4px; }
+    .stats-row span { border: 1px solid var(--line); border-radius: 5px; padding: 3px 5px; display: flex; justify-content: space-between; gap: 4px; }
+    .stats-row b { font-weight: 700; color: var(--fg); }
     .sector { display: grid; grid-template-columns: 1fr auto; gap: 3px 8px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,.02); }
     .sector .nm { font-weight: 600; font-size: 11px; }
     .sector .z { font-weight: 700; text-align: right; }
@@ -286,6 +293,13 @@
       <div class="heat-wrap">
         <svg id="heat-svg" class="heat-svg" viewBox="-200 -200 400 400" preserveAspectRatio="xMidYMid meet"></svg>
         <div class="heat-side">
+          <div class="metric-label">Estatística da mesa · mesmo formato da Playtech</div>
+          <div id="stats-win" class="stats-win num">
+            <button data-n="100" class="on">100</button><button data-n="200">200</button><button data-n="500">500</button><button data-n="1000">1000</button>
+          </div>
+          <div id="stats-box" class="stats-box num"><span style="color:var(--dim)">carregando…</span></div>
+          <div class="metric-label" style="margin-top:4px;">Scripts · calor na janela</div>
+          <div id="stats-scripts" class="stats-box num">—</div>
           <div class="metric-label">Setores da roda · observado vs esperado</div>
           <div id="heat-sectors" style="display:flex;flex-direction:column;gap:6px;"></div>
           <div class="metric-label" style="margin-top:4px;">Vizinhanças mais quentes</div>
@@ -973,8 +987,44 @@
       h += '<path id="heat-marker" d="" fill="none" stroke="#fff" stroke-width="2.5"/>';
       svg.innerHTML = h;
     })();
+    // Estatística da mesa (/api/stats): a roda, os setores e os números usam a MESMA janela.
+    let statsN = 100, lastStats = null;
+    async function loadStats() {
+      try { const r = await fetch('/api/stats?n=' + statsN); if (r.ok) lastStats = await r.json(); } catch (_) {}
+      renderStats();
+    }
+    document.querySelectorAll('#stats-win button').forEach(b => b.addEventListener('click', () => {
+      statsN = Number(b.dataset.n);
+      document.querySelectorAll('#stats-win button').forEach(x => x.classList.toggle('on', x === b));
+      loadStats();
+    }));
+    const SCRIPT_NOME = { script_espelhos_gemeos: 'Espelhos & Gêmeos', script_familia_369: 'Família 3-6-9', script_familia_057: 'Família 0-5-7' };
+    function renderStats() {
+      const s = lastStats, box = document.getElementById('stats-box'), sc = document.getElementById('stats-scripts');
+      if (!s || !s.spins) { box.innerHTML = '<span style="color:var(--dim)">aguardando giros reais</span>'; sc.textContent = '—'; return; }
+      const p = v => Math.round(v) + '%';
+      const cell = (k, v, col) => `<span><i style="font-style:normal;color:${col || 'var(--muted)'}">${k}</i><b>${v}</b></span>`;
+      const nums = (arr, col) => arr.map(n => `<b style="color:${col}">${n}</b>`).join(' ');
+      box.innerHTML =
+        `<div class="stats-row" style="--c:2">${cell('🔥 quentes', nums(s.hot, 'var(--hot)'))}${cell('❄ frios', nums(s.cold, 'var(--cold)'))}</div>` +
+        `<div class="stats-row" style="--c:3">${cell('PRETO', p(s.black_pct))}${cell('0', p(s.zero_pct), 'var(--ok)')}${cell('VERMELHO', p(s.red_pct), 'var(--hot)')}</div>` +
+        `<div class="stats-row" style="--c:4">${cell('PAR', p(s.even_pct))}${cell('ÍMPAR', p(s.odd_pct))}${cell('1-18', p(s.low_pct))}${cell('19-36', p(s.high_pct))}</div>` +
+        `<div class="stats-row" style="--c:3">${cell('1ª DZ', p(s.dozens_pct[0]))}${cell('2ª DZ', p(s.dozens_pct[1]))}${cell('3ª DZ', p(s.dozens_pct[2]))}</div>` +
+        `<div class="stats-row" style="--c:3">${cell('1ª COL', p(s.columns_pct[0]))}${cell('2ª COL', p(s.columns_pct[1]))}${cell('3ª COL', p(s.columns_pct[2]))}</div>` +
+        `<div class="stats-row" style="--c:4">${cell('Tier', p(s.tier_pct))}${cell('Orphelins', p(s.orphelins_pct))}${cell('Voisins', p(s.voisins_pct))}${cell('Zero', p(s.jeu_zero_pct))}</div>` +
+        `<span style="color:var(--dim)">${s.spins} giros reais gravados pelo bot (janela ${s.window})</span>`;
+      sc.innerHTML = (s.scripts || []).map((x, i) => {
+        const quente = x.ratio >= 1;
+        const col = i === 0 && quente ? 'var(--hot)' : (quente ? 'var(--fg)' : 'var(--muted)');
+        return `<div class="stats-row" style="--c:1"><span><i style="font-style:normal;color:${col}">${i === 0 && quente ? '🔥 ' : ''}${SCRIPT_NOME[x.id] || x.id}</i>` +
+          `<b style="color:${col}">${Math.round(x.pct)}% vs ${Math.round(x.expected_pct)}% · ${x.ratio.toFixed(2)}×</b></span></div>`;
+      }).join('');
+      if (lastTick) renderHeat(lastTick);
+    }
+    loadStats();
+    setInterval(loadStats, 5000);
     function renderHeat(t) {
-      const heat = t.heat || {};
+      const heat = (lastStats && lastStats.spins) ? { counts: lastStats.counts, spins: lastStats.spins } : (t.heat || {});
       const counts = heat.counts || [];
       const n = heat.spins || 0;
       const spins = t.spins || [];
