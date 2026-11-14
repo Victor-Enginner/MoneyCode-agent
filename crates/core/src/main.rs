@@ -9,6 +9,7 @@ use monster_core::{
     boot_reconcile, build_brain_snapshot, evaluate_all_matchers_history,
     ensure_session, evaluate_dag_with_history, has_recent_number, load_chronological_history,
     load_session_chronological, place, read_session_newest_until, reconcile_spin,
+    session_prev_spin_ts,
     spins_after_trigger, SessionDecision, MISSED_SPIN_GAP_MS,
     family_radars, sync_strip_to_db, terminal_radar, write_gbrain_file, Calibration, CdpActuator,
     CoverAck, DryRunActuator, OPERATOR_TERMINALS,
@@ -1092,6 +1093,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
+        // Buraco na sequência (observer reconectou): antes de qualquer análise, a fita da mesa
+        // completa os giros perdidos. Sem isso, 35-14-[12 perdido]-8 virou "3x coluna 2" em
+        // 14/11 e o bot entrou duas rodadas cedo. Sem confirmação da fita, este giro não entra.
+        let mut window_uncertain = false;
+        if !already_recorded && session_ready.load(Ordering::Relaxed) {
+            if let Ok(Some(prev_ts)) = session_prev_spin_ts(&pool, ev.ts) {
+                match resolve_entry_outcome(&pool, &latest_strip, ev.number, ev.ts, prev_ts) {
+                    EntryOutcome::Normal => {}
+                    EntryOutcome::Missed { missed, .. } => {
+                        record_missed_spins(&pool, &missed, prev_ts, ev.ts);
+                        println!(
+                            "[GIRO-PERDIDO] fita da mesa mostra {:?} antes do {} — gravado(s) antes de analisar padrões",
+                            missed, ev.number
+                        );
+                    }
+                    EntryOutcome::Unknown => {
+                        window_uncertain = true;
+                        eprintln!(
+                            "[GIRO-PERDIDO] {} s sem giro antes do {} e a fita não confirma a sequência — sem entrada neste giro",
+                            (ev.ts - prev_ts) / 1000,
+                            ev.number
+                        );
+                    }
+                }
+            }
+        }
+
         // Reconcilia entrada pendente do spin anterior, se houver (§9).
         // Um evento duplicado da MESMA rodada (WS + fita) não pode mexer na escada: sem esta
         // guarda a perda era contada duas vezes e a entrada seguinte pulava um degrau.
@@ -1215,6 +1243,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(err) => eprintln!("[LADDER-ERR] falha ao zerar {sid}: {err}"),
                 }
             }
+        }
+
+        if window_uncertain {
+            continue;
         }
 
         // Sessão ainda não decidida (fita da mesa não lida): o giro fica gravado, mas nenhum

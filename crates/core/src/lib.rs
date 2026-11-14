@@ -46,7 +46,7 @@ pub use terminals::{family_radars, real_tail_start, terminal_radar, OPERATOR_TER
 pub use timeline_sync::{
     count_new_spins, ensure_session, has_recent_number, load_chronological_history,
     load_session_chronological, read_newest_numbers, read_session_newest_numbers, SessionDecision,
-    read_session_newest_until, sanitize_strip, spins_after_trigger, sync_strip_to_db, StripSyncReport, MAX_STRIP,
+    read_session_newest_until, sanitize_strip, session_prev_spin_ts, spins_after_trigger, sync_strip_to_db, StripSyncReport, MAX_STRIP,
     MISSED_SPIN_GAP_MS,
 };
 

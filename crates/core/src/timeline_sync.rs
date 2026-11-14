@@ -91,6 +91,19 @@ pub fn read_session_newest_numbers(pool: &SqlitePool, limit: usize) -> Result<Ve
     Ok(session_rows(pool, limit)?.into_iter().map(|(n, _)| n).collect())
 }
 
+/// `ts` do giro da sessão atual imediatamente anterior a `before_ts` (`None` = nenhum).
+pub fn session_prev_spin_ts(pool: &SqlitePool, before_ts: i64) -> Result<Option<i64>, StoreError> {
+    let floor = session_floor_ms(pool)?;
+    pool.with_conn(|conn| {
+        conn.query_row(
+            "SELECT MAX(ts) FROM spins WHERE ts >= ?1 AND ts < ?2",
+            [floor, before_ts],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+    })
+    .map_err(StoreError::Database)
+}
+
 /// Giros da sessão atual gravados até `until_ts` (inclusive), mais recente primeiro.
 pub fn read_session_newest_until(
     pool: &SqlitePool,
@@ -476,6 +489,23 @@ mod tests {
         let after = spins_after_trigger(&fita, &before).expect("encaixa");
         assert_eq!(after, vec![15, 31]);
         assert_eq!(*after.last().expect("resultado"), 31, "a entrada foi resolvida no 31, não no 15");
+    }
+
+    #[test]
+    fn giro_perdido_antes_da_analise_e_achado_na_fita() {
+        // Caso real de 14/11 08:36: o observer gravou 35, 14 e depois 8; o 12 se perdeu.
+        // Sem ele o bot leu 35-14-8 como 3x coluna 2 e entrou duas rodadas cedo.
+        let pool = init_pool(":memory:").expect("pool");
+        for (i, n) in [1u8, 5, 14, 36, 0, 7, 35, 14].iter().enumerate() {
+            gravar(&pool, &format!("rid-{i}"), *n, 1_000_000 + i as i64 * 40_000);
+        }
+        let ts_14 = 1_000_000 + 7 * 40_000;
+        let ts_8 = ts_14 + 79_000;
+        gravar(&pool, "rid-new-8", 8, ts_8);
+        assert_eq!(session_prev_spin_ts(&pool, ts_8).expect("q"), Some(ts_14));
+        let before = read_session_newest_until(&pool, ts_14, 12).expect("q");
+        let fita = [8u8, 12, 14, 35, 7, 0, 36, 14, 5, 1];
+        assert_eq!(spins_after_trigger(&fita, &before), Some(vec![8, 12]));
     }
 
     #[test]
