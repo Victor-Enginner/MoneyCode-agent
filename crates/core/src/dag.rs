@@ -213,8 +213,16 @@ pub fn cfg_for_strategy(cfg: &Cfg, strategy_id: &str) -> Cfg {
     if strategy_id.starts_with("script_") {
         c.max_steps = c.max_steps.min(SCRIPT_MAX_STEPS);
     }
+    if EVEN_MONEY_STRATEGIES.contains(&strategy_id) {
+        c.base_cents = c.base_cents.max(EVEN_MONEY_BASE_CENTS);
+    }
     c
 }
+
+/// Quebras 1:1 (cor, alto/baixo, par/ímpar): com a ficha do 0 junto, 0,20 sobra pouco.
+/// Decisão do operador em 14/11/2026: entram com 0,40 por aposta.
+pub const EVEN_MONEY_BASE_CENTS: u64 = 40;
+pub const EVEN_MONEY_STRATEGIES: [&str; 3] = ["quebra_cor_6x", "quebra_alto_baixo_6x", "quebra_par_impar_6x"];
 
 /// Compila o `slip.compiler` para o vencedor do fan-in.
 ///
@@ -223,6 +231,7 @@ pub fn cfg_for_strategy(cfg: &Cfg, strategy_id: &str) -> Cfg {
 /// `straight:0`, `straight:10`, `straight:20`, `straight:30` — o plano nunca chega ao executor
 /// com um `terminal:` que o pano não sabe resolver. Coluna/dúzia/cor seguem a escada ×3 do §6.
 fn compile_plan(spin_id: &str, winner: &Aggregate, ladder_step: u8, cfg: &Cfg) -> Option<Plan> {
+    let cfg = &cfg_for_strategy(cfg, &winner.strategy_id);
     let (covers, stake_per_cover_cents, ev_cents): (Vec<(Cover, u64)>, u64, i64) =
         if let Some(numbers) = bet_numbers(&winner.cover) {
             let nl = NumberLadder::new(numbers.len() as u8, cfg.number_base_cents);
@@ -882,6 +891,27 @@ mod tests {
         let _ = apply_terminal_concentration(&mut aggs, &window);
         assert!(aggs.iter().any(|a| a.strategy_id == "script_espelhos_gemeos"));
         assert!(aggs.iter().all(|a| a.strategy_id.starts_with("script_") || number_coverage(&a.cover).is_none()));
+    }
+
+    #[test]
+    fn apostas_1_para_1_entram_com_40_e_coluna_segue_20() {
+        let cfg = Cfg { base_cents: 20, ..Cfg::default() };
+        let cor = Aggregate {
+            strategy_id: "quebra_cor_6x".to_string(),
+            confidence: 0.7,
+            cover: vec![Cover::Red],
+            regime_veto: false,
+        };
+        let p = compile_plan("s", &cor, 1, &cfg).expect("plano");
+        assert_eq!(p.stake_per_cover_cents, 40);
+        assert!(p.covers.contains(&(Cover::Straight(0), 10)), "0 coberto desde o degrau 1");
+        let col = Aggregate {
+            strategy_id: "quebra_permanencia_coluna".to_string(),
+            confidence: 0.7,
+            cover: vec![Cover::Col(1), Cover::Col(2)],
+            regime_veto: false,
+        };
+        assert_eq!(compile_plan("s", &col, 1, &cfg).expect("plano").stake_per_cover_cents, 20);
     }
 
     #[test]

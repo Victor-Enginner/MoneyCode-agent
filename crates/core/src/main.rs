@@ -6,6 +6,7 @@
 use monster_capture::{CaptureSource, SpinBus, StreamClient, DEFAULT_STREAM_ADDR};
 use monster_core::balance_audit::{BalanceWatch, WatchEvent};
 use monster_core::caution::{Caution, CautionChange};
+use monster_core::money_guard::{GuardEvent, MoneyGuard};
 use monster_core::shadow::{ShadowRunner, ShadowSettle, ShadowStats, SHADOW_CARDS};
 use monster_core::{
     boot_reconcile, build_brain_snapshot, evaluate_all_matchers_history,
@@ -826,6 +827,8 @@ fn spawn_fui_http_server(deps: FuiServerDeps) {
                 let _ = fui.kill();
                 let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}");
             } else if first_line.starts_with("POST /api/pause") {
+                // Pausa de verdade: antes só mudava o texto do painel e o executor seguia apostando.
+                kill_switch.trip();
                 let _ = fui.pause();
                 let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}");
             } else if first_line.starts_with("POST /api/resume") {
@@ -1180,6 +1183,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut spins_since_blow = cfg.cooldown_spins;
     // Freio de risco: com gale recorrente, degrau 4 ou sequência longa, só coluna e dúzia.
     let mut caution = Caution::default();
+    // Meta de lucro (pausa para saque) e banca zerada (alerta geral). Nunca move dinheiro.
+    let mut money_guard = MoneyGuard::default();
     // Trava do caderno por script: 2 ciclos perdidos seguidos -> script parado por 30 giros.
     let mut script_lost_streak: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
     let mut script_paused_until: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
@@ -1454,6 +1459,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let change = caution.on_spin(&recent);
         report_caution(&fui, &caution, change);
+        if mode == ExecutionMode::Live {
+            let bank = shared_bankroll_cents.load(Ordering::Relaxed);
+            let pnl = shared_pnl_cents.load(Ordering::Relaxed);
+            match money_guard.check(bank, pnl, kill_switch.is_tripped()) {
+                GuardEvent::None => {}
+                GuardEvent::Halt { message, .. } => {
+                    kill_switch.trip();
+                    fui.halt(&message);
+                    println!("[VIGIA] {message}");
+                }
+                GuardEvent::Rearm { message } => {
+                    kill_switch.reset();
+                    let _ = fui.resume();
+                    println!("[VIGIA] {message}");
+                }
+                GuardEvent::Resumed => println!("[VIGIA] operador retomou depois da meta — próxima meta em +R$ 50,00"),
+            }
+        }
         if !already_recorded {
             let bank = u64::try_from(shared_bankroll_cents.load(Ordering::Relaxed)).unwrap_or(0);
             let cap = (bank as f64 * cfg_now.max_exposure_pct) as u64;

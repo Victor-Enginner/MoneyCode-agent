@@ -899,6 +899,16 @@ impl FuiController {
         Ok(g.session.state)
     }
 
+    /// Parada pelo vigia de dinheiro (meta ou banca zerada): executor cortado, motivo no banner.
+    pub fn halt(&self, reason: &str) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.session.state = GlobalState::Pausado;
+            g.session.banner_detail = Some(reason.to_string());
+            g.health.exec = LedStatus::Off;
+            warn!(reason, "FUI pausada pelo vigia de dinheiro");
+        }
+    }
+
     /// Comando IPC de escrita: `resume` (§7).
     pub fn resume(&self) -> Result<GlobalState, UiError> {
         let mut g = self.inner.lock().map_err(|_| UiError::StateLock)?;

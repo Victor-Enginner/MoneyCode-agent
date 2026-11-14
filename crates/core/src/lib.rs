@@ -12,6 +12,7 @@ pub mod caution;
 pub mod dag;
 pub mod executor;
 pub mod lab;
+pub mod money_guard;
 pub mod reconciler;
 pub mod shadow;
 pub mod table_stats;

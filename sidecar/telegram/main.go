@@ -674,7 +674,8 @@ func (w *watcher) scan(cfg config, send *sender, t tick) {
 		}
 
 		if t.Session.State != w.lastState {
-			if t.Session.State == "KILLED" || t.Session.State == "DEGRADED" || t.Session.State == "ERRO" {
+			if t.Session.State == "KILLED" || t.Session.State == "DEGRADED" || t.Session.State == "ERRO" ||
+				(t.Session.State == "PAUSADO" && derefS(t.Session.BannerDetail) != "—") {
 				send.send(cfg.ChatID, fmt.Sprintf("ALERTA · estado %s\n%s", t.Session.State, derefS(t.Session.BannerDetail)))
 			}
 			w.lastState = t.Session.State
