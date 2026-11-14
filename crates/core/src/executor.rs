@@ -615,7 +615,8 @@ impl CdpActuator for LiveHttpActuator {
             g.1 = 0;
         }
         // A mesa remove uma ficha por clique em UNDO: repete até o preview real ficar zerado.
-        for _ in 0..12 {
+        // Entrada de número tem 20+ fichas: 12 UNDO deixaram R$ 5,60 no pano em 14/11.
+        for _ in 0..CLEAR_MAX_UNDO {
             match self.read_bet_total() {
                 Ok(0) => return Ok(()),
                 Ok(_) => {}
@@ -629,7 +630,7 @@ impl CdpActuator for LiveHttpActuator {
         match self.read_bet_total() {
             Ok(0) => Ok(()),
             Ok(restante) => Err(ExecError::CdpTransport(format!(
-                "mesa não zerou após 12 UNDO (restante {restante} centavos)"
+                "mesa não zerou após {CLEAR_MAX_UNDO} UNDO (restante {restante} centavos)"
             ))),
             Err(err) => Err(err),
         }
@@ -721,6 +722,12 @@ fn read_settled(cdp: &dyn CdpActuator, expected: u64) -> Result<u64, ExecError> 
 
 /// Executa o plano de aposta seguindo estritamente o protocolo do §9 e invariantes §1.3, §1.4 e §1.8:
 /// `grava intent → clica cobertura → aplica denominações → lê preview → compara → confirm() → coleta acks`.
+/// Até quantas coberturas a conferência é feita cobertura a cobertura. Acima disso (entradas
+/// de número, 8 a 24 plenos) só o total final é conferido: ler o slip após cada pleno levou 26 s
+/// num gale de 22 números em 14/11, a janela fechou no meio e o slip atrasado fez o bot
+/// "completar" fichas que já estavam no pano (ficha de R$ 1 num degrau de R$ 0,50).
+pub const PER_COVER_VERIFY_MAX: usize = 4;
+
 pub fn place(
     pool: &SqlitePool,
     cdp: &dyn CdpActuator,
@@ -794,6 +801,7 @@ pub fn place(
     // Acumulados legítimos intermediários: o slip anima ficha por ficha, então ver 80¢ enquanto
     // o esperado já é 90¢ (a cobertura anterior inteira) não é divergência — é o pano desenhando.
     let mut legit_prefixes: Vec<u64> = vec![0];
+    let verify_each = plan.covers.len() <= PER_COVER_VERIFY_MAX;
     let apply_started = std::time::Instant::now();
     let applied = (|| -> Result<(), ExecError> {
     for (cover, cents) in &plan.covers {
@@ -815,7 +823,15 @@ pub fn place(
         // é detectada antes de confirmar, em vez de escondida atrás de um total que fecha por coincidência.
         cumulative_expected += *cents;
         legit_prefixes.push(cumulative_expected);
+        if !verify_each {
+            continue;
+        }
         let mut seen = read_settled(cdp, cumulative_expected)?;
+        // Slip atrasado mostrando o acumulado de uma cobertura anterior NÃO é ficha faltando:
+        // completar aqui aposta a mais. A validação fica para o total final.
+        if seen < cumulative_expected && legit_prefixes.contains(&seen) {
+            continue;
+        }
         // Ficha engolida pela animação do pano: o lote de 3 entrou como 2 ao vivo
         // (`cover=high lido=20 esperado=30 fichas=10x3`). Se o total FICOU ABAIXO do esperado,
         // repete só a diferença uma vez, na mesma cobertura. Acima do esperado nunca repete:
@@ -963,9 +979,65 @@ pub fn place(
     })
 }
 
+/// UNDO máximos ao limpar a mesa (uma ficha por clique na Playtech).
+pub const CLEAR_MAX_UNDO: u32 = 60;
+
 #[cfg(test)]
 mod slip_settle_tests {
     use super::*;
+    use monster_store::init_pool;
+
+    fn plano_de_numeros(k: u8, stake: u64) -> Plan {
+        let covers: Vec<(Cover, u64)> = (0..k).map(|n| (Cover::Straight(n), stake)).collect();
+        Plan {
+            spin_id: "gale-22".to_string(),
+            strategy_id: "script_espelhos_gemeos".to_string(),
+            ladder_step: 3,
+            stake_per_cover_cents: stake,
+            total_cents: stake * u64::from(k),
+            ev_cents: 0,
+            confidence: 0.99,
+            covers,
+            chips_per_cover: vec![(stake, 1)],
+        }
+    }
+
+    /// 14/11: gale 3 dos Espelhos (22 x 50c) com slip atrasado. Antes o bot lia o acumulado
+    /// velho a cada pleno e "completava" fichas (inclusive de R$ 1). Agora entra exato.
+    #[test]
+    fn entrada_de_numero_com_slip_atrasado_nao_aposta_a_mais() {
+        let pool = init_pool(":memory:").expect("pool");
+        let cdp = DryRunActuator::new();
+        cdp.set_slip_lag(6, 50);
+        let plan = plano_de_numeros(22, 50);
+        let fills = place(&pool, &cdp, &plan, &Calibration::default(), &KillSwitch::new(), 1)
+            .expect("entrada confirmada");
+        assert_eq!(fills.preview_cents, 1100, "22 x 50c, nem um centavo a mais");
+        assert_eq!(cdp.cleared_count(), 0);
+    }
+
+    /// Cobertura de fora com slip atrasado mostrando a cobertura anterior: não completa.
+    #[test]
+    fn slip_atrasado_em_cobertura_de_fora_nao_completa_ficha() {
+        let pool = init_pool(":memory:").expect("pool");
+        let cdp = DryRunActuator::new();
+        let plan = Plan {
+            spin_id: "col".to_string(),
+            strategy_id: "quebra_permanencia_coluna".to_string(),
+            ladder_step: 1,
+            stake_per_cover_cents: 20,
+            total_cents: 40,
+            ev_cents: 0,
+            confidence: 0.7,
+            covers: vec![(Cover::Col(1), 20), (Cover::Col(3), 20)],
+            chips_per_cover: vec![(20, 1)],
+        };
+        // depois da 2a coluna o slip ainda mostra 20 (a 1a): antes virava "faltou 20c"
+        cdp.set_slip_lag(0, 0);
+        let fills = place(&pool, &cdp, &plan, &Calibration::default(), &KillSwitch::new(), 2)
+            .expect("entrada confirmada");
+        assert_eq!(fills.preview_cents, 40);
+    }
 
     /// O slip da Playtech anima: ler o preview logo após os cliques devolve o total antigo. Antes
     /// da correção isso abortava toda entrada acima de uma ficha de 10¢ (`cover_mismatch` com
