@@ -652,6 +652,7 @@ impl FuiController {
                     "SELECT s.spin_id, s.number, s.ts, s.source,
                             EXISTS(SELECT 1 FROM intents i WHERE i.spin_id = s.spin_id) AS triggered
                      FROM spins s
+                     WHERE s.ts >= (SELECT COALESCE(MAX(started_at), 0) FROM sessions)
                      ORDER BY s.ts DESC, s.id DESC
                      LIMIT 20",
                 )?;

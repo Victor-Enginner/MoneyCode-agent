@@ -7,7 +7,9 @@ use monster_capture::{CaptureSource, SpinBus, StreamClient, DEFAULT_STREAM_ADDR}
 use monster_core::balance_audit::{BalanceWatch, WatchEvent};
 use monster_core::{
     boot_reconcile, build_brain_snapshot, evaluate_all_matchers_history,
-    evaluate_dag_with_history, has_recent_number, load_chronological_history, place, reconcile_spin,
+    ensure_session, evaluate_dag_with_history, has_recent_number, load_chronological_history,
+    load_session_chronological, place, read_session_newest_until, reconcile_spin,
+    spins_after_trigger, SessionDecision, MISSED_SPIN_GAP_MS,
     family_radars, sync_strip_to_db, terminal_radar, write_gbrain_file, Calibration, CdpActuator,
     CoverAck, DryRunActuator, OPERATOR_TERMINALS,
     window_budget_ms, ExecutionMode, GateCtx, HistoryBuffer, KillSwitch, LadderSteps,
@@ -120,6 +122,68 @@ const MIN_ENTRY_GAP_MS: i64 = 15_000;
 const ROUND_KEY_TTL_MS: i64 = 45_000;
 
 /// Escadas com degrau pendente que NÃO acabaram de perder neste giro: devem ser zeradas.
+/// Como a entrada pendente foi resolvida na mesa.
+enum EntryOutcome {
+    /// Giro seguinte chegou no tempo normal: o número do evento é o resultado.
+    Normal,
+    /// Giro(s) perdido(s): `result` veio da fita; `missed` (mais recente primeiro) faltava no banco.
+    Missed { result: u8, missed: Vec<u8> },
+    /// Giro perdido e a fita não permite saber o resultado.
+    Unknown,
+}
+
+/// Decide o resultado real da entrada. Com intervalo normal vale o evento; acima de
+/// `MISSED_SPIN_GAP_MS` a fita da mesa diz o que saiu logo depois do giro da entrada.
+fn resolve_entry_outcome(
+    pool: &SqlitePool,
+    latest_strip: &Mutex<Vec<u8>>,
+    ev_number: u8,
+    ev_ts: i64,
+    trigger_ts: i64,
+) -> EntryOutcome {
+    if trigger_ts <= 0 || ev_ts - trigger_ts <= MISSED_SPIN_GAP_MS {
+        return EntryOutcome::Normal;
+    }
+    let strip = latest_strip.lock().map(|s| s.clone()).unwrap_or_default();
+    let before = read_session_newest_until(pool, trigger_ts, 12).unwrap_or_default();
+    let Some(after) = spins_after_trigger(&strip, &before) else {
+        return EntryOutcome::Unknown;
+    };
+    let Some(&result) = after.last() else {
+        return EntryOutcome::Unknown;
+    };
+    // Fita já atualizada mostra o giro do evento no topo: ele não é giro perdido.
+    let missed: Vec<u8> = if after.first() == Some(&ev_number) {
+        after[1..].to_vec()
+    } else {
+        after
+    };
+    if missed.is_empty() {
+        // Rodada só demorou (troca de dealer): fita confirma que nada se perdeu.
+        return EntryOutcome::Normal;
+    }
+    EntryOutcome::Missed { result, missed }
+}
+
+/// Grava na TIMELINE os giros que o observer perdeu, entre o giro da entrada e o atual.
+fn record_missed_spins(pool: &SqlitePool, missed_newest_first: &[u8], trigger_ts: i64, ev_ts: i64) {
+    let step = (ev_ts - trigger_ts) / (missed_newest_first.len() as i64 + 1);
+    for (j, &number) in missed_newest_first.iter().rev().enumerate() {
+        let ts = trigger_ts + step * (j as i64 + 1);
+        let _ = insert_spin(
+            pool,
+            &NewSpin {
+                spin_id: format!("gap-{ev_ts}-{j}-{number}"),
+                number,
+                ts,
+                source: SpinSource::Mo,
+                received_at: now_unix_ms(),
+                latency_ms: Some(0),
+            },
+        );
+    }
+}
+
 /// Aplica o resultado da conferência de extrato e devolve a base de P&L (talvez ajustada).
 /// Divergência avisa (log, `errors`, painel, Telegram) e NÃO pausa: o operador decide.
 /// Movimento externo (saque, depósito) sai da base para não virar lucro nem prejuízo do bot.
@@ -323,6 +387,7 @@ fn reload_live_history(
     window: &Arc<Mutex<Window30>>,
     history: &Arc<Mutex<HistoryBuffer>>,
 ) {
+    // Walk-forward e regime: histórico longo da mesa (estatística vale entre sessões).
     let chrono = load_chronological_history(pool, HISTORY_CAPACITY);
     if let Ok(mut h) = history.lock() {
         let mut fresh = HistoryBuffer::new();
@@ -331,10 +396,11 @@ fn reload_live_history(
         }
         *h = fresh;
     }
+    // Padrões de entrada: só a sessão atual. Número de outra sessão nunca fecha streak.
+    let session = load_session_chronological(pool, WINDOW_CAPACITY);
     if let Ok(mut w) = window.lock() {
         let mut fresh = Window30::new();
-        let start = chrono.len().saturating_sub(WINDOW_CAPACITY);
-        for &n in &chrono[start..] {
+        for &n in &session {
             fresh.push(n);
         }
         *w = fresh;
@@ -806,14 +872,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for &n in &initial_chrono {
         initial_hist.push_live(n);
     }
-    let window = Arc::new(Mutex::new({
-        let mut w = Window30::new();
-        let start = initial_chrono.len().saturating_sub(WINDOW_CAPACITY);
-        for &n in &initial_chrono[start..] {
-            w.push(n);
-        }
-        w
-    }));
+    // Janela de padrões começa vazia: a sessão (continua ou nova) é decidida na primeira
+    // fita lida da mesa, e só então a janela é carregada.
+    let window = Arc::new(Mutex::new(Window30::new()));
+    let boot_ms = now_unix_ms();
+    let session_ready = Arc::new(AtomicBool::new(false));
+    // Última fita lida da mesa: autoridade para achar o resultado real quando um giro se perde.
+    let latest_strip: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
 
     let init_chrono = initial_hist.to_chronological_vec();
     let init_snap = build_brain_snapshot(&matchers, &init_chrono, &cfg);
@@ -855,6 +920,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let round_open_atom = table_round_open.clone();
         let round_key_atom = table_round.clone();
         let watch_poll = balance_watch.clone();
+        let session_ready_poll = session_ready.clone();
+        let strip_poll = latest_strip.clone();
 
         thread::spawn(move || loop {
             if let Some(tel) = live_act_poll.fetch_telemetry() {
@@ -883,8 +950,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pnl_atom.store(real_bal - base_bal, Ordering::Relaxed);
                 }
 
-                // A fita da Playtech é a autoridade da TIMELINE: grava só os giros ausentes e recarrega os buffers.
                 if tel.strip.len() >= 4 {
+                    if let Ok(mut s) = strip_poll.lock() {
+                        s.clone_from(&tel.strip);
+                    }
+                }
+
+                // Primeira fita após o boot decide a sessão: continua (troca rápida) ou abre outra
+                // semeada com a fita da mesa. Até decidir, o executor não entra.
+                if !session_ready_poll.load(Ordering::Relaxed) {
+                    match ensure_session(&pool_poll, &tel.strip, boot_ms, now_unix_ms()) {
+                        Ok(Some(SessionDecision::Continue)) => {
+                            println!("[SESSAO] fita da mesa continua o histórico — sessão anterior mantida");
+                            reload_live_history(&pool_poll, &win_poll, &hist_poll);
+                            session_ready_poll.store(true, Ordering::Relaxed);
+                        }
+                        Ok(Some(SessionDecision::Open { started_at, seeded, reason })) => {
+                            println!(
+                                "[SESSAO] nova sessão ({reason}) às {started_at} | fita da mesa {:?} vira a base ({seeded} giro(s)) | histórico anterior fora da TIMELINE e dos padrões",
+                                tel.strip
+                            );
+                            reload_live_history(&pool_poll, &win_poll, &hist_poll);
+                            session_ready_poll.store(true, Ordering::Relaxed);
+                        }
+                        Ok(None) => {}
+                        Err(err) => eprintln!("[SESSAO-ERR] falha ao decidir sessão: {err}"),
+                    }
+                }
+
+                // A fita da Playtech é a autoridade da TIMELINE: grava só os giros ausentes e recarrega os buffers.
+                if session_ready_poll.load(Ordering::Relaxed) && tel.strip.len() >= 4 {
                     match sync_strip_to_db(&pool_poll, &tel.strip, &tel.game_code, now_unix_ms()) {
                         Ok(report) if report.inserted > 0 => {
                             reload_live_history(&pool_poll, &win_poll, &hist_poll);
@@ -944,6 +1039,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let mut pending_entry: Option<(Plan, Vec<CoverAck>)> = None;
+    // `ts` do giro em que a entrada pendente foi feita: mede se algum giro se perdeu até o resultado.
+    let mut pending_trigger_ts: i64 = 0;
     let mut last_entry_round = String::new();
     let mut last_entry_at_ms: i64 = 0;
 
@@ -1010,6 +1107,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if let Some((prev_plan, prev_acks)) = pending_entry.take() {
             // Rodada resolvida: o overlay sai do pano junto com a entrada.
             fui.set_cover_numbers(Vec::new());
+            let outcome = resolve_entry_outcome(&pool, &latest_strip, ev.number, ev.ts, pending_trigger_ts);
+            let result_number = match &outcome {
+                EntryOutcome::Normal => Some(ev.number),
+                EntryOutcome::Missed { result, missed } => {
+                    record_missed_spins(&pool, missed, pending_trigger_ts, ev.ts);
+                    println!(
+                        "[GIRO-PERDIDO] {} giro(s) perdido(s) entre a entrada e o {} — resultado real da entrada={} (fita da mesa) | gale interrompido",
+                        missed.len(),
+                        ev.number,
+                        result
+                    );
+                    Some(*result)
+                }
+                EntryOutcome::Unknown => {
+                    eprintln!(
+                        "[GIRO-PERDIDO] {} s sem giro e a fita não mostra o resultado de {} — entrada não liquidada por número; escada zerada, saldo real segue no P&L",
+                        (ev.ts - pending_trigger_ts) / 1000,
+                        prev_plan.strategy_id
+                    );
+                    let _ = insert_error(
+                        &pool,
+                        "missed_spin_unknown",
+                        &format!("strategy={} trigger_ts={} next={}", prev_plan.strategy_id, pending_trigger_ts, ev.number),
+                        now_ms,
+                    );
+                    None
+                }
+            };
+            let gale_ok = matches!(outcome, EntryOutcome::Normal);
+            if let Some(result_number) = result_number {
             match reconcile_spin(
                 &pool,
                 PlayedEntry {
@@ -1017,7 +1144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ladder_step: prev_plan.ladder_step,
                     acks: &prev_acks,
                 },
-                ev.number,
+                result_number,
                 &cfg_now,
                 None,
                 now_ms,
@@ -1030,12 +1157,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ladder_steps.insert(rep.strategy_id.clone(), rep.next_step);
                     let audit_open = balance_watch
                         .lock()
-                        .map(|mut w| w.settle(rep.expected_delta_cents, &rep.strategy_id, ev.number, now_ms))
+                        .map(|mut w| w.settle(rep.expected_delta_cents, &rep.strategy_id, result_number, now_ms))
                         .unwrap_or(false);
                     if !audit_open && mode == ExecutionMode::Live {
                         println!("[EXTRATO] sem saldo lido antes da entrada — conferência desta rodada não aberta");
                     }
-                    if rep.next_step > 0 {
+                    // Gale só no giro seguinte à perda: com giro perdido esse giro já passou.
+                    if rep.next_step > 0 && gale_ok {
                         gale_alive = Some(rep.strategy_id.clone());
                     }
                     if rep.ladder_blown {
@@ -1046,7 +1174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!(
                         "[RECONCILE] spin={} num={} | estrategia={} | degrau_jogado={} | won={} delta={}¢ | pnl={}¢ | proximo_degrau={}",
                         ev.spin_id,
-                        ev.number,
+                        result_number,
                         rep.strategy_id,
                         prev_plan.ladder_step,
                         rep.won,
@@ -1061,7 +1189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         won: rep.won,
                         delta_cents: rep.expected_delta_cents,
                         step: prev_plan.ladder_step,
-                        number: ev.number,
+                        number: result_number,
                         max_steps: cfg_now.max_steps,
                         ts: now_ms,
                     });
@@ -1069,6 +1197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(err) => {
                     eprintln!("[RECONCILE-ERR] {err}");
                 }
+            }
             }
         } else {
             spins_since_blow = spins_since_blow.saturating_add(1);
@@ -1088,6 +1217,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        // Sessão ainda não decidida (fita da mesa não lida): o giro fica gravado, mas nenhum
+        // padrão é avaliado sobre uma janela que pode misturar duas sessões.
+        if !session_ready.load(Ordering::Relaxed) {
+            println!(
+                "[SESSAO] spin={} num={} gravado — aguardando a fita da mesa para decidir a sessão; sem entrada",
+                ev.spin_id, ev.number
+            );
+            continue;
+        }
+
         // Buffers reconstruídos do banco (já sincronizado com a fita da Playtech):
         // DAG e TIMELINE nunca divergem nem duplicam o mesmo giro.
         reload_live_history(&pool, &window, &history);
@@ -1102,14 +1241,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Placar ao vivo dos terminais 2-3-6-9: leitura pura da fita real (sem replay de
         // fixture). Serve para o operador comparar a percepção com a medição.
+        // Radares do painel: só a sessão atual, como a TIMELINE.
+        let session_hist = load_session_chronological(&pool, 100);
         fui.sync_terminal_radar(Some(terminal_radar(
-            &chrono_hist,
+            &session_hist,
             100,
             OPERATOR_TERMINALS,
             3,
             0.44,
         )));
-        fui.sync_family_radars(family_radars(&chrono_hist, 100));
+        fui.sync_family_radars(family_radars(&session_hist, 100));
 
         let cur_bank = shared_bankroll_cents.load(Ordering::Relaxed);
         let cur_pnl = shared_pnl_cents.load(Ordering::Relaxed);
@@ -1224,6 +1365,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     covered.dedup();
                     fui.set_cover_numbers(covered);
                     pending_entry = Some((plan, fills.items));
+                    pending_trigger_ts = ev.ts;
                 }
                 Err(err) => {
                     if let Ok(mut w) = balance_watch.lock() {

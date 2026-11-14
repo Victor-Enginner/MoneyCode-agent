@@ -11,6 +11,8 @@ use tracing::{error, info, warn};
 
 /// DDL inicial da migração `0001_init.sql`.
 pub const MIGRATION_0001_INIT: &str = include_str!("../../../migrations/0001_init.sql");
+/// Marco de sessão da TIMELINE (`migrations/0002_sessions.sql`, idempotente).
+pub const MIGRATION_0002_SESSIONS: &str = include_str!("../../../migrations/0002_sessions.sql");
 
 /// Janela de retenção de spins: 180 dias em milissegundos.
 pub const SPINS_RETENTION_MS: i64 = 180 * 24 * 60 * 60 * 1000;
@@ -197,7 +199,29 @@ pub fn migrate(pool: &SqlitePool) -> Result<(), StoreError> {
             conn.execute_batch(MIGRATION_0001_INIT)?;
             info!("schema 0001_init.sql aplicado com sucesso");
         }
+        conn.execute_batch(MIGRATION_0002_SESSIONS)?;
         Ok(())
+    })
+    .map_err(StoreError::from_sqlx)
+}
+
+/// Abre uma sessão nova da TIMELINE a partir de `started_at` (ms). Giros anteriores ficam no
+/// banco para estatística, mas saem da janela de padrões e da TIMELINE.
+pub fn open_session(pool: &SqlitePool, started_at: i64, reason: &str) -> Result<i64, StoreError> {
+    pool.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO sessions (started_at, reason) VALUES (?1, ?2)",
+            params![started_at, reason],
+        )?;
+        Ok(conn.last_insert_rowid())
+    })
+    .map_err(StoreError::from_sqlx)
+}
+
+/// Início da sessão atual em ms (`0` = nenhuma sessão aberta: vale o banco inteiro).
+pub fn session_floor_ms(pool: &SqlitePool) -> Result<i64, StoreError> {
+    pool.with_conn(|conn| {
+        conn.query_row("SELECT COALESCE(MAX(started_at), 0) FROM sessions", [], |r| r.get(0))
     })
     .map_err(StoreError::from_sqlx)
 }

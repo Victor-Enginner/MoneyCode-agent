@@ -3,7 +3,9 @@
 //! Detecta quantos giros novos entraram no topo da fita e grava apenas os ausentes, sempre com `spin_id` único.
 //! É a autoridade de coerência da TIMELINE: se a fita e o banco divergirem, o banco se alinha à mesa.
 
-use monster_store::{insert_spin, NewSpin, SpinSource, SqlitePool, StoreError};
+use monster_store::{
+    insert_spin, open_session, session_floor_ms, NewSpin, SpinSource, SqlitePool, StoreError,
+};
 
 /// Quantidade máxima de números exibidos na fita horizontal da Playtech.
 pub const MAX_STRIP: usize = 12;
@@ -56,6 +58,169 @@ pub fn read_newest_numbers(pool: &SqlitePool, limit: usize) -> Result<Vec<u8>, S
         Ok(out)
     })
     .map_err(StoreError::Database)
+}
+
+/// Pausa máxima entre o último giro gravado e o boot para a sessão anterior continuar valendo.
+pub const SESSION_GAP_MS: i64 = 10 * 60_000;
+
+/// Um giro lido do banco: `(número, ts)`.
+type SpinRow = (u8, i64);
+
+/// Giros da sessão atual (`ts >= started_at`), mais recente primeiro.
+fn session_rows(pool: &SqlitePool, limit: usize) -> Result<Vec<SpinRow>, StoreError> {
+    let floor = session_floor_ms(pool)?;
+    let sql = format!(
+        "SELECT number, ts FROM spins WHERE ts >= ?1 ORDER BY ts DESC, id DESC LIMIT {}",
+        limit.min(10_000)
+    );
+    pool.with_conn(|conn| {
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([floor], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut out = Vec::with_capacity(limit);
+        for row in rows {
+            let (n, ts) = row?;
+            out.push((u8::try_from(n.clamp(0, 36)).unwrap_or(0), ts));
+        }
+        Ok(out)
+    })
+    .map_err(StoreError::Database)
+}
+
+/// Como `read_newest_numbers`, mas só a sessão atual: é o que a TIMELINE e os padrões enxergam.
+pub fn read_session_newest_numbers(pool: &SqlitePool, limit: usize) -> Result<Vec<u8>, StoreError> {
+    Ok(session_rows(pool, limit)?.into_iter().map(|(n, _)| n).collect())
+}
+
+/// Giros da sessão atual gravados até `until_ts` (inclusive), mais recente primeiro.
+pub fn read_session_newest_until(
+    pool: &SqlitePool,
+    until_ts: i64,
+    limit: usize,
+) -> Result<Vec<u8>, StoreError> {
+    let floor = session_floor_ms(pool)?;
+    let sql = format!(
+        "SELECT number FROM spins WHERE ts >= ?1 AND ts <= ?2 ORDER BY ts DESC, id DESC LIMIT {}",
+        limit.min(10_000)
+    );
+    pool.with_conn(|conn| {
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([floor, until_ts], |r| r.get::<_, i64>(0))?;
+        let mut out = Vec::with_capacity(limit);
+        for row in rows {
+            out.push(u8::try_from(row?.clamp(0, 36)).unwrap_or(0));
+        }
+        Ok(out)
+    })
+    .map_err(StoreError::Database)
+}
+
+/// Giros da sessão atual em ordem cronológica (mais antigo primeiro), para a janela de padrões.
+pub fn load_session_chronological(pool: &SqlitePool, limit: usize) -> Vec<u8> {
+    match read_session_newest_numbers(pool, limit) {
+        Ok(mut newest) => {
+            newest.reverse();
+            newest
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+/// O que o boot decidiu sobre a sessão da TIMELINE.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionDecision {
+    /// A fita da mesa continua o histórico gravado (troca rápida do core): nada muda.
+    Continue,
+    /// Sessão nova: histórico anterior sai da janela; a fita da mesa vira a base.
+    Open {
+        started_at: i64,
+        seeded: usize,
+        reason: &'static str,
+    },
+}
+
+/// Decide, na primeira fita lida após o boot, se a sessão anterior continua ou se abre outra.
+///
+/// Continua só se o último giro anterior ao boot tem menos de `SESSION_GAP_MS` e a fita da
+/// mesa encaixa nele. Senão abre sessão e semeia a fita (menos os giros que o observer já
+/// gravou desde o boot), para os padrões partirem do que a mesa mostra, nunca de números
+/// de outra sessão. `None` = fita curta demais, tentar na próxima leitura.
+pub fn ensure_session(
+    pool: &SqlitePool,
+    strip: &[u8],
+    boot_ms: i64,
+    now_ms: i64,
+) -> Result<Option<SessionDecision>, StoreError> {
+    let strip = sanitize_strip(strip);
+    if strip.len() < 4 {
+        return Ok(None);
+    }
+    let floor = session_floor_ms(pool)?;
+    let rows = session_rows(pool, 64)?;
+    let (fresh, older): (Vec<SpinRow>, Vec<SpinRow>) =
+        rows.into_iter().partition(|&(_, ts)| ts >= boot_ms);
+    let k = fresh.len().min(strip.len());
+    let tail = &strip[k..];
+    let older_nums: Vec<u8> = older.iter().take(MAX_STRIP).map(|&(n, _)| n).collect();
+
+    let reason = match older.first() {
+        _ if floor == 0 => "primeira sessão registrada",
+        None => "sessão anterior vazia",
+        Some(&(_, last_ts)) if boot_ms - last_ts > SESSION_GAP_MS => "pausa maior que 10 min",
+        Some(_) if tail.len() < 4 || overlap_new_spins(tail, &older_nums).is_none() => {
+            "fita da mesa não continua o histórico"
+        }
+        Some(_) => return Ok(Some(SessionDecision::Continue)),
+    };
+
+    let mut started_at = fresh.last().map_or(now_ms - 100, |&(_, ts)| ts - 100);
+    if let Some(&(_, last_ts)) = older.first() {
+        started_at = started_at.max(last_ts + 1);
+    }
+    open_session(pool, started_at, reason)?;
+
+    let mut seeded = 0usize;
+    for i in (k..strip.len()).rev() {
+        let number = strip[i];
+        let spin = NewSpin {
+            spin_id: format!("base-{started_at}-{i}-{number}"),
+            number,
+            ts: started_at + (strip.len() - i) as i64,
+            source: SpinSource::Mo,
+            received_at: now_ms,
+            latency_ms: Some(0),
+        };
+        match insert_spin(pool, &spin) {
+            Ok(_) => seeded += 1,
+            Err(StoreError::ConstraintViolation(_)) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(Some(SessionDecision::Open {
+        started_at,
+        seeded,
+        reason,
+    }))
+}
+
+/// Intervalo entre o giro da entrada e o giro seguinte gravado acima do qual houve giro
+/// perdido (rodada real: 37-45 s; dois giros juntos passam de 74 s).
+pub const MISSED_SPIN_GAP_MS: i64 = 60_000;
+
+/// Acha na fita da mesa o que saiu DEPOIS do giro em que a entrada foi feita.
+///
+/// `before` = giros da sessão até o da entrada (mais recente primeiro). Devolve os giros da
+/// fita acima dele (mais recente primeiro); o último da lista é o que resolveu a entrada.
+/// `None` quando a fita não mostra nada depois desse giro ou não encaixa com segurança.
+pub fn spins_after_trigger(strip: &[u8], before: &[u8]) -> Option<Vec<u8>> {
+    let strip = sanitize_strip(strip);
+    let matches_at = |p: usize| {
+        let k = 4.min(strip.len() - p).min(before.len());
+        k >= 3 && strip[p..p + k] == before[..k]
+    };
+    if strip.len() < 4 || matches_at(0) {
+        return None;
+    }
+    (1..strip.len()).find(|&p| matches_at(p)).map(|p| strip[..p].to_vec())
 }
 
 /// Verifica se o banco já tem esse número gravado dentro de `tolerance_ms` do instante informado.
@@ -162,7 +327,7 @@ pub fn sync_strip_to_db(
     if observer_alive(pool, now_ms)? {
         return Ok(StripSyncReport::default());
     }
-    let newest = read_newest_numbers(pool, MAX_STRIP)?;
+    let newest = read_session_newest_numbers(pool, MAX_STRIP)?;
     // Sem sobreposição com histórico existente (reconexão, fita reordenada pelo SPA): grava no
     // máximo o giro do topo — e só se ele não entrou nos últimos 35 s. Nunca regrava a fita.
     let (new_count, rebuilt) = match overlap_new_spins(&strip, &newest) {
@@ -219,6 +384,122 @@ pub fn sync_strip_to_db(
 mod tests {
     use super::*;
     use monster_store::init_pool;
+
+    fn gravar(pool: &SqlitePool, id: &str, number: u8, ts: i64) {
+        insert_spin(
+            pool,
+            &NewSpin {
+                spin_id: id.to_string(),
+                number,
+                ts,
+                source: SpinSource::Mo,
+                received_at: ts,
+                latency_ms: Some(0),
+            },
+        )
+        .expect("insert");
+    }
+
+    /// Sessão antiga terminando em ... 23, 16 (16 = mais recente) em `fim_ms`.
+    fn sessao_antiga(pool: &SqlitePool, fim_ms: i64) {
+        for (i, n) in [5u8, 13, 17, 28, 27, 1, 34, 14, 15, 1, 28, 27, 1, 23, 16].iter().enumerate() {
+            gravar(pool, &format!("rid-old-{i}"), *n, fim_ms - (14 - i as i64) * 40_000);
+        }
+    }
+
+    #[test]
+    fn reboot_com_fita_nova_abre_sessao_e_timeline_e_so_a_mesa() {
+        let pool = init_pool(":memory:").expect("pool");
+        let boot = 10_000_000;
+        sessao_antiga(&pool, boot - 8 * 60_000);
+        let fita = [16u8, 23, 12, 20, 20, 1, 1, 29, 13, 17, 25, 8];
+        let d = ensure_session(&pool, &fita, boot, boot + 500).expect("ok").expect("decidiu");
+        assert!(matches!(d, SessionDecision::Open { seeded: 12, .. }), "{d:?}");
+        assert_eq!(read_session_newest_numbers(&pool, 50).expect("read"), fita.to_vec());
+        // histórico longo intacto para o walk-forward
+        assert_eq!(read_newest_numbers(&pool, 100).expect("read").len(), 27);
+        // giro novo do observer entra no topo, sem o 16 da sessão anterior embaixo
+        gravar(&pool, "rid-new-1", 7, boot + 40_000);
+        let s = read_session_newest_numbers(&pool, 4).expect("read");
+        assert_eq!(s, vec![7, 16, 23, 12]);
+    }
+
+    #[test]
+    fn giro_gravado_pelo_observer_antes_da_fita_nao_duplica() {
+        let pool = init_pool(":memory:").expect("pool");
+        let boot = 10_000_000;
+        sessao_antiga(&pool, boot - 60_000);
+        gravar(&pool, "rid-new-1", 16, boot + 2_000);
+        let fita = [16u8, 23, 12, 20, 20, 1, 1, 29, 13, 17, 25, 8];
+        let d = ensure_session(&pool, &fita, boot, boot + 3_000).expect("ok").expect("decidiu");
+        assert!(matches!(d, SessionDecision::Open { seeded: 11, .. }), "{d:?}");
+        assert_eq!(read_session_newest_numbers(&pool, 50).expect("read"), fita.to_vec());
+    }
+
+    #[test]
+    fn troca_rapida_do_core_continua_a_sessao() {
+        let pool = init_pool(":memory:").expect("pool");
+        let boot = 10_000_000;
+        let fita0 = [16u8, 23, 1, 27, 28, 1, 15, 14, 34, 1, 27, 28];
+        assert!(matches!(
+            ensure_session(&pool, &fita0, boot - 50_000, boot - 49_000).expect("ok"),
+            Some(SessionDecision::Open { .. })
+        ));
+        // 2 giros saíram durante a troca do core: a fita ainda encaixa -> continua
+        let fita = [9u8, 15, 16, 23, 1, 27, 28, 1, 15, 14, 34, 1];
+        assert_eq!(
+            ensure_session(&pool, &fita, boot, boot + 500).expect("ok"),
+            Some(SessionDecision::Continue)
+        );
+    }
+
+    #[test]
+    fn pausa_longa_abre_sessao_mesmo_com_fita_igual() {
+        let pool = init_pool(":memory:").expect("pool");
+        let boot = 10_000_000;
+        let fita0 = [16u8, 23, 1, 27, 28, 1, 15, 14, 34, 1, 27, 28];
+        assert!(ensure_session(&pool, &fita0, boot - 3_600_000, boot - 3_599_000)
+            .expect("ok")
+            .is_some());
+        let d = ensure_session(&pool, &fita0, boot, boot + 500).expect("ok").expect("decidiu");
+        assert!(
+            matches!(d, SessionDecision::Open { reason: "pausa maior que 10 min", .. }),
+            "{d:?}"
+        );
+    }
+
+    #[test]
+    fn giro_perdido_resolve_a_entrada_pelo_numero_da_fita() {
+        // Caso real de 13/11 21:18: entrada após o 6, observer perdeu um giro (X=31), gravou 15.
+        let before = [6u8, 4, 6, 10, 30, 7];
+        let fita = [15u8, 31, 6, 4, 6, 10, 30, 7, 32, 7, 16, 23];
+        let after = spins_after_trigger(&fita, &before).expect("encaixa");
+        assert_eq!(after, vec![15, 31]);
+        assert_eq!(*after.last().expect("resultado"), 31, "a entrada foi resolvida no 31, não no 15");
+    }
+
+    #[test]
+    fn fita_atrasada_ainda_mostra_o_giro_perdido() {
+        // fita lida antes do 15 aparecer: o topo já é o giro perdido
+        let before = [6u8, 4, 6, 10, 30, 7];
+        let fita = [31u8, 6, 4, 6, 10, 30, 7, 32, 7, 16, 23, 12];
+        assert_eq!(spins_after_trigger(&fita, &before), Some(vec![31]));
+    }
+
+    #[test]
+    fn sem_giro_novo_na_fita_nao_inventa_resultado() {
+        let before = [6u8, 4, 6, 10, 30, 7];
+        let fita = [6u8, 4, 6, 10, 30, 7, 32, 7, 16, 23, 12, 20];
+        assert_eq!(spins_after_trigger(&fita, &before), None);
+        // fita sem relação com a sessão também não decide nada
+        assert_eq!(spins_after_trigger(&[1, 2, 3, 5, 8, 13, 21], &before), None);
+    }
+
+    #[test]
+    fn fita_curta_espera_a_proxima_leitura() {
+        let pool = init_pool(":memory:").expect("pool");
+        assert_eq!(ensure_session(&pool, &[1, 2], 0, 1).expect("ok"), None);
+    }
 
     #[test]
     fn empty_db_recebe_a_fita_inteira() {

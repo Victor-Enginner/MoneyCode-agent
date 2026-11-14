@@ -44,8 +44,10 @@ pub use reconciler::{
 };
 pub use terminals::{family_radars, real_tail_start, terminal_radar, OPERATOR_TERMINALS};
 pub use timeline_sync::{
-    count_new_spins, has_recent_number, load_chronological_history, read_newest_numbers,
-    sanitize_strip, sync_strip_to_db, StripSyncReport, MAX_STRIP,
+    count_new_spins, ensure_session, has_recent_number, load_chronological_history,
+    load_session_chronological, read_newest_numbers, read_session_newest_numbers, SessionDecision,
+    read_session_newest_until, sanitize_strip, spins_after_trigger, sync_strip_to_db, StripSyncReport, MAX_STRIP,
+    MISSED_SPIN_GAP_MS,
 };
 
 /// Versão do módulo core.
