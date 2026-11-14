@@ -11,7 +11,7 @@ use monster_core::{
 };
 use monster_risk::{run_monte_carlo, Cfg, McParams, State, Verdict};
 use monster_store::{init_pool, insert_spin, orphan_sweep, NewSpin, SpinSource};
-use monster_strategy_native::default_matchers;
+use monster_strategy_native::{default_matchers, Cover};
 
 #[test]
 fn integration_sqlite_virtual_clock_replay_and_200_dryrun_entries() {
@@ -102,7 +102,8 @@ fn integration_sqlite_virtual_clock_replay_and_200_dryrun_entries() {
             },
             20, // Coluna 2 e Dúzia 2 (vencedora contra streak da Coluna 1 / Dúzia 1)
             &cfg,
-            Some(plan.stake_per_cover_cents as i64),
+            // Ganho líquido da cobertura dupla menos a ficha de proteção do zero (degrau >= 3).
+            Some(plan.stake_per_cover_cents as i64 - zero_chip_cents(&plan)),
             virtual_clock_ms + 500,
         )
         .expect("reconcile_spin");
@@ -133,8 +134,10 @@ fn fase5_200_entradas_dry_run_com_escada_avancando() {
 
     // Número real que vence ou perde a cobertura do plano — nada de "20 = coluna 2" chutado,
     // a conta sai da própria regra da roleta.
+    // Sem o 0: a ficha de proteção do zero (degrau >= 3) faz o 0 "acertar" a cobertura,
+    // mas o zero protegido repete o degrau em vez de contar vitória.
     let pick_outcome = |plan: &Plan, want_win: bool| -> u8 {
-        (0u8..=36)
+        (1u8..=36)
             .find(|&n| {
                 plan.covers
                     .iter()
@@ -308,7 +311,7 @@ fn fase5_200_entradas_dry_run_com_escada_avancando() {
 #[test]
 fn fase5_cluster_final_aposta_em_numeros_com_escada_propria() {
     use monster_risk::NumberLadder;
-    use monster_strategy_native::{ClusterFinal, Cover, Matcher};
+    use monster_strategy_native::{ClusterFinal, Matcher};
 
     let pool = init_pool(":memory:").expect("init in-memory sqlite");
     let cfg = Cfg::default();
@@ -501,4 +504,13 @@ fn dag_expoe_posterior_de_regime_sem_vetar_bloco_real() {
     assert!(cluster.confidence > 0.0);
     assert_eq!(dag_out.verdict, Some(Verdict::Place));
     assert_eq!(dag_out.plan.expect("plano de plenos").covers.len(), 15);
+}
+
+/// Ficha de proteção no 0 incluída no plano (0 quando não há).
+fn zero_chip_cents(plan: &monster_core::Plan) -> i64 {
+    plan.covers
+        .iter()
+        .filter(|(c, _)| *c == Cover::Straight(0))
+        .map(|(_, cents)| *cents as i64)
+        .sum()
 }
