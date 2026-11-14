@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+# Cartão compilado de um script do operador (grupo REY_DO_WIN, 11/01/2026).
+# Status research: só backtest. Nenhuma entrada real sai deste cartão sem passar nos gates.
+
+id: script_espelhos_gemeos
+version: 1
+status: research
+owner: D-INTEL
+nome: "Espelhos & Gêmeos"
+source: "Script do operador enviado em 14/11/2026 (caderno / grupo Telegram)"
+
+trigger:
+  rule: last_spin_in
+  numbers: [11, 12, 13, 21, 22, 23, 31, 32, 33]
+  source_text: "Quando sair qualquer espelho ou gêmeo"
+
+cover:
+  type: straight_set
+  entry: [11, 12, 13, 21, 22, 23, 31, 32, 33]
+  protections: [3, 9, 36, 35, 27, 30, 8, 10, 4, 2, 26]
+  pockets: [2, 3, 4, 8, 9, 10, 11, 12, 13, 21, 22, 23, 26, 27, 30, 31, 32, 33, 35, 36]
+  k: 20
+  p_hit_uniform: 0.5405   # 20/37
+
+staking:
+  mode: flat
+  rule: "1 ficha por número em cada tentativa; acerto paga 35:1"
+  max_attempts: 2                 # "Máx 2 tentativas"
+
+stop:
+  rule: "perdeu 2 ciclos seguidos -> encerra a leitura"   # trava psicológica do script
+  backtest_pause_spins: 30
+
+edge:
+  house_edge_per_unit: -0.0270
+  note: "a cobertura não muda a borda da casa; o cartão mede risco e disciplina"

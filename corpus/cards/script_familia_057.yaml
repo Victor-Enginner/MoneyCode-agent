@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: Apache-2.0
+# Cartão compilado de um script do operador (grupo REY_DO_WIN, 11/01/2026).
+# Status research: só backtest. Nenhuma entrada real sai deste cartão sem passar nos gates.
+
+id: script_familia_057
+version: 1
+status: research
+owner: D-INTEL
+nome: "Família 0-5-7"
+source: "Script do operador enviado em 14/11/2026 (caderno / grupo Telegram)"
+
+trigger:
+  rule: last_n_finals_in_family
+  n: 2
+  finals: [0, 5, 7]
+  interpretation: "INTERPRETAÇÃO (o script diz só 'leitura forte'): família ativa quando os 2 últimos giros terminam num dos finais da família. Ajuste aqui se a leitura do caderno for outra."
+
+cover:
+  type: straight_set
+  entry: [0, 5, 7, 10, 15, 17, 20, 25, 27, 30, 35]
+  protections: [26, 33, 28, 23, 12, 8, 11, 36, 13]
+  pockets: [0, 5, 7, 8, 10, 11, 12, 13, 15, 17, 20, 23, 25, 26, 27, 28, 30, 33, 35, 36]
+  k: 20
+  p_hit_uniform: 0.5405   # 20/37
+
+staking:
+  mode: flat
+  rule: "1 ficha por número em cada tentativa; acerto paga 35:1"
+  max_attempts: 2                 # "Máx 2 tentativas"
+
+stop:
+  rule: "perdeu 2 ciclos seguidos -> encerra a leitura"   # trava psicológica do script
+  backtest_pause_spins: 30
+
+edge:
+  house_edge_per_unit: -0.0270
+  note: "a cobertura não muda a borda da casa; o cartão mede risco e disciplina"
