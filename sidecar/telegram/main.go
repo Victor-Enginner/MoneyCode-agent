@@ -63,6 +63,7 @@ type tick struct {
 		RemainingWindowMs *uint32     `json:"remaining_window_ms"`
 		BannerDetail      *string     `json:"banner_detail"`
 		Settlement        *settlement `json:"last_settlement"`
+		Divergence        *divergence `json:"last_divergence"`
 	} `json:"session"`
 	Health struct {
 		Ws         string  `json:"ws"`
@@ -570,12 +571,30 @@ type settlement struct {
 	Ts         int64  `json:"ts"`
 }
 
+// divergence é o saldo real que não bateu com o esperado depois de um resultado (§9).
+type divergence struct {
+	StrategyID    string `json:"strategy_id"`
+	Number        uint8  `json:"number"`
+	ExpectedCents int64  `json:"expected_cents"`
+	ObservedCents int64  `json:"observed_cents"`
+	DiffCents     int64  `json:"diff_cents"`
+	Ts            int64  `json:"ts"`
+}
+
+// divergenceText avisa a divergência de extrato com os três números que o operador confere.
+func divergenceText(d divergence) string {
+	return fmt.Sprintf(
+		"⚠️ EXTRATO DIVERGENTE\n🎯 %s · saiu %d\n🧮 Esperado %s · Mesa %s\n➖ Diferença %s\nConfira o histórico da mesa (ficha manual, saque ou erro de clique).",
+		d.StrategyID, d.Number, cents(&d.ExpectedCents), cents(&d.ObservedCents), centsI(d.DiffCents))
+}
+
 type watcher struct {
 	seen           map[int64]struct{}
 	seeded         bool
 	lastState      string
 	lastDead       string
 	lastSettlement int64
+	lastDivergence int64
 	wins           int
 	losses         int
 }
@@ -604,6 +623,9 @@ func (w *watcher) scan(cfg config, send *sender, t tick) {
 		w.lastDead = derefS(t.Health.DeadSource)
 		if t.Session.Settlement != nil {
 			w.lastSettlement = t.Session.Settlement.Ts
+		}
+		if t.Session.Divergence != nil {
+			w.lastDivergence = t.Session.Divergence.Ts
 		}
 		return
 	}
@@ -646,6 +668,11 @@ func (w *watcher) scan(cfg config, send *sender, t tick) {
 				w.losses++
 			}
 			send.send(cfg.ChatID, settlementText(t, *s, w.wins, w.losses))
+		}
+
+		if d := t.Session.Divergence; d != nil && d.Ts != w.lastDivergence {
+			w.lastDivergence = d.Ts
+			send.send(cfg.ChatID, divergenceText(*d))
 		}
 
 		dead := derefS(t.Health.DeadSource)

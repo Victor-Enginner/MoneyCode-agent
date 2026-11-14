@@ -5,6 +5,7 @@
 
 pub mod analytics;
 pub mod backtest;
+pub mod balance_audit;
 pub mod bocpd;
 pub mod brain;
 pub mod dag;
@@ -286,28 +287,28 @@ mod tests {
         let cal = Calibration::default();
         let kill_switch = KillSwitch::new();
 
-        // 30¢ numa dúzia com a menor ficha de 10¢: três fichas depois de um único clique de ficha.
+        // 40¢ numa dúzia = duas fichas de 20¢ depois de um único clique de ficha.
         let plan = Plan {
             spin_id: "spin-lote-1".to_string(),
             strategy_id: "cluster_terminal".to_string(),
             ladder_step: 1,
-            stake_per_cover_cents: 30,
-            total_cents: 30,
+            stake_per_cover_cents: 40,
+            total_cents: 40,
             ev_cents: -1,
             confidence: 0.75,
-            covers: vec![(Cover::Dozen(1), 30)],
-            chips_per_cover: vec![(10, 3)],
+            covers: vec![(Cover::Dozen(1), 40)],
+            chips_per_cover: vec![(20, 2)],
         };
 
         let fills = place(&pool, &spy, &plan, &cal, &kill_switch, 1_730_000_020_000)
             .expect("entrada de uma cobertura deve fechar com preview correto");
-        assert_eq!(fills.preview_cents, 30);
+        assert_eq!(fills.preview_cents, 40);
 
         let repeats = spy.repeats.lock().map(|v| v.clone()).unwrap_or_default();
         assert_eq!(
             repeats,
-            vec![3],
-            "a cobertura deve resolver o alvo UMA vez e despachar 3 fichas nele"
+            vec![2],
+            "a cobertura deve resolver o alvo UMA vez e despachar 2 fichas nele"
         );
         let singles = spy.singles.lock().map(|n| *n).unwrap_or(u32::MAX);
         assert_eq!(singles, 0, "nenhuma ficha pode ser clicada com resolução própria");

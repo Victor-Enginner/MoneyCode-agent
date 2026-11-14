@@ -3,7 +3,7 @@
 //! Implementa os 9 comandos de leitura somente-leitura no SQLite e os 5 comandos de escrita (§7 de `docs/FUI.md`).
 //! Garante que nenhum campo sem fonte retorne `0` (sempre `None` / `"—"`).
 
-use monster_risk::{cum_loss_cents, stake_cents, Cfg};
+use monster_risk::{cum_loss_cents, stake_cents, Cfg, DEFAULT_CHIP_DENOMS_CENTS};
 use monster_store::{get_ladder_state, SqlitePool, StoreError};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -201,6 +201,29 @@ pub struct SessionDto {
     /// Distribuição das famílias de fora (colunas, dúzias, cores) na mesma janela real.
     #[serde(default)]
     pub families: Vec<FamilyRadarDto>,
+    /// Última divergência entre o saldo real e o esperado após um resultado (§9).
+    #[serde(default)]
+    pub last_divergence: Option<DivergenceDto>,
+    /// Divergências de extrato nesta sessão (`0` = tudo bateu).
+    #[serde(default)]
+    pub divergence_count: u32,
+}
+
+/// Saldo real da mesa não bateu com o esperado depois de liquidar uma entrada (§9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DivergenceDto {
+    /// Estratégia da entrada conferida.
+    pub strategy_id: String,
+    /// Número sorteado.
+    pub number: u8,
+    /// Total esperado (saldo + pano) em centavos.
+    pub expected_cents: i64,
+    /// Total lido na mesa em centavos.
+    pub observed_cents: i64,
+    /// `observed - expected` em centavos.
+    pub diff_cents: i64,
+    /// Momento da constatação.
+    pub ts: i64,
 }
 
 /// Frequência de uma opção de família (uma coluna, uma dúzia, uma cor).
@@ -481,7 +504,7 @@ impl Default for FuiController {
             min_window_ms: 2000,
             cooldown_spins: 2,
             max_entries_per_hour: 40,
-            chip_denoms_cents: vec![2500, 1000, 500, 100, 50, 10],
+            chip_denoms_cents: DEFAULT_CHIP_DENOMS_CENTS.to_vec(),
         })
     }
 }
@@ -493,6 +516,8 @@ impl FuiController {
             inner: Arc::new(Mutex::new(RuntimeUiState {
                 session: SessionDto {
                     last_settlement: None,
+                    last_divergence: None,
+                    divergence_count: 0,
                     state: GlobalState::Observando,
                     uptime_sec: None,
                     bankroll_cents: None,
@@ -873,6 +898,14 @@ impl FuiController {
         let mut g = self.inner.lock().map_err(|_| UiError::StateLock)?;
         g.session.last_settlement = Some(settlement);
         Ok(())
+    }
+
+    /// Publica uma divergência de extrato: painel e Telegram avisam, o executor segue.
+    pub fn sync_balance_divergence(&self, divergence: DivergenceDto) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.session.divergence_count = g.session.divergence_count.saturating_add(1);
+            g.session.last_divergence = Some(divergence);
+        }
     }
 
     /// Publica a leitura dos terminais da timeline (`None` limpa o painel para `—`).

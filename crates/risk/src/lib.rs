@@ -21,7 +21,7 @@ pub const P_LOSE: f64 = 13.0 / 37.0;
 pub const P_WIN: f64 = 24.0 / 37.0;
 
 /// Denominações padrão de fichas em centavos inteiros (ordem decrescente).
-pub const DEFAULT_CHIP_DENOMS_CENTS: [u64; 6] = [2500, 1000, 500, 100, 50, 10];
+pub const DEFAULT_CHIP_DENOMS_CENTS: [u64; 8] = [5000, 2000, 1000, 500, 100, 50, 20, 10];
 
 /// Ficha por cobertura no degrau `step` (cresce ×3 por degrau para cobrir perda `2x` + lucro `base_cents`).
 pub fn stake_cents(step: u8, base_cents: u64) -> u64 {
@@ -395,6 +395,16 @@ mod tests {
         for k in 1..=5u8 {
           assert_eq!(stake_cents(k,10) as i64 - cum_loss_cents(k-1,10) as i64, 10);
         }
+    }
+
+    #[test]
+    fn fichas_da_mesa_usam_a_de_20_centavos() {
+        let d = DEFAULT_CHIP_DENOMS_CENTS;
+        assert_eq!(decompose(20, &d), vec![(20, 1)]);
+        assert_eq!(decompose(180, &d), vec![(100, 1), (50, 1), (20, 1), (10, 1)]);
+        assert_eq!(decompose(540, &d), vec![(500, 1), (20, 2)]);
+        assert_eq!(decompose(1620, &d), vec![(1000, 1), (500, 1), (100, 1), (20, 1)]);
+        assert!(!d.contains(&2500), "a mesa não tem ficha de 25");
     }
 
     #[test]

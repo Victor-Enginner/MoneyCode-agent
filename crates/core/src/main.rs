@@ -4,6 +4,7 @@
 //! garantindo coerência total entre Colunas (`2to1`) e Dúzias (`1st/2nd/3rd 12`) na FUI (`http://127.0.0.1:8791`).
 
 use monster_capture::{CaptureSource, SpinBus, StreamClient, DEFAULT_STREAM_ADDR};
+use monster_core::balance_audit::{BalanceWatch, WatchEvent};
 use monster_core::{
     boot_reconcile, build_brain_snapshot, evaluate_all_matchers_history,
     evaluate_dag_with_history, has_recent_number, load_chronological_history, place, reconcile_spin,
@@ -15,14 +16,14 @@ use monster_core::{
 };
 use monster_risk::{
     cum_loss_cents, run_monte_carlo, run_monte_carlo_numbers, stake_cents, Cfg, McParams,
-    NumbersMcParams, State, Verdict,
+    NumbersMcParams, State, Verdict, DEFAULT_CHIP_DENOMS_CENTS,
 };
 use monster_store::{
-    all_ladder_steps, init_pool, upsert_ladder_state, insert_intent, insert_spin, IntentDecision, NewIntent, NewSpin,
+    all_ladder_steps, init_pool, insert_error, upsert_ladder_state, insert_intent, insert_spin, IntentDecision, NewIntent, NewSpin,
     SpinSource, SqlitePool,
 };
 use monster_strategy_native::{Matcher, MatcherTuning, MATCHER_IDS};
-use monster_ui::{FuiController, SettlementDto};
+use monster_ui::{DivergenceDto, FuiController, SettlementDto};
 use std::env;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -119,6 +120,63 @@ const MIN_ENTRY_GAP_MS: i64 = 15_000;
 const ROUND_KEY_TTL_MS: i64 = 45_000;
 
 /// Escadas com degrau pendente que NÃO acabaram de perder neste giro: devem ser zeradas.
+/// Aplica o resultado da conferência de extrato e devolve a base de P&L (talvez ajustada).
+/// Divergência avisa (log, `errors`, painel, Telegram) e NÃO pausa: o operador decide.
+/// Movimento externo (saque, depósito) sai da base para não virar lucro nem prejuízo do bot.
+fn handle_watch_event(
+    event: WatchEvent,
+    base_bal: i64,
+    init_bal_atom: &AtomicI64,
+    pool: &SqlitePool,
+    fui: &FuiController,
+) -> i64 {
+    match event {
+        WatchEvent::None => base_bal,
+        WatchEvent::AuditOk { audit, observed_total_cents } => {
+            println!(
+                "[EXTRATO-OK] {} num={} | delta={}¢ | saldo esperado={}¢ lido={}¢",
+                audit.strategy_id, audit.number, audit.delta_cents, audit.expected_total_cents, observed_total_cents
+            );
+            base_bal
+        }
+        WatchEvent::Divergent { audit, observed_total_cents } => {
+            let diff = observed_total_cents - audit.expected_total_cents;
+            let now = now_unix_ms();
+            eprintln!(
+                "[EXTRATO-DIVERGENTE] {} num={} | delta calculado={}¢ | saldo esperado={}¢ lido={}¢ | diferença={}¢",
+                audit.strategy_id, audit.number, audit.delta_cents, audit.expected_total_cents, observed_total_cents, diff
+            );
+            let _ = insert_error(
+                pool,
+                "extrato_divergence",
+                &format!(
+                    "strategy={} number={} expected={} observed={} diff={}",
+                    audit.strategy_id, audit.number, audit.expected_total_cents, observed_total_cents, diff
+                ),
+                now,
+            );
+            fui.sync_balance_divergence(DivergenceDto {
+                strategy_id: audit.strategy_id,
+                number: audit.number,
+                expected_cents: audit.expected_total_cents,
+                observed_cents: observed_total_cents,
+                diff_cents: diff,
+                ts: now,
+            });
+            base_bal
+        }
+        WatchEvent::External { delta_cents } => {
+            println!(
+                "[MOVIMENTO-EXTERNO] saldo mudou {}¢ sem entrada do bot (saque, depósito ou ficha manual) — fora do P&L",
+                delta_cents
+            );
+            let new_base = base_bal + delta_cents;
+            init_bal_atom.store(new_base, Ordering::Relaxed);
+            new_base
+        }
+    }
+}
+
 fn stale_ladders(steps: &LadderSteps, gale_alive: Option<&str>) -> Vec<String> {
     let mut out: Vec<String> = steps
         .iter()
@@ -594,7 +652,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         min_window_ms: 2000,
         cooldown_spins: 2,
         max_entries_per_hour: 40,
-        chip_denoms_cents: vec![2500, 1000, 500, 100, 50, 10],
+        chip_denoms_cents: DEFAULT_CHIP_DENOMS_CENTS.to_vec(),
     };
 
     // `--mc-only` imprime os dois Monte Carlo e sai: é como se testa uma mudança de
@@ -777,6 +835,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shared_bankroll_cents = Arc::new(AtomicI64::new(0));
     let shared_pnl_cents = Arc::new(AtomicI64::new(0));
     let initial_table_balance = Arc::new(AtomicI64::new(0));
+    // Conferência de extrato pós-resultado (§9): saldo real contra o delta do reconciliador.
+    let balance_watch = Arc::new(Mutex::new(BalanceWatch::default()));
     let table_round_open = Arc::new(AtomicBool::new(false));
     // `Game Code` da rodada exibida pela Playtech: chave de "uma entrada por rodada".
     let table_round = Arc::new(Mutex::new(String::new()));
@@ -794,6 +854,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let init_bal_atom = initial_table_balance.clone();
         let round_open_atom = table_round_open.clone();
         let round_key_atom = table_round.clone();
+        let watch_poll = balance_watch.clone();
 
         thread::spawn(move || loop {
             if let Some(tel) = live_act_poll.fetch_telemetry() {
@@ -812,6 +873,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         prev_init
                     };
+                    let total = real_bal + i64::try_from(tel.preview_cents).unwrap_or(0);
+                    let event = watch_poll
+                        .lock()
+                        .map(|mut w| w.observe(total, now_unix_ms()))
+                        .unwrap_or(WatchEvent::None);
+                    let base_bal = handle_watch_event(event, base_bal, &init_bal_atom, &pool_poll, &fui_poll);
                     bank_atom.store(real_bal, Ordering::Relaxed);
                     pnl_atom.store(real_bal - base_bal, Ordering::Relaxed);
                 }
@@ -961,6 +1028,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         shared_pnl_cents.fetch_add(rep.expected_delta_cents, Ordering::Relaxed);
                     }
                     ladder_steps.insert(rep.strategy_id.clone(), rep.next_step);
+                    let audit_open = balance_watch
+                        .lock()
+                        .map(|mut w| w.settle(rep.expected_delta_cents, &rep.strategy_id, ev.number, now_ms))
+                        .unwrap_or(false);
+                    if !audit_open && mode == ExecutionMode::Live {
+                        println!("[EXTRATO] sem saldo lido antes da entrada — conferência desta rodada não aberta");
+                    }
                     if rep.next_step > 0 {
                         gale_alive = Some(rep.strategy_id.clone());
                     }
@@ -1101,6 +1175,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ExecutionMode::DryRun => &dry_actuator,
                 ExecutionMode::Live => &live_actuator,
             };
+            // Só dinheiro real mexe no saldo da mesa: dry-run não abre conferência de extrato.
+            if mode == ExecutionMode::Live {
+                if let Ok(mut w) = balance_watch.lock() {
+                    w.begin_entry();
+                }
+            }
             match place(&pool, actuator, &plan, &cal, &kill_switch, now_ms) {
                 Ok(fills) => {
                     last_entry_at_ms = now_ms;
@@ -1146,6 +1226,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pending_entry = Some((plan, fills.items));
                 }
                 Err(err) => {
+                    if let Ok(mut w) = balance_watch.lock() {
+                        w.cancel_entry();
+                    }
                     eprintln!("[EXECUTOR-ABORT] {err}");
                 }
             }

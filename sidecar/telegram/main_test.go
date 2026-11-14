@@ -86,3 +86,12 @@ func TestSettlementTextNoFormatoDeGrupo(t *testing.T) {
 		t.Fatalf("derrota formatada errado:\n%s", out)
 	}
 }
+
+func TestDivergenceTextMostraEsperadoMesaEDiferenca(t *testing.T) {
+	out := divergenceText(divergence{StrategyID: "quebra_permanencia_coluna", Number: 22, ExpectedCents: 4460, ObservedCents: 4440, DiffCents: -20, Ts: 1})
+	for _, want := range []string{"EXTRATO DIVERGENTE", "quebra_permanencia_coluna", "saiu 22", "44,60", "44,40", "-"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("faltou %q em:\n%s", want, out)
+		}
+	}
+}
