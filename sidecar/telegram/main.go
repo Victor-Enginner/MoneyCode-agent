@@ -64,6 +64,7 @@ type tick struct {
 		BannerDetail      *string     `json:"banner_detail"`
 		Settlement        *settlement `json:"last_settlement"`
 		Divergence        *divergence `json:"last_divergence"`
+		Caution           *string     `json:"caution"`
 	} `json:"session"`
 	Health struct {
 		Ws         string  `json:"ws"`
@@ -588,6 +589,25 @@ func divergenceText(d divergence) string {
 		d.StrategyID, d.Number, cents(&d.ExpectedCents), cents(&d.ObservedCents), centsI(d.DiffCents))
 }
 
+// cautionOf lê o motivo do modo cautela ("" = desligado).
+func cautionOf(t tick) string {
+	if t.Session.Caution == nil {
+		return ""
+	}
+	return *t.Session.Caution
+}
+
+// cautionText avisa quando o modo cautela liga ou desliga ("" = nada a dizer).
+func cautionText(prev, cur string) string {
+	switch {
+	case cur != "" && prev == "":
+		return "⚠️ MODO CAUTELA LIGADO\n" + cur + "\nSó coluna e dúzia até 2 acertos de primeira ou 20 giros calmos."
+	case cur == "" && prev != "":
+		return "✅ MODO CAUTELA DESLIGADO\nTodas as estratégias liberadas."
+	}
+	return ""
+}
+
 type watcher struct {
 	seen           map[int64]struct{}
 	seeded         bool
@@ -595,6 +615,7 @@ type watcher struct {
 	lastDead       string
 	lastSettlement int64
 	lastDivergence int64
+	lastCaution    string
 	wins           int
 	losses         int
 }
@@ -627,6 +648,7 @@ func (w *watcher) scan(cfg config, send *sender, t tick) {
 		if t.Session.Divergence != nil {
 			w.lastDivergence = t.Session.Divergence.Ts
 		}
+		w.lastCaution = cautionOf(t)
 		return
 	}
 
@@ -673,6 +695,13 @@ func (w *watcher) scan(cfg config, send *sender, t tick) {
 		if d := t.Session.Divergence; d != nil && d.Ts != w.lastDivergence {
 			w.lastDivergence = d.Ts
 			send.send(cfg.ChatID, divergenceText(*d))
+		}
+
+		if c := cautionOf(t); c != w.lastCaution {
+			if msg := cautionText(w.lastCaution, c); msg != "" {
+				send.send(cfg.ChatID, msg)
+			}
+			w.lastCaution = c
 		}
 
 		dead := derefS(t.Health.DeadSource)

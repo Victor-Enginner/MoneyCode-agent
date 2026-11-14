@@ -5,6 +5,8 @@
 
 use monster_capture::{CaptureSource, SpinBus, StreamClient, DEFAULT_STREAM_ADDR};
 use monster_core::balance_audit::{BalanceWatch, WatchEvent};
+use monster_core::caution::{Caution, CautionChange};
+use monster_core::shadow::{ShadowRunner, ShadowSettle, ShadowStats, SHADOW_CARDS};
 use monster_core::{
     boot_reconcile, build_brain_snapshot, evaluate_all_matchers_history,
     ensure_session, evaluate_dag_with_history, has_recent_number, load_chronological_history,
@@ -26,7 +28,7 @@ use monster_store::{
     SpinSource, SqlitePool,
 };
 use monster_strategy_native::{Matcher, MatcherTuning, MATCHER_IDS};
-use monster_ui::{DivergenceDto, FuiController, SettlementDto};
+use monster_ui::{DivergenceDto, FuiController, SettlementDto, ShadowDto};
 use std::env;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -123,6 +125,105 @@ const MIN_ENTRY_GAP_MS: i64 = 15_000;
 const ROUND_KEY_TTL_MS: i64 = 45_000;
 
 /// Escadas com degrau pendente que NÃO acabaram de perder neste giro: devem ser zeradas.
+/// Histórico das estratégias em observação (uma linha JSON por ciclo encerrado).
+fn shadow_log_path() -> String {
+    project_path("logs/shadow.jsonl")
+}
+
+/// Loga e grava um ciclo simulado encerrado. Nunca toca na mesa.
+fn record_shadow(s: &ShadowSettle, now_ms: i64) {
+    println!(
+        "[SOMBRA] {} | {} no degrau {} (saiu {}){} | {}{:.2} (simulado, sem aposta)",
+        s.nome,
+        if s.won { "GANHOU" } else { "ESTOUROU" },
+        s.step,
+        s.number,
+        if s.blocked_by_exposure { " | parou na trava de exposição" } else { "" },
+        if s.net_cents >= 0 { "+R$ " } else { "-R$ " },
+        s.net_cents.unsigned_abs() as f64 / 100.0
+    );
+    let line = serde_json::json!({
+        "ts": now_ms, "id": s.id, "won": s.won, "step": s.step,
+        "net_cents": s.net_cents, "number": s.number, "blocked": s.blocked_by_exposure,
+    });
+    let res = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(shadow_log_path())
+        .and_then(|mut f| writeln!(f, "{line}"));
+    if let Err(err) = res {
+        eprintln!("[SOMBRA-ERR] falha ao gravar logs/shadow.jsonl: {err}");
+    }
+}
+
+/// Recarrega o placar acumulado das observações anteriores.
+fn restore_shadow_stats(shadows: &mut [ShadowRunner]) {
+    let Ok(text) = std::fs::read_to_string(shadow_log_path()) else {
+        return;
+    };
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let id = v.get("id").and_then(|x| x.as_str()).unwrap_or_default();
+        let Some(r) = shadows.iter_mut().find(|r| r.card.id == id) else {
+            continue;
+        };
+        r.stats.add(&ShadowSettle {
+            id: r.card.id,
+            nome: r.card.nome,
+            won: v.get("won").and_then(|x| x.as_bool()).unwrap_or(false),
+            step: v.get("step").and_then(|x| x.as_u64()).and_then(|x| u8::try_from(x).ok()).unwrap_or(1),
+            net_cents: v.get("net_cents").and_then(|x| x.as_i64()).unwrap_or(0),
+            number: v.get("number").and_then(|x| x.as_u64()).and_then(|x| u8::try_from(x).ok()).unwrap_or(0),
+            blocked_by_exposure: v.get("blocked").and_then(|x| x.as_bool()).unwrap_or(false),
+        });
+    }
+    for r in shadows.iter() {
+        let ShadowStats { cycles, wins, blows, net_cents, .. } = r.stats.clone();
+        println!(
+            "[SOMBRA] {} em observação | histórico: {cycles} ciclos, {wins} ganhos, {blows} estouros, saldo simulado {:.2}",
+            r.card.nome,
+            net_cents as f64 / 100.0
+        );
+    }
+}
+
+fn shadow_dtos(shadows: &[ShadowRunner]) -> Vec<ShadowDto> {
+    shadows
+        .iter()
+        .map(|r| {
+            let (step, chip) = r.open();
+            ShadowDto {
+                id: r.card.id.to_string(),
+                nome: r.card.nome.to_string(),
+                step,
+                chip_cents: chip,
+                cycles: r.stats.cycles,
+                wins: r.stats.wins,
+                blows: r.stats.blows,
+                net_cents: r.stats.net_cents,
+                worst_cents: r.stats.worst_cents,
+            }
+        })
+        .collect()
+}
+
+/// Publica mudança do modo cautela no log e no painel (o Telegram lê do painel).
+fn report_caution(fui: &FuiController, caution: &Caution, change: CautionChange) {
+    match change {
+        CautionChange::None => {}
+        CautionChange::On(reason) => {
+            println!("[CAUTELA] LIGADO — {reason} | só coluna e dúzia até 2 acertos de primeira ou 20 giros calmos");
+            fui.sync_caution(Some(caution.reason().to_string()));
+        }
+        CautionChange::Off(why) => {
+            println!("[CAUTELA] DESLIGADO — {why} | todas as estratégias liberadas");
+            fui.sync_caution(None);
+        }
+    }
+}
+
 /// Como a entrada pendente foi resolvida na mesa.
 enum EntryOutcome {
     /// Giro seguinte chegou no tempo normal: o número do evento é o resultado.
@@ -1030,6 +1131,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let mut spins_since_blow = cfg.cooldown_spins;
+    // Freio de risco: com gale recorrente, degrau 4 ou sequência longa, só coluna e dúzia.
+    let mut caution = Caution::default();
+    // Scripts do operador em observação: simulam a escada sem apostar (logs/shadow.jsonl).
+    let mut shadows: Vec<ShadowRunner> = SHADOW_CARDS.iter().map(|c| ShadowRunner::new(*c)).collect();
+    restore_shadow_stats(&mut shadows);
     // A escada vive em `ladder_state`, uma linha por estratégia (§5.3). Carrega o estado persistido
     // no boot para o reinício retomar o degrau real em vez de voltar ao degrau 1.
     let mut ladder_steps: LadderSteps = match all_ladder_steps(&pool) {
@@ -1194,6 +1300,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if rep.next_step > 0 && gale_ok {
                         gale_alive = Some(rep.strategy_id.clone());
                     }
+                    let change = if rep.won || rep.ladder_blown {
+                        caution.on_cycle_end(prev_plan.ladder_step, rep.won)
+                    } else {
+                        caution.on_ladder_step(rep.next_step.saturating_add(1))
+                    };
+                    report_caution(&fui, &caution, change);
                     if rep.ladder_blown {
                         spins_since_blow = 0;
                     } else {
@@ -1237,6 +1349,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // (R$ 22,20) no primeiro giro de um padrão novo.
         if !already_recorded {
             for sid in stale_ladders(&ladder_steps, gale_alive.as_deref()) {
+                // Gale interrompido = ciclo encerrado sem acerto.
+                let lost_step = ladder_steps.get(&sid).copied().unwrap_or(1);
+                let change = caution.on_cycle_end(lost_step.max(1), false);
+                report_caution(&fui, &caution, change);
                 ladder_steps.insert(sid.clone(), 0);
                 match upsert_ladder_state(&pool, &sid, 0, 0, Some(now_ms)) {
                     Ok(()) => println!("[LADDER] escada de {sid} zerada: gale interrompido não passa para outro padrão"),
@@ -1270,6 +1386,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .lock()
             .map(|h| h.to_chronological_vec())
             .unwrap_or_default();
+        let change = caution.on_spin(&recent);
+        report_caution(&fui, &caution, change);
+        if !already_recorded {
+            let bank = u64::try_from(shared_bankroll_cents.load(Ordering::Relaxed)).unwrap_or(0);
+            let cap = (bank as f64 * cfg_now.max_exposure_pct) as u64;
+            for runner in &mut shadows {
+                if let Some(s) = runner.on_spin(&recent, cap) {
+                    record_shadow(&s, now_ms);
+                }
+            }
+            fui.sync_shadow(shadow_dtos(&shadows));
+        }
 
         // Placar ao vivo dos terminais 2-3-6-9: leitura pura da fita real (sem replay de
         // fixture). Serve para o operador comparar a percepção com a medição.
@@ -1302,7 +1430,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Ajuste de sequências pode mudar a qualquer momento pela dashboard: os matchers
         // são reconstruídos a cada giro para o gatilho novo valer no próximo sinal.
-        let matchers = matchers_now(&tuning);
+        // Modo cautela tira números e apostas 1:1 da disputa: coluna/dúzia seguem concorrendo.
+        let matchers: Vec<Arc<dyn Matcher>> = matchers_now(&tuning)
+            .into_iter()
+            .filter(|m| caution.allows(m.id()))
+            .collect();
         let (dag_out, best_hist) = evaluate_dag_with_history(
             &ev.spin_id,
             &recent,

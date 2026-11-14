@@ -8,10 +8,12 @@ pub mod backtest;
 pub mod balance_audit;
 pub mod bocpd;
 pub mod brain;
+pub mod caution;
 pub mod dag;
 pub mod executor;
 pub mod lab;
 pub mod reconciler;
+pub mod shadow;
 pub mod terminals;
 pub mod timeline_sync;
 

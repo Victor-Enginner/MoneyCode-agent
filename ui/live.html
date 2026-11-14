@@ -34,6 +34,7 @@
     .brand { display: flex; flex-direction: column; justify-content: center; padding-right: 12px; border-right: 1px solid var(--line); }
     .brand b { font-size: 15px; letter-spacing: .18em; font-weight: 700; }
     .brand span { font-size: 9px; color: var(--muted); letter-spacing: .14em; }
+    .caution-badge { color: var(--amber); border-color: var(--amber); background: rgba(255,214,10,.08); }
     .state-badge {
       align-self: center; display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px;
       font-weight: 700; font-size: 11px; letter-spacing: .06em; border: 1px solid var(--line-2); border-radius: 999px;
@@ -257,6 +258,7 @@
     <header class="panel-a card" role="status">
       <div class="brand"><b>MONSTER</b><span>FUI · OPERAÇÃO LIVE</span></div>
       <div id="state-badge" class="state-badge state-OBSERVANDO num">● OBSERVANDO</div>
+      <div id="caution-badge" class="state-badge caution-badge num" hidden title="">⚠ CAUTELA</div>
       <div class="metrics">
         <div class="metric-cell"><span class="metric-label">Sessão</span><span id="m-uptime" class="metric-val num">—</span></div>
         <div class="metric-cell"><span class="metric-label">Banca</span><span id="m-bank" class="metric-val num">—</span></div>
@@ -550,6 +552,7 @@
         </div>
         ${grupos}
         <div class="cfg-grid" style="grid-template-columns:1fr 1fr"><div class="seq-radar" id="term-radar">—</div><div class="seq-radar" id="family-radar">—</div></div>
+        <div class="seq-radar" id="shadow-radar" style="margin-top:8px">—</div>
         <div class="seq-note"><b>Entra em N</b>: repetições para apostar (pré-alerta em N−1, sem aposta). <b>Até M</b>: acima disso a sequência é longa demais e o padrão cala. Desligar tira o padrão do jogo sem mexer nos outros. Nada muda até clicar <b>SALVAR AJUSTES</b>; vale a partir do próximo giro.</div>`;
       document.querySelectorAll('#seq-editor input').forEach((i) => i.addEventListener('input', markDirty));
       renderGroupHeads();
@@ -619,9 +622,27 @@
           '<span class="num" style="color:' + cor + '">série ' + f.streak_label + ' ' + f.streak + 'x · ' + (ruido ? 'dentro do ruído' : 'fora do ruído') + '</span>';
       }).join('');
     }
+    // Scripts em observação: escada simulada, nenhuma aposta real.
+    function renderShadow(tick) {
+      const box = document.getElementById('shadow-radar');
+      if (!box) return;
+      const rows = (tick && tick.session ? tick.session.shadow : null) || [];
+      if (!rows.length) {
+        box.innerHTML = '<span class="metric-label">OBSERVANDO SEM APOSTAR</span><span style="color:var(--dim)">—</span>';
+        return;
+      }
+      box.innerHTML = '<span class="metric-label">OBSERVANDO SEM APOSTAR · ESCADA SIMULADA</span>' + rows.map((r) => {
+        const saldo = (r.net_cents >= 0 ? '+' : '-') + 'R$ ' + (Math.abs(r.net_cents) / 100).toFixed(2).replace('.', ',');
+        const cor = r.net_cents >= 0 ? 'var(--ok)' : 'var(--warn)';
+        const agora = r.step > 0 ? 'degrau ' + r.step + ' · R$ ' + (r.chip_cents / 100).toFixed(2).replace('.', ',') + '/nº' : 'aguardando';
+        return '<span class="num" style="color:var(--muted)">' + r.nome + ' · ' + r.cycles + ' ciclos · ' + r.wins + ' ✓ ' + r.blows + ' ✗ · ' + agora + '</span>' +
+          '<span class="num" style="color:' + cor + '">' + saldo + '</span>';
+      }).join('');
+    }
     function updateSeqLive(spins) {
       renderTermRadar(lastTick);
       renderFamilyRadar(lastTick);
+      renderShadow(lastTick);
       const live = seqLive(spins || []);
       MATCHERS.filter((m) => m.k).forEach((m) => {
         const el = document.getElementById('seq-live-' + m.k);
@@ -785,6 +806,10 @@
       document.getElementById('c-exp').textContent = fmtCents(t.session?.exposure_cents);
       document.getElementById('d-blow').textContent = 'ESTOURO: ' + fmtCents(t.ladder?.blow_cost_cents);
       document.getElementById('d-seq').textContent = 'TICK #' + fmtVal(t.seq);
+      const caution = t.session?.caution;
+      const cb = document.getElementById('caution-badge');
+      cb.hidden = !caution;
+      cb.title = caution ? 'Só coluna e dúzia: ' + caution : '';
       const banner = document.getElementById('banner');
       if (st === 'DEGRADED' || st === 'ERRO' || st === 'KILLED') {
         banner.style.display = 'flex';

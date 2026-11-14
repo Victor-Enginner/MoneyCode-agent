@@ -95,3 +95,19 @@ func TestDivergenceTextMostraEsperadoMesaEDiferenca(t *testing.T) {
 		}
 	}
 }
+
+func TestCautionTextSoAvisaNaMudanca(t *testing.T) {
+	if got := cautionText("", "escada chegou ao degrau 4"); !strings.Contains(got, "LIGADO") || !strings.Contains(got, "degrau 4") {
+		t.Fatalf("ligar: %q", got)
+	}
+	if got := cautionText("x", ""); !strings.Contains(got, "DESLIGADO") {
+		t.Fatalf("desligar: %q", got)
+	}
+	if got := cautionText("a", "b"); got != "" {
+		t.Fatalf("troca de motivo nao deve avisar: %q", got)
+	}
+	var tk tick
+	if cautionOf(tk) != "" {
+		t.Fatal("nulo deve ser desligado")
+	}
+}

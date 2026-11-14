@@ -207,6 +207,30 @@ pub struct SessionDto {
     /// Divergências de extrato nesta sessão (`0` = tudo bateu).
     #[serde(default)]
     pub divergence_count: u32,
+    /// Motivo do modo cautela ativo (`None` = desligado): só coluna e dúzia entram.
+    #[serde(default)]
+    pub caution: Option<String>,
+    /// Estratégias em observação (sombra): simuladas, nunca apostadas.
+    #[serde(default)]
+    pub shadow: Vec<ShadowDto>,
+}
+
+/// Placar de uma estratégia em observação (sem aposta real).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ShadowDto {
+    pub id: String,
+    pub nome: String,
+    /// Degrau simulado em jogo (`0` = aguardando gatilho).
+    pub step: u8,
+    /// Ficha por número do degrau em jogo (centavos).
+    pub chip_cents: u64,
+    pub cycles: u32,
+    pub wins: u32,
+    pub blows: u32,
+    /// Saldo simulado acumulado (centavos, inclui sessões anteriores).
+    pub net_cents: i64,
+    /// Pior ciclo (centavos).
+    pub worst_cents: i64,
 }
 
 /// Saldo real da mesa não bateu com o esperado depois de liquidar uma entrada (§9).
@@ -518,6 +542,8 @@ impl FuiController {
                     last_settlement: None,
                     last_divergence: None,
                     divergence_count: 0,
+                    caution: None,
+                    shadow: Vec::new(),
                     state: GlobalState::Observando,
                     uptime_sec: None,
                     bankroll_cents: None,
@@ -899,6 +925,20 @@ impl FuiController {
         let mut g = self.inner.lock().map_err(|_| UiError::StateLock)?;
         g.session.last_settlement = Some(settlement);
         Ok(())
+    }
+
+    /// Publica o placar das estratégias em observação.
+    pub fn sync_shadow(&self, shadow: Vec<ShadowDto>) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.session.shadow = shadow;
+        }
+    }
+
+    /// Publica o modo cautela (`None` = desligado).
+    pub fn sync_caution(&self, reason: Option<String>) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.session.caution = reason;
+        }
     }
 
     /// Publica uma divergência de extrato: painel e Telegram avisam, o executor segue.
