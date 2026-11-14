@@ -9,7 +9,7 @@ use monster_core::caution::{Caution, CautionChange};
 use monster_core::shadow::{ShadowRunner, ShadowSettle, ShadowStats, SHADOW_CARDS};
 use monster_core::{
     boot_reconcile, build_brain_snapshot, evaluate_all_matchers_history,
-    ensure_session, evaluate_dag_with_history, has_recent_number, load_chronological_history,
+    cfg_for_strategy, ensure_session, evaluate_dag_with_history, has_recent_number, load_chronological_history,
     load_session_chronological, place, read_session_newest_until, reconcile_spin,
     session_prev_spin_ts,
     spins_after_trigger, SessionDecision, MISSED_SPIN_GAP_MS,
@@ -1279,7 +1279,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     acks: &prev_acks,
                 },
                 result_number,
-                &cfg_now,
+                &cfg_for_strategy(&cfg_now, &prev_plan.strategy_id),
                 None,
                 now_ms,
             ) {

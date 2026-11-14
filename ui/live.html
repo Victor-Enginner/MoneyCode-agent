@@ -414,6 +414,9 @@
       { id: 'terminal_quente', nome: 'TERMINAL QUENTE (número)', sub: 'finais 2-3-6-9 em série → até 2 finais em pleno' },
       { id: 'invictor_conservadora', nome: 'INVICTOR CONSERVADORA (número)', sub: 'quebrante → múltiplo: 0 + últ. quebrante + mais devente + múltiplo' },
       { id: 'invictor_arrojada', nome: 'INVICTOR ARROJADA (número)', sub: 'múltiplos curto 2-3 / alongado 5-8 → 0 + 3 quebrantes deventes' },
+      { id: 'script_espelhos_gemeos', nome: 'ESPELHOS & GÊMEOS (script)', sub: 'saiu 11-12-13-21-22-23-31-32-33 → 20 plenos com proteções · gale até 3' },
+      { id: 'script_familia_369', nome: 'FAMÍLIA 3-6-9 (script)', sub: '2 finais 3/6/9 seguidos → 19 plenos com proteções · gale até 3' },
+      { id: 'script_familia_057', nome: 'FAMÍLIA 0-5-7 (script)', sub: '2 finais 0/5/7 seguidos → 20 plenos com proteções · gale até 3' },
     ];
     const REDS = new Set([1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36]);
     let seqLoaded = false;
@@ -476,7 +479,7 @@
     }
     const GRUPOS = [
       { id: 'fora', nome: 'Entradas por fora', sub: 'quebra de permanência · coluna, dúzia, cor, alto/baixo, par/ímpar', ids: ['quebra_permanencia_coluna','quebra_permanencia_duzia','quebra_cor_6x','quebra_alto_baixo_6x','quebra_par_impar_6x','quebra_numero_repetido'] },
-      { id: 'numero', nome: 'Entradas por número', sub: 'terminais e plenos · só entram quando nenhuma quebra de fora está ativa', ids: ['terminal_quente','cluster_final','cluster_terminal','invictor_conservadora','invictor_arrojada'] },
+      { id: 'numero', nome: 'Entradas por número', sub: 'terminais e plenos · só entram quando nenhuma quebra de fora está ativa', ids: ['terminal_quente','cluster_final','cluster_terminal','invictor_conservadora','invictor_arrojada','script_espelhos_gemeos','script_familia_369','script_familia_057'] },
       { id: 'estat', nome: 'Leituras estatísticas', sub: 'viés de setor e Fibonacci · ruído em janela curta, use com cuidado', ids: ['setor_vies','setor_vies_duzia','fibonacci_lag'] },
     ];
     function stepInput(k, b, d) {

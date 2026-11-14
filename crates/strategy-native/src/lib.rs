@@ -998,6 +998,68 @@ impl Matcher for InvictorConservadora {
     }
 }
 
+/// Gatilho de um script do operador (corpus/cards/script_*.yaml).
+#[derive(Debug, Clone, Copy)]
+pub enum ScriptTrigger {
+    /// Último giro é um destes números ("quando sair qualquer espelho ou gêmeo").
+    LastSpinIn(&'static [u8]),
+    /// Os `n` últimos giros terminam num destes finais (família ativa).
+    LastFinalsIn { n: usize, finals: &'static [u8] },
+}
+
+/// Script do operador em live: gatilho + entrada + proteções, todos em pleno com a mesma
+/// ficha da escada de número. Máximo de degraus próprio (`SCRIPT_MAX_STEPS` no core).
+#[derive(Debug, Clone, Copy)]
+pub struct OperatorScript {
+    pub id: &'static str,
+    pub trigger: ScriptTrigger,
+    /// Entrada + proteções do cartão.
+    pub pockets: &'static [u8],
+}
+
+/// Os três scripts liberados pelo operador em 14/11/2026 (cartões em corpus/cards).
+pub const OPERATOR_SCRIPTS: [OperatorScript; 3] = [
+    OperatorScript {
+        id: "script_espelhos_gemeos",
+        trigger: ScriptTrigger::LastSpinIn(&[11, 12, 13, 21, 22, 23, 31, 32, 33]),
+        pockets: &[2, 3, 4, 8, 9, 10, 11, 12, 13, 21, 22, 23, 26, 27, 30, 31, 32, 33, 35, 36],
+    },
+    OperatorScript {
+        id: "script_familia_369",
+        trigger: ScriptTrigger::LastFinalsIn { n: 2, finals: &[3, 6, 9] },
+        pockets: &[3, 6, 8, 9, 13, 15, 16, 18, 19, 22, 23, 26, 27, 29, 31, 32, 33, 35, 36],
+    },
+    OperatorScript {
+        id: "script_familia_057",
+        trigger: ScriptTrigger::LastFinalsIn { n: 2, finals: &[0, 5, 7] },
+        pockets: &[0, 5, 7, 8, 10, 11, 12, 13, 15, 17, 20, 23, 25, 26, 27, 28, 30, 33, 35, 36],
+    },
+];
+
+impl Matcher for OperatorScript {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    fn evaluate(&self, w: &[u8]) -> Option<BetIntent> {
+        let fired = match self.trigger {
+            ScriptTrigger::LastSpinIn(nums) => nums.contains(w.first()?),
+            ScriptTrigger::LastFinalsIn { n, finals } => {
+                w.len() >= n && w[..n].iter().all(|x| finals.contains(&(x % 10)))
+            }
+        };
+        if !fired {
+            return None;
+        }
+        Some(BetIntent {
+            v: 1,
+            strategy_id: self.id.to_string(),
+            cover: self.pockets.iter().map(|&n| Cover::Straight(n)).collect(),
+            confidence: 0.60,
+        })
+    }
+}
+
 /// `matcher.invictor_arrojada`: sequência de múltiplos no topo da timeline (`0` neutro).
 /// Padrão **Curto** (`2..=3`) ou **Alongado** (`5..=8`) → entra só nos quebrantes, os
 /// `max_quebrantes` mais deventes, mais o protetivo `0`. Run de 4 ou > 8 não dispara.
@@ -1203,6 +1265,9 @@ impl SequenceTuning {
             Arc::new(TerminalQuente::default()),
             Arc::new(InvictorConservadora::default()),
             Arc::new(InvictorArrojada::default()),
+            Arc::new(OPERATOR_SCRIPTS[0]),
+            Arc::new(OPERATOR_SCRIPTS[1]),
+            Arc::new(OPERATOR_SCRIPTS[2]),
         ]
     }
 }
@@ -1211,7 +1276,7 @@ impl SequenceTuning {
 ///
 /// É a allowlist do interruptor da dashboard: desligar exige conhecer o nome
 /// exato, então erro de digitação vira rejeição e não matcher silenciosamente ligado.
-pub const MATCHER_IDS: [&str; 14] = [
+pub const MATCHER_IDS: [&str; 17] = [
     "quebra_permanencia_coluna",
     "quebra_permanencia_duzia",
     "quebra_cor_6x",
@@ -1226,6 +1291,9 @@ pub const MATCHER_IDS: [&str; 14] = [
     "terminal_quente",
     "invictor_conservadora",
     "invictor_arrojada",
+    "script_espelhos_gemeos",
+    "script_familia_369",
+    "script_familia_057",
 ];
 
 /// Ajuste completo da leitura de padrões: faixas de repetição + interruptores.
@@ -1568,6 +1636,21 @@ mod tests {
         assert_eq!(i.cover[3], Cover::Terminal(2));
         assert!(InvictorConservadora::default().evaluate(&[7, 12, 3]).is_none());
         assert!(InvictorConservadora::default().evaluate(&[12, 4, 3]).is_none());
+    }
+
+    #[test]
+    fn scripts_do_operador_disparam_como_no_caderno() {
+        let espelhos = OPERATOR_SCRIPTS[0];
+        let i = espelhos.evaluate(&[33, 33, 3]).expect("33 é gêmeo");
+        assert_eq!(i.cover.len(), 20);
+        assert!(i.cover.contains(&Cover::Straight(26)), "proteção 26 entra");
+        assert!(espelhos.evaluate(&[34, 33]).is_none(), "só o último giro dispara");
+        let f057 = OPERATOR_SCRIPTS[2];
+        assert!(f057.evaluate(&[30, 10, 4]).is_some(), "30 e 10: finais 0 seguidos");
+        assert!(f057.evaluate(&[30, 4]).is_none());
+        let f369 = OPERATOR_SCRIPTS[1];
+        assert_eq!(f369.evaluate(&[9, 33]).expect("dispara").cover.len(), 19);
+        assert!(MATCHER_IDS.contains(&"script_familia_369"));
     }
 
     #[test]

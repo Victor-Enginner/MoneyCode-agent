@@ -182,6 +182,7 @@ pub const fn compute_ev_cents_numbers(numbers: u64, stake_per_number_cents: u64)
 /// Gate do §6 aplicado à geometria do vencedor: cobertura de número usa `k·x` de exposição
 /// e ficha por número no limite de mesa; o resto segue a regra de duas colunas (`2x`).
 fn gate_for(winner: &Aggregate, cfg: &Cfg, state: &State) -> Verdict {
+    let cfg = &cfg_for_strategy(cfg, &winner.strategy_id);
     match number_coverage(&winner.cover) {
         Some(numbers) => {
             let nl = NumberLadder::new(numbers.len() as u8, cfg.number_base_cents);
@@ -189,6 +190,20 @@ fn gate_for(winner: &Aggregate, cfg: &Cfg, state: &State) -> Verdict {
         }
         None => authorize(cfg, state),
     }
+}
+
+/// Degraus máximos dos scripts do operador (`script_*`): estouro de ~R$ 14 com 20 números,
+/// em vez de ~R$ 74 no degrau 5. Decisão do operador em 14/11/2026.
+pub const SCRIPT_MAX_STEPS: u8 = 3;
+
+/// Config de risco efetiva da estratégia: scripts do operador param no degrau 3.
+/// Usada no gate (aqui) e no reconciliador (estouro no último degrau), sempre a mesma regra.
+pub fn cfg_for_strategy(cfg: &Cfg, strategy_id: &str) -> Cfg {
+    let mut c = cfg.clone();
+    if strategy_id.starts_with("script_") {
+        c.max_steps = c.max_steps.min(SCRIPT_MAX_STEPS);
+    }
+    c
 }
 
 /// Compila o `slip.compiler` para o vencedor do fan-in.
@@ -832,6 +847,19 @@ mod tests {
         own.insert("terminal_quente".to_string(), 1);
         let mut aggs = vec![number_signal()];
         assert_eq!(apply_permanence_priority(&mut aggs, &own, 0.55), 0);
+    }
+
+    #[test]
+    fn scripts_do_operador_param_no_degrau_3_e_o_resto_segue_5() {
+        let cfg = Cfg::default();
+        assert_eq!(cfg_for_strategy(&cfg, "script_espelhos_gemeos").max_steps, 3);
+        assert_eq!(cfg_for_strategy(&cfg, "script_familia_057").max_steps, 3);
+        assert_eq!(cfg_for_strategy(&cfg, "quebra_permanencia_coluna").max_steps, cfg.max_steps);
+        // escada de 20 números com base 10c: 10, 20, 40 por número (estouro em R$ 14)
+        let nl = NumberLadder::new(20, cfg.number_base_cents);
+        let total: u64 = (1..=3).map(|k| nl.stake_cents(k) * 20).sum();
+        assert_eq!((nl.stake_cents(1), nl.stake_cents(2), nl.stake_cents(3)), (10, 20, 40));
+        assert_eq!(total, 1400);
     }
 
     #[test]

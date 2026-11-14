@@ -34,7 +34,7 @@ pub use bocpd::{
     analyze_chronological, family_of_number, BocpdCfg, BocpdReport, VetoReason,
 };
 pub use dag::{
-    classify, compute_ev_cents_two_covers, evaluate_dag, evaluate_dag_with_history, fan_in,
+    cfg_for_strategy, classify, compute_ev_cents_two_covers, evaluate_dag, evaluate_dag_with_history, fan_in,
     Aggregate, DagOutput, GateCtx, LadderSteps, Plan, Regime, Window30, WINDOW_CAPACITY,
 };
 pub use executor::{
