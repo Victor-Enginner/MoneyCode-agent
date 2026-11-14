@@ -27,6 +27,7 @@ Fechar a janela preta no **X** **não** para o bot. O watchdog religa o que cair
   - **número repetido** (2× o mesmo número → as outras duas colunas);
   - quebras **1:1** (cor, alto/baixo, par/ímpar), com ficha de **R$ 0,40** e o 0 coberto.
 - **Ficha das colunas e dúzias:** R$ 0,20. Escada ×3, até 5 degraus.
+- **Sem stop win:** lucro nunca pausa o bot. O saque é com você, quando quiser.
 - **Observando, sem apostar:** Espelhos & Gêmeos, Família 3-6-9 e Família 0-5-7, no quadro *OBSERVANDO SEM APOSTAR*.
 - **Outras estratégias de número** (invictor, terminal quente, clusters): desligadas. Você liga no painel, na lista de estratégias, **se e quando quiser**. Toda entrada em número cobre o 0.
 
@@ -54,7 +55,6 @@ Fechar a janela preta no **X** **não** para o bot. O watchdog religa o que cair
 |---|---|
 | 🍀 **ENTRADA CONFIRMADA** e o resultado | Nada. É o bot trabalhando |
 | ⚠️ **MODO CAUTELA LIGADO / DESLIGADO** | Nada. É o freio automático |
-| **META ATINGIDA +R$ 50** (estado PAUSADO) | **Saque o lucro** na Jogatudo e mande `/resume`. A próxima meta conta a partir daí |
 | **BANCA ZERADA** (estado PAUSADO) | Pare e respire. Só deposite de novo com a cabeça fria; o bot rearma sozinho |
 | ⚠️ **EXTRATO DIVERGENTE** | O saldo não bateu com o que o bot calculou. Confira o histórico da mesa. Se você não apostou à mão, me chame |
 | **ALERTA · fonte morta / estado DEGRADED** | O watchdog vai tentar religar. Se passar de 10 min, reinicie pelo MONSTER LIVE |

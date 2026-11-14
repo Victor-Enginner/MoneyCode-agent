@@ -1183,7 +1183,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut spins_since_blow = cfg.cooldown_spins;
     // Freio de risco: com gale recorrente, degrau 4 ou sequência longa, só coluna e dúzia.
     let mut caution = Caution::default();
-    // Meta de lucro (pausa para saque) e banca zerada (alerta geral). Nunca move dinheiro.
+    // Banca zerada = alerta geral e executor parado. Sem stop win. Nunca move dinheiro.
     let mut money_guard = MoneyGuard::default();
     // Trava do caderno por script: 2 ciclos perdidos seguidos -> script parado por 30 giros.
     let mut script_lost_streak: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
@@ -1461,8 +1461,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report_caution(&fui, &caution, change);
         if mode == ExecutionMode::Live {
             let bank = shared_bankroll_cents.load(Ordering::Relaxed);
-            let pnl = shared_pnl_cents.load(Ordering::Relaxed);
-            match money_guard.check(bank, pnl, kill_switch.is_tripped()) {
+            match money_guard.check(bank) {
                 GuardEvent::None => {}
                 GuardEvent::Halt { message, .. } => {
                     kill_switch.trip();
@@ -1474,7 +1473,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = fui.resume();
                     println!("[VIGIA] {message}");
                 }
-                GuardEvent::Resumed => println!("[VIGIA] operador retomou depois da meta — próxima meta em +R$ 50,00"),
             }
         }
         if !already_recorded {
