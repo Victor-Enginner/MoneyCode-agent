@@ -235,6 +235,11 @@ pub trait CdpActuator: Send + Sync {
     fn confirm(&self, cal: &Calibration) -> Result<(), ExecError>;
     /// Coleta os acks por cobertura após a confirmação.
     fn collect_acks(&self, plan: &Plan) -> Result<Vec<CoverAck>, ExecError>;
+    /// Quanto esperar a mesa limpar sozinha antes de apostar (fichas da rodada que acabou
+    /// ainda aparecem durante a animação do resultado). `0` = não esperar (dry-run/testes).
+    fn table_clear_wait_ms(&self) -> u64 {
+        0
+    }
 }
 
 #[derive(Debug, Default)]
@@ -553,6 +558,10 @@ impl LiveHttpActuator {
 }
 
 impl CdpActuator for LiveHttpActuator {
+    fn table_clear_wait_ms(&self) -> u64 {
+        TABLE_CLEAR_WAIT_MS
+    }
+
     fn click(&self, x: i32, y: i32) -> Result<(), ExecError> {
         if let Ok(mut g) = self.staged_state.lock() {
             if let Some(chip) = g.0 {
@@ -692,8 +701,22 @@ fn parse_preview(body: &str) -> Result<u64, ExecError> {
 }
 const SETTLE_POLL_MS: u64 = 70;
 const SETTLE_DEADLINE_MS: u64 = 1_200;
+/// Segunda olhada no slip antes de concluir que uma cobertura não pegou na mesa.
+const COVER_RECHECK_MS: u64 = 2_000;
+/// Teto de espera para a mesa da rodada anterior sumir antes de apostar (live).
+pub const TABLE_CLEAR_WAIT_MS: u64 = 8_000;
 
 fn read_settled(cdp: &dyn CdpActuator, expected: u64) -> Result<u64, ExecError> {
+    read_settled_for(cdp, expected, SETTLE_DEADLINE_MS)
+}
+
+/// Prazo para o slip somar todas as fichas de uma entrada: 20 plenos em sequência levam
+/// segundos para animar. Em 14/11 o bot leu 170 de 200 aos 1,2 s e desfez uma entrada inteira.
+fn final_settle_ms(covers: usize) -> u64 {
+    (SETTLE_DEADLINE_MS + 150 * covers as u64).min(4_500)
+}
+
+fn read_settled_for(cdp: &dyn CdpActuator, expected: u64, deadline_ms: u64) -> Result<u64, ExecError> {
     let started = std::time::Instant::now();
     let mut last: Option<u64> = None;
     let mut stale_age: i64 = 0;
@@ -709,7 +732,7 @@ fn read_settled(cdp: &dyn CdpActuator, expected: u64) -> Result<u64, ExecError> 
             Err(ExecError::SlipStale(age)) => stale_age = age,
             Err(err) => return Err(err),
         }
-        if started.elapsed().as_millis() as u64 >= SETTLE_DEADLINE_MS {
+        if started.elapsed().as_millis() as u64 >= deadline_ms {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(SETTLE_POLL_MS));
@@ -743,7 +766,16 @@ pub fn place(
     // 0. A mesa precisa estar zerada: aposta residual jamais é empilhada com a entrada nova.
     // A leitura tem de ser FRESCA: um `0¢` em cache de rodada anterior deixou 60¢ na mesa e a
     // entrada seguinte leu 240¢ para 180¢ esperados. Cache não vale como "mesa limpa".
-    let residual = read_settled(cdp, 0)?;
+    // A Playtech mostra as fichas da rodada encerrada durante a animação do resultado: UNDO ali
+    // não tira nada e apostar por cima soma ficha velha com nova (`lido=140 esperado=40`) ou tem
+    // cliques engolidos. Em 14/11 isso cancelava gale atrás de gale. Espera a mesa limpar sozinha.
+    let mut residual = read_settled(cdp, 0)?;
+    let wait_ms = cdp.table_clear_wait_ms();
+    let waiting = std::time::Instant::now();
+    while residual > 0 && (waiting.elapsed().as_millis() as u64) < wait_ms {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        residual = read_settled(cdp, 0)?;
+    }
     if residual > 0 {
         warn!(residual, "aposta residual na mesa: limpando antes da entrada");
         cdp.clear_bets(cal)?;
@@ -827,10 +859,27 @@ pub fn place(
             continue;
         }
         let mut seen = read_settled(cdp, cumulative_expected)?;
-        // Slip atrasado mostrando o acumulado de uma cobertura anterior NÃO é ficha faltando:
-        // completar aqui aposta a mais. A validação fica para o total final.
+        // Slip parado no acumulado ANTERIOR: ou está atrasado, ou o clique desta cobertura não
+        // pegou na mesa (14/11: 16 de 24 aborts por fora eram a última cobertura faltando, e o
+        // bot desfazia a entrada inteira). Espera mais; se continuar sem ela, clica de novo SÓ
+        // esta cobertura. Se o slip só estava lento, o total passa do esperado e o §1.4 desfaz.
         if seen < cumulative_expected && legit_prefixes.contains(&seen) {
-            continue;
+            let before = cumulative_expected - *cents;
+            seen = read_settled_for(cdp, cumulative_expected, COVER_RECHECK_MS)?;
+            if seen == before {
+                warn!(cover = %cover.canonical_key(), seen, expected = cumulative_expected, "cobertura não pegou na mesa: clicando de novo só ela");
+                for (denom, n) in decompose(*cents, &cal.denoms) {
+                    if last_denom != Some(denom) {
+                        cdp.click_chip(denom, cal)?;
+                        last_denom = Some(denom);
+                    }
+                    cdp.click_cover_repeat(cover, cal, u32::from(n))?;
+                }
+                seen = read_settled(cdp, cumulative_expected)?;
+            }
+            if seen == cumulative_expected || legit_prefixes.contains(&seen) {
+                continue;
+            }
         }
         // Ficha engolida pela animação do pano: o lote de 3 entrou como 2 ao vivo
         // (`cover=high lido=20 esperado=30 fichas=10x3`). Se o total FICOU ABAIXO do esperado,
@@ -905,9 +954,25 @@ pub fn place(
     }
 
 
-    // 3. Lê o preview no bet slip ANTES de confirmar (§1.4).
-    let preview = read_settled(cdp, plan.total_cents)?;
-    if (preview as i64 - plan.total_cents as i64).abs() > 1 {
+    // 3. Lê o preview no bet slip ANTES de confirmar (§1.4), dando tempo de o slip somar tudo.
+    let preview = read_settled_for(cdp, plan.total_cents, final_settle_ms(plan.covers.len()))?;
+    // Entrada de número NUNCA é desfeita (decisão do operador em 15/11/2026, ADR 0006): com 20
+    // plenos, desfazer custava a entrada inteira por 1-2 fichas que não pegaram. Segue com o que
+    // ficou na mesa, registra a diferença e a conferência de extrato mostra o valor real.
+    if !verify_each && (preview as i64 - plan.total_cents as i64).abs() > 1 {
+        warn!(
+            preview,
+            expected = plan.total_cents,
+            intent_id,
+            "entrada de número com fichas faltando: segue sem desfazer (ADR 0006)"
+        );
+        let _ = insert_error(
+            pool,
+            "number_partial",
+            &format!("intent={intent_id} preview={preview} expected={}", plan.total_cents),
+            now_ms,
+        );
+    } else if (preview as i64 - plan.total_cents as i64).abs() > 1 {
         error!(
             preview,
             expected = plan.total_cents,
@@ -1014,6 +1079,156 @@ mod slip_settle_tests {
             .expect("entrada confirmada");
         assert_eq!(fills.preview_cents, 1100, "22 x 50c, nem um centavo a mais");
         assert_eq!(cdp.cleared_count(), 0);
+    }
+
+    /// Mesa que ainda mostra as fichas da rodada encerrada e limpa sozinha depois.
+    struct MesaAnimando {
+        inner: DryRunActuator,
+        leituras_velhas: std::sync::atomic::AtomicU32,
+    }
+
+    impl CdpActuator for MesaAnimando {
+        fn click(&self, x: i32, y: i32) -> Result<(), ExecError> {
+            self.inner.click(x, y)
+        }
+        fn click_chip(&self, d: u64, cal: &Calibration) -> Result<(), ExecError> {
+            self.inner.click_chip(d, cal)
+        }
+        fn read_bet_total(&self) -> Result<u64, ExecError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            if self.leituras_velhas.load(SeqCst) > 0 {
+                self.leituras_velhas.fetch_sub(1, SeqCst);
+                return Ok(100);
+            }
+            self.inner.read_bet_total()
+        }
+        fn clear_bets(&self, cal: &Calibration) -> Result<(), ExecError> {
+            self.inner.clear_bets(cal)
+        }
+        fn confirm(&self, cal: &Calibration) -> Result<(), ExecError> {
+            self.inner.confirm(cal)
+        }
+        fn collect_acks(&self, plan: &Plan) -> Result<Vec<CoverAck>, ExecError> {
+            self.inner.collect_acks(plan)
+        }
+        fn table_clear_wait_ms(&self) -> u64 {
+            5_000
+        }
+    }
+
+    /// Slip que demora a mostrar o total completo de uma entrada grande.
+    struct SlipLento {
+        inner: DryRunActuator,
+        total: u64,
+        leituras_lentas: std::sync::atomic::AtomicU32,
+    }
+
+    impl CdpActuator for SlipLento {
+        fn click(&self, x: i32, y: i32) -> Result<(), ExecError> {
+            self.inner.click(x, y)
+        }
+        fn click_chip(&self, d: u64, cal: &Calibration) -> Result<(), ExecError> {
+            self.inner.click_chip(d, cal)
+        }
+        fn read_bet_total(&self) -> Result<u64, ExecError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let v = self.inner.read_bet_total()?;
+            if v == self.total && self.leituras_lentas.load(SeqCst) > 0 {
+                self.leituras_lentas.fetch_sub(1, SeqCst);
+                return Ok(self.total - 30);
+            }
+            Ok(v)
+        }
+        fn clear_bets(&self, cal: &Calibration) -> Result<(), ExecError> {
+            self.inner.clear_bets(cal)
+        }
+        fn confirm(&self, cal: &Calibration) -> Result<(), ExecError> {
+            self.inner.confirm(cal)
+        }
+        fn collect_acks(&self, plan: &Plan) -> Result<Vec<CoverAck>, ExecError> {
+            self.inner.collect_acks(plan)
+        }
+    }
+
+    /// 14/11: 20 plenos clicados, slip ainda animando aos 1,2 s (170 de 200): o bot desfazia a
+    /// entrada inteira. O slip precisa de mais tempo para somar uma entrada grande.
+    #[test]
+    fn slip_lento_em_entrada_grande_nao_desfaz_a_aposta() {
+        let pool = init_pool(":memory:").expect("pool");
+        // ~2,5 s mostrando 170 (36 leituras de 70 ms) depois que as 20 fichas já estão no pano
+        let cdp = SlipLento {
+            inner: DryRunActuator::new(),
+            total: 200,
+            leituras_lentas: std::sync::atomic::AtomicU32::new(36),
+        };
+        let plan = plano_de_numeros(20, 10);
+        let fills = place(&pool, &cdp, &plan, &Calibration::default(), &KillSwitch::new(), 4)
+            .expect("entrada confirmada");
+        assert_eq!(fills.preview_cents, 200);
+        assert_eq!(cdp.inner.cleared_count(), 0, "nenhum UNDO");
+    }
+
+    /// 14/11: gale logo após o resultado via as fichas velhas, fazia UNDO à toa e apostava por
+    /// cima (`lido=140 esperado=40`). Agora espera a mesa limpar e entra exato, sem UNDO.
+    #[test]
+    fn gale_espera_a_mesa_da_rodada_anterior_limpar() {
+        let pool = init_pool(":memory:").expect("pool");
+        let cdp = MesaAnimando {
+            inner: DryRunActuator::new(),
+            leituras_velhas: std::sync::atomic::AtomicU32::new(25),
+        };
+        let plan = Plan {
+            spin_id: "gale".to_string(),
+            strategy_id: "quebra_permanencia_duzia".to_string(),
+            ladder_step: 2,
+            stake_per_cover_cents: 20,
+            total_cents: 40,
+            ev_cents: 0,
+            confidence: 0.7,
+            covers: vec![(Cover::Dozen(1), 20), (Cover::Dozen(3), 20)],
+            chips_per_cover: vec![(20, 1)],
+        };
+        let fills = place(&pool, &cdp, &plan, &Calibration::default(), &KillSwitch::new(), 3)
+            .expect("entrada confirmada");
+        assert_eq!(fills.preview_cents, 40);
+        assert_eq!(cdp.inner.cleared_count(), 0, "nenhum UNDO nas fichas da rodada encerrada");
+    }
+
+    /// 15/11 (ADR 0006): entrada de número com ficha que não pegou segue sem UNDO.
+    #[test]
+    fn entrada_de_numero_nunca_e_desfeita() {
+        let pool = init_pool(":memory:").expect("pool");
+        let cdp = DryRunActuator::new();
+        cdp.set_swallow_chips(3); // 3 plenos não pegaram
+        let plan = plano_de_numeros(20, 10);
+        let fills = place(&pool, &cdp, &plan, &Calibration::default(), &KillSwitch::new(), 6)
+            .expect("entrada segue");
+        assert_eq!(fills.preview_cents, 170, "aposta como ficou na mesa");
+        assert_eq!(cdp.cleared_count(), 0, "nenhum UNDO em entrada de número");
+    }
+
+    /// 14/11: `lido=20 esperado=40` x12 — a 2a dúzia não pegou e o bot desfazia tudo. Agora
+    /// reclica só a cobertura que faltou e a entrada sai completa, sem UNDO.
+    #[test]
+    fn cobertura_que_nao_pegou_e_reclicada_sem_desfazer_a_entrada() {
+        let pool = init_pool(":memory:").expect("pool");
+        let cdp = DryRunActuator::new();
+        cdp.set_swallow_chips(1); // a mesa engole o primeiro clique de cobertura
+        let plan = Plan {
+            spin_id: "duzias".to_string(),
+            strategy_id: "quebra_permanencia_duzia".to_string(),
+            ladder_step: 1,
+            stake_per_cover_cents: 20,
+            total_cents: 40,
+            ev_cents: 0,
+            confidence: 0.7,
+            covers: vec![(Cover::Dozen(1), 20), (Cover::Dozen(3), 20)],
+            chips_per_cover: vec![(20, 1)],
+        };
+        let fills = place(&pool, &cdp, &plan, &Calibration::default(), &KillSwitch::new(), 5)
+            .expect("entrada confirmada");
+        assert_eq!(fills.preview_cents, 40);
+        assert_eq!(cdp.cleared_count(), 0, "nenhum UNDO");
     }
 
     /// Cobertura de fora com slip atrasado mostrando a cobertura anterior: não completa.
