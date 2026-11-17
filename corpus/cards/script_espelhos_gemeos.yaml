@@ -17,10 +17,10 @@ trigger:
 cover:
   type: straight_set
   entry: [11, 12, 13, 20, 21, 22, 23, 31, 32, 33]
-  protections: [3, 9, 36, 35, 27, 30, 8, 10, 4, 2, 26]
-  pockets: [0, 2, 3, 4, 8, 9, 10, 11, 12, 13, 20, 21, 22, 23, 26, 27, 30, 31, 32, 33, 35, 36]
-  k: 22
-  p_hit_uniform: 0.5946   # 22/37  (20 e 0 incluídos pelo operador em 14/11)
+  protections: [3, 9, 36, 35, 27, 30, 8, 10, 4, 2, 26, 28, 29]   # 28 e 29 pedidos em 17/11
+  pockets: [0, 2, 3, 4, 8, 9, 10, 11, 12, 13, 20, 21, 22, 23, 26, 27, 28, 29, 30, 31, 32, 33, 35, 36]
+  k: 24
+  p_hit_uniform: 0.6486   # 24/37  (20 e 0 em 14/11; 28 e 29 em 17/11)
 
 staking:
   mode: flat

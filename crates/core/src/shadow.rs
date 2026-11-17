@@ -35,7 +35,7 @@ pub const SHADOW_CARDS: [ShadowCard; 3] = [
         id: "script_espelhos_gemeos",
         nome: "Espelhos & Gêmeos",
         trigger: ShadowTrigger::LastSpinIn(&[11, 12, 13, 20, 21, 22, 23, 31, 32, 33]),
-        pockets: &[0, 2, 3, 4, 8, 9, 10, 11, 12, 13, 20, 21, 22, 23, 26, 27, 30, 31, 32, 33, 35, 36],
+        pockets: &[0, 2, 3, 4, 8, 9, 10, 11, 12, 13, 20, 21, 22, 23, 26, 27, 28, 29, 30, 31, 32, 33, 35, 36],
     },
     ShadowCard {
         id: "script_familia_369",
@@ -231,12 +231,12 @@ mod tests {
         assert_eq!(r.open(), (1, 10));
         // 1 não está na cobertura: degrau 2
         assert_eq!(r.on_spin(&[1, 21], SEM_TRAVA), None);
-        assert_eq!(r.open(), (2, 20));
+        assert_eq!(r.open(), (2, 30));
         let s = r.on_spin(&[32, 1, 21], SEM_TRAVA).expect("liquidou");
         assert!(s.won);
         assert_eq!(s.step, 2);
-        // 22 números (com 0 e 20): degrau 1 = 22 x 10c, degrau 2 = 22 x 20c
-        assert_eq!(s.net_cents, 36 * 20 - (22 * 10 + 22 * 20));
+        // 24 números (com 0, 20, 28 e 29): degrau 1 = 24 x 10c, degrau 2 = 24 x 30c
+        assert_eq!(s.net_cents, 36 * 30 - (24 * 10 + 24 * 30));
         assert_eq!(r.stats.wins, 1);
     }
 

@@ -1022,7 +1022,7 @@ pub const OPERATOR_SCRIPTS: [OperatorScript; 3] = [
     OperatorScript {
         id: "script_espelhos_gemeos",
         trigger: ScriptTrigger::LastSpinIn(&[11, 12, 13, 20, 21, 22, 23, 31, 32, 33]),
-        pockets: &[0, 2, 3, 4, 8, 9, 10, 11, 12, 13, 20, 21, 22, 23, 26, 27, 30, 31, 32, 33, 35, 36],
+        pockets: &[0, 2, 3, 4, 8, 9, 10, 11, 12, 13, 20, 21, 22, 23, 26, 27, 28, 29, 30, 31, 32, 33, 35, 36],
     },
     OperatorScript {
         id: "script_familia_369",
@@ -1716,7 +1716,8 @@ mod tests {
     fn scripts_do_operador_disparam_como_no_caderno() {
         let espelhos = OPERATOR_SCRIPTS[0];
         let i = espelhos.evaluate(&[33, 33, 3]).expect("33 é gêmeo");
-        assert_eq!(i.cover.len(), 22);
+        assert_eq!(i.cover.len(), 24);
+        assert!(i.cover.contains(&Cover::Straight(28)) && i.cover.contains(&Cover::Straight(29)), "28 e 29 em 17/11");
         assert!(i.cover.contains(&Cover::Straight(0)), "0 incluído pelo operador em 14/11");
         assert!(espelhos.evaluate(&[20]).is_some(), "20 incluído pelo operador em 14/11");
         assert!(i.cover.contains(&Cover::Straight(20)));
