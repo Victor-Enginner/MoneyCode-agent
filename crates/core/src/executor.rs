@@ -6,7 +6,7 @@
 use crate::dag::Plan;
 use monster_risk::{decompose, DEFAULT_CHIP_DENOMS_CENTS};
 use monster_store::{
-    insert_error, insert_fill, insert_intent, update_intent_decision, IntentDecision, NewFill,
+    insert_error, insert_fill, insert_intent, IntentDecision, NewFill,
     NewIntent, SqlitePool, StoreError,
 };
 use monster_strategy_native::Cover;
@@ -239,6 +239,11 @@ pub trait CdpActuator: Send + Sync {
     /// ainda aparecem durante a animação do resultado). `0` = não esperar (dry-run/testes).
     fn table_clear_wait_ms(&self) -> u64 {
         0
+    }
+    /// Saldo real da mesa em centavos (`None` = sem leitura). Na Playtech o saldo cai no
+    /// instante em que a ficha é posta: é a segunda testemunha do que entrou no pano.
+    fn read_balance(&self) -> Option<i64> {
+        None
     }
 }
 
@@ -562,6 +567,10 @@ impl CdpActuator for LiveHttpActuator {
         TABLE_CLEAR_WAIT_MS
     }
 
+    fn read_balance(&self) -> Option<i64> {
+        self.fetch_telemetry().and_then(|t| t.balance_cents)
+    }
+
     fn click(&self, x: i32, y: i32) -> Result<(), ExecError> {
         if let Ok(mut g) = self.staged_state.lock() {
             if let Some(chip) = g.0 {
@@ -701,10 +710,33 @@ fn parse_preview(body: &str) -> Result<u64, ExecError> {
 }
 const SETTLE_POLL_MS: u64 = 70;
 const SETTLE_DEADLINE_MS: u64 = 1_200;
+/// Espera do saldo da mesa refletir as fichas postas.
+const BALANCE_CONFIRM_MS: u64 = 1_500;
 /// Segunda olhada no slip antes de concluir que uma cobertura não pegou na mesa.
 const COVER_RECHECK_MS: u64 = 2_000;
 /// Teto de espera para a mesa da rodada anterior sumir antes de apostar (live).
 pub const TABLE_CLEAR_WAIT_MS: u64 = 8_000;
+
+/// O saldo confirma que `expected` centavos entraram no pano desde `before`? Espera até 1,5 s
+/// o saldo da mesa refletir as fichas. Em 17/11 o slip leu 0 com R$ 11,00 no pano (o operador
+/// viu as fichas) e 120 com 40 colocados: o slip sozinho não é testemunha suficiente.
+fn balance_confirms(cdp: &dyn CdpActuator, before: Option<i64>, expected: u64) -> bool {
+    let Some(before) = before else {
+        return false;
+    };
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(now) = cdp.read_balance() {
+            if (before - now - expected as i64).abs() <= 1 {
+                return true;
+            }
+        }
+        if started.elapsed().as_millis() as u64 >= BALANCE_CONFIRM_MS {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+}
 
 fn read_settled(cdp: &dyn CdpActuator, expected: u64) -> Result<u64, ExecError> {
     read_settled_for(cdp, expected, SETTLE_DEADLINE_MS)
@@ -776,23 +808,14 @@ pub fn place(
         std::thread::sleep(std::time::Duration::from_millis(300));
         residual = read_settled(cdp, 0)?;
     }
+    // O bot NUNCA retira ficha da mesa (ADR 0007): o operador aposta junto e o UNDO tirava as
+    // fichas dele. O que já está no pano é do operador; o bot soma por cima e confere só a
+    // própria parte (bilhete − base).
     if residual > 0 {
-        warn!(residual, "aposta residual na mesa: limpando antes da entrada");
-        cdp.clear_bets(cal)?;
-        let after = read_settled(cdp, 0)?;
-        if after > 0 {
-            let _ = insert_error(
-                pool,
-                "dirty_table",
-                &format!("preview={after} centavos antes da entrada"),
-                now_ms,
-            );
-            return Err(ExecError::PreviewMismatch {
-                preview: after,
-                expected: 0,
-            });
-        }
+        eprintln!("[EXEC-DIAG] {residual}¢ já no pano (fichas do operador) — o bot soma por cima, sem tirar nada");
     }
+    let own = OwnShare { inner: cdp, base: residual };
+    let cdp: &dyn CdpActuator = &own;
 
     // 1. Grava a intent ANTES de qualquer clique (§1.8 e §1.3 UNIQUE(strategy_id, spin_id)).
     let covers_desc: Vec<String> = plan.covers.iter().map(|(c, _)| c.canonical_key()).collect();
@@ -834,6 +857,9 @@ pub fn place(
     // o esperado já é 90¢ (a cobertura anterior inteira) não é divergência — é o pano desenhando.
     let mut legit_prefixes: Vec<u64> = vec![0];
     let verify_each = plan.covers.len() <= PER_COVER_VERIFY_MAX;
+    let balance_before = cdp.read_balance();
+    info!(intent_id, balance_before = ?balance_before, total = plan.total_cents, "[EXECUTOR] saldo antes dos cliques");
+    eprintln!("[EXEC-DIAG] {} degrau {} | aposta {}¢ | saldo antes {:?}¢", plan.strategy_id, plan.ladder_step, plan.total_cents, balance_before);
     let apply_started = std::time::Instant::now();
     let applied = (|| -> Result<(), ExecError> {
     for (cover, cents) in &plan.covers {
@@ -859,6 +885,15 @@ pub fn place(
             continue;
         }
         let mut seen = read_settled(cdp, cumulative_expected)?;
+        info!(cover = %cover.canonical_key(), slip = seen, expected = cumulative_expected, "[EXECUTOR] leitura após cobertura");
+        eprintln!("[EXEC-DIAG] após {}: bilhete {}¢ (esperado {}¢) | saldo {:?}¢", cover.canonical_key(), seen, cumulative_expected, cdp.read_balance());
+        // Slip discorda, mas o saldo caiu exatamente o esperado: as fichas estão no pano e quem
+        // errou foi a leitura do slip. Nada a completar nem a desfazer.
+        if seen != cumulative_expected && balance_confirms(cdp, balance_before, cumulative_expected) {
+            info!(cover = %cover.canonical_key(), slip = seen, expected = cumulative_expected, "[EXECUTOR] slip divergente, saldo confirma a aposta");
+            eprintln!("[EXEC-DIAG] bilhete {}¢ diverge, mas o saldo confirma {}¢ no pano — segue", seen, cumulative_expected);
+            continue;
+        }
         // Slip parado no acumulado ANTERIOR: ou está atrasado, ou o clique desta cobertura não
         // pegou na mesa (14/11: 16 de 24 aborts por fora eram a última cobertura faltando, e o
         // bot desfazia a entrada inteira). Espera mais; se continuar sem ela, clica de novo SÓ
@@ -868,6 +903,7 @@ pub fn place(
             seen = read_settled_for(cdp, cumulative_expected, COVER_RECHECK_MS)?;
             if seen == before {
                 warn!(cover = %cover.canonical_key(), seen, expected = cumulative_expected, "cobertura não pegou na mesa: clicando de novo só ela");
+                eprintln!("[EXEC-DIAG] {} não pegou na mesa (bilhete {}¢) — clicando de novo só ela", cover.canonical_key(), seen);
                 for (denom, n) in decompose(*cents, &cal.denoms) {
                     if last_denom != Some(denom) {
                         cdp.click_chip(denom, cal)?;
@@ -904,18 +940,16 @@ pub fn place(
         if legit_prefixes.contains(&seen) {
             continue;
         }
+        // Qualquer outra divergência: registra e segue. Ficha a mais é do operador; ficha a
+        // menos aparece na leitura final e na conferência de extrato. Nada é desfeito (ADR 0007).
         let elapsed_ms = apply_started.elapsed().as_millis();
-        error!(
-            cover = %cover.canonical_key(),
+        eprintln!(
+            "[EXEC-DIAG] {}: bilhete {}¢ x esperado {}¢ ({}) — segue sem tirar ficha",
+            cover.canonical_key(),
             seen,
-            expected = cumulative_expected,
-            chips = %chips_desc,
-            elapsed_ms,
-            intent_id,
-            "cobertura com valor divergente: limpando a mesa e abortando"
+            cumulative_expected,
+            if seen > cumulative_expected { "ficha a mais: do operador" } else { "faltou ficha" }
         );
-        let _ = cdp.clear_bets(cal);
-        update_intent_decision(pool, intent_id, IntentDecision::Aborted, Some("cover_mismatch"))?;
         let _ = insert_error(
             pool,
             "cover_mismatch",
@@ -925,77 +959,52 @@ pub fn place(
             ),
             now_ms,
         );
-        return Err(ExecError::PreviewMismatch {
-            preview: seen,
-            expected: cumulative_expected,
-        });
     }
         Ok(())
     })();
     if let Err(err) = applied {
-        // Cobertura não resolvida no pano (sidecar respondeu 409): nunca confirmar aposta em
-        // coordenada cega — limpa a mesa e aborta. Os desvios de preview já se limpam internamente.
+        // Clique não resolvido no pano (409/502): o sidecar nunca clica às cegas, então nada
+        // caiu fora do lugar. O que já entrou fica (ADR 0007) e a conferência final registra.
         if matches!(err, ExecError::CdpTransport(_)) {
-            let _ = cdp.clear_bets(cal);
-            let _ = update_intent_decision(
-                pool,
-                intent_id,
-                IntentDecision::Aborted,
-                Some("click_unresolved"),
-            );
-            let _ = insert_error(
-                pool,
-                "click_unresolved",
-                &format!("intent={intent_id} {err}"),
-                now_ms,
-            );
+            eprintln!("[EXEC-DIAG] erro de clique ({err}) — o que já entrou fica no pano, sem UNDO");
+            let _ = insert_error(pool, "click_unresolved", &format!("intent={intent_id} {err}"), now_ms);
+        } else {
+            return Err(err);
         }
-        return Err(err);
     }
 
 
     // 3. Lê o preview no bet slip ANTES de confirmar (§1.4), dando tempo de o slip somar tudo.
-    let preview = read_settled_for(cdp, plan.total_cents, final_settle_ms(plan.covers.len()))?;
+    let mut preview = read_settled_for(cdp, plan.total_cents, final_settle_ms(plan.covers.len()))?;
+    info!(intent_id, slip = preview, expected = plan.total_cents, "[EXECUTOR] leitura final do slip");
+    eprintln!("[EXEC-DIAG] final: bilhete {}¢ (esperado {}¢) | saldo {:?}¢", preview, plan.total_cents, cdp.read_balance());
+    if (preview as i64 - plan.total_cents as i64).abs() > 1
+        && balance_confirms(cdp, balance_before, plan.total_cents)
+    {
+        warn!(intent_id, slip = preview, expected = plan.total_cents, "slip divergente, mas o saldo caiu exatamente a aposta: vale o saldo");
+        eprintln!("[EXEC-DIAG] bilhete {}¢ diverge, mas o saldo caiu exatamente {}¢ — vale o saldo", preview, plan.total_cents);
+        preview = plan.total_cents;
+    }
     // Entrada de número NUNCA é desfeita (decisão do operador em 15/11/2026, ADR 0006): com 20
     // plenos, desfazer custava a entrada inteira por 1-2 fichas que não pegaram. Segue com o que
     // ficou na mesa, registra a diferença e a conferência de extrato mostra o valor real.
-    if !verify_each && (preview as i64 - plan.total_cents as i64).abs() > 1 {
-        warn!(
-            preview,
-            expected = plan.total_cents,
-            intent_id,
-            "entrada de número com fichas faltando: segue sem desfazer (ADR 0006)"
+    if preview + 1 < plan.total_cents {
+        warn!(preview, expected = plan.total_cents, intent_id, "entrada com ficha do bot faltando: segue sem desfazer");
+        eprintln!(
+            "[EXEC-DIAG] parte do bot no pano: {}¢ de {}¢ — segue sem tirar ficha (conferência de extrato mostra o real)",
+            preview, plan.total_cents
         );
         let _ = insert_error(
             pool,
-            "number_partial",
+            if verify_each { "partial_entry" } else { "number_partial" },
             &format!("intent={intent_id} preview={preview} expected={}", plan.total_cents),
             now_ms,
         );
-    } else if (preview as i64 - plan.total_cents as i64).abs() > 1 {
-        error!(
-            preview,
-            expected = plan.total_cents,
-            intent_id,
-            "preview divergente > 1 centavo: executando clear_bets() e abortando"
+    } else if preview > plan.total_cents + 1 {
+        eprintln!(
+            "[EXEC-DIAG] bilhete {}¢ acima dos {}¢ do bot: fichas do operador — ficam no pano",
+            preview, plan.total_cents
         );
-        let _ = cdp.clear_bets(cal);
-        update_intent_decision(
-            pool,
-            intent_id,
-            IntentDecision::Aborted,
-            Some("preview_mismatch"),
-        )?;
-        let _ = insert_error(
-            pool,
-            "preview_mismatch",
-            &format!("intent={intent_id} preview={preview} expected={}", plan.total_cents),
-            now_ms,
-        );
-        return Err(ExecError::PreviewMismatch {
-            preview,
-            expected: plan.total_cents,
-        });
     }
 
     // 4. Confirma a aposta somente após preview validado.
@@ -1042,6 +1051,46 @@ pub fn place(
         preview_cents: preview,
         naked,
     })
+}
+
+/// Visão do executor sobre a mesa: só a parte do bot (bilhete − fichas que já estavam no pano)
+/// e nenhum UNDO. O operador aposta junto; tirar ficha tirava a dele (ADR 0007).
+struct OwnShare<'a> {
+    inner: &'a dyn CdpActuator,
+    base: u64,
+}
+
+impl CdpActuator for OwnShare<'_> {
+    fn click(&self, x: i32, y: i32) -> Result<(), ExecError> {
+        self.inner.click(x, y)
+    }
+    fn click_cover(&self, cover: &Cover, cal: &Calibration) -> Result<(), ExecError> {
+        self.inner.click_cover(cover, cal)
+    }
+    fn click_cover_repeat(&self, cover: &Cover, cal: &Calibration, n: u32) -> Result<(), ExecError> {
+        self.inner.click_cover_repeat(cover, cal, n)
+    }
+    fn click_chip(&self, denom_cents: u64, cal: &Calibration) -> Result<(), ExecError> {
+        self.inner.click_chip(denom_cents, cal)
+    }
+    fn read_bet_total(&self) -> Result<u64, ExecError> {
+        self.inner.read_bet_total().map(|v| v.saturating_sub(self.base))
+    }
+    fn clear_bets(&self, _cal: &Calibration) -> Result<(), ExecError> {
+        Ok(())
+    }
+    fn confirm(&self, cal: &Calibration) -> Result<(), ExecError> {
+        self.inner.confirm(cal)
+    }
+    fn collect_acks(&self, plan: &Plan) -> Result<Vec<CoverAck>, ExecError> {
+        self.inner.collect_acks(plan)
+    }
+    fn table_clear_wait_ms(&self) -> u64 {
+        self.inner.table_clear_wait_ms()
+    }
+    fn read_balance(&self) -> Option<i64> {
+        self.inner.read_balance()
+    }
 }
 
 /// UNDO máximos ao limpar a mesa (uma ficha por clique na Playtech).
@@ -1192,6 +1241,98 @@ mod slip_settle_tests {
             .expect("entrada confirmada");
         assert_eq!(fills.preview_cents, 40);
         assert_eq!(cdp.inner.cleared_count(), 0, "nenhum UNDO nas fichas da rodada encerrada");
+    }
+
+    /// Slip que mostra sempre o mesmo valor (leitura quebrada); o saldo acompanha o pano real.
+    struct SlipQuebrado {
+        inner: DryRunActuator,
+        slip_fixo: u64,
+    }
+
+    impl CdpActuator for SlipQuebrado {
+        fn click(&self, x: i32, y: i32) -> Result<(), ExecError> {
+            self.inner.click(x, y)
+        }
+        fn click_chip(&self, d: u64, cal: &Calibration) -> Result<(), ExecError> {
+            self.inner.click_chip(d, cal)
+        }
+        fn read_bet_total(&self) -> Result<u64, ExecError> {
+            Ok(self.slip_fixo)
+        }
+        fn clear_bets(&self, cal: &Calibration) -> Result<(), ExecError> {
+            self.inner.clear_bets(cal)
+        }
+        fn confirm(&self, cal: &Calibration) -> Result<(), ExecError> {
+            self.inner.confirm(cal)
+        }
+        fn collect_acks(&self, plan: &Plan) -> Result<Vec<CoverAck>, ExecError> {
+            self.inner.collect_acks(plan)
+        }
+        fn read_balance(&self) -> Option<i64> {
+            Some(10_000 - self.inner.read_bet_total().unwrap_or(0) as i64)
+        }
+    }
+
+    /// 17/11: gale 3 dos Espelhos com R$ 11,00 no pano e o slip lendo 0 (o operador viu as
+    /// fichas). O saldo caiu exatamente a aposta: a entrada vale, sem clicar de novo.
+    #[test]
+    fn slip_em_zero_com_saldo_confirmando_a_aposta_vale_o_saldo() {
+        let pool = init_pool(":memory:").expect("pool");
+        let cdp = SlipQuebrado { inner: DryRunActuator::new(), slip_fixo: 0 };
+        let plan = plano_de_numeros(22, 50);
+        let fills = place(&pool, &cdp, &plan, &Calibration::default(), &KillSwitch::new(), 7)
+            .expect("entrada confirmada pelo saldo");
+        assert_eq!(fills.preview_cents, 1100);
+        assert_eq!(cdp.inner.cleared_count(), 0);
+        assert_eq!(cdp.inner.confirmed_count(), 1, "uma aposta só, sem clique repetido");
+    }
+
+    /// 17/11 20:02: colunas 1 e 3 (40c) com o slip lendo 120. O saldo caiu 40: entra, sem UNDO.
+    #[test]
+    fn slip_inflado_com_saldo_certo_nao_desfaz_a_coluna() {
+        let pool = init_pool(":memory:").expect("pool");
+        let cdp = SlipQuebrado { inner: DryRunActuator::new(), slip_fixo: 0 };
+        let plan = Plan {
+            spin_id: "colunas".to_string(),
+            strategy_id: "quebra_permanencia_coluna".to_string(),
+            ladder_step: 1,
+            stake_per_cover_cents: 20,
+            total_cents: 40,
+            ev_cents: 0,
+            confidence: 0.7,
+            covers: vec![(Cover::Col(1), 20), (Cover::Col(3), 20)],
+            chips_per_cover: vec![(20, 1)],
+        };
+        let fills = place(&pool, &cdp, &plan, &Calibration::default(), &KillSwitch::new(), 8)
+            .expect("entrada confirmada pelo saldo");
+        assert_eq!(fills.preview_cents, 40);
+        assert_eq!(cdp.inner.cleared_count(), 0);
+        assert_eq!(cdp.inner.confirmed_count(), 1, "uma aposta só, sem clique repetido");
+    }
+
+    /// 18/11 (ADR 0007): operador com R$ 2,40 no vermelho; o bot entra nas colunas por cima,
+    /// confere só a parte dele e nunca tira a ficha do operador.
+    #[test]
+    fn ficha_do_operador_no_pano_fica_e_o_bot_entra_por_cima() {
+        let pool = init_pool(":memory:").expect("pool");
+        let cdp = DryRunActuator::new();
+        cdp.set_staged_total(240);
+        let plan = Plan {
+            spin_id: "junto".to_string(),
+            strategy_id: "quebra_permanencia_coluna".to_string(),
+            ladder_step: 1,
+            stake_per_cover_cents: 20,
+            total_cents: 40,
+            ev_cents: 0,
+            confidence: 0.7,
+            covers: vec![(Cover::Col(1), 20), (Cover::Col(3), 20)],
+            chips_per_cover: vec![(20, 1)],
+        };
+        let fills = place(&pool, &cdp, &plan, &Calibration::default(), &KillSwitch::new(), 9)
+            .expect("entra por cima");
+        assert_eq!(fills.preview_cents, 40, "parte do bot");
+        assert_eq!(cdp.cleared_count(), 0, "a ficha do operador fica");
+        assert_eq!(cdp.confirmed_count(), 1);
     }
 
     /// 15/11 (ADR 0006): entrada de número com ficha que não pegou segue sem UNDO.

@@ -351,7 +351,7 @@ mod tests {
     /// A reposicao e uma so: se ela tambem perder fichas, o total segue errado e o certo e
     /// abortar (clear + abort), nunca ficar insistindo — insistir cegamente vira aposta dupla.
     #[test]
-    fn reposicao_insuficiente_aborta_em_vez_de_insistir() {
+    fn ficha_do_bot_faltando_segue_sem_desfazer() {
         let pool = init_pool(":memory:").expect("init in-memory sqlite");
         let actuator = DryRunActuator::new();
         // 3 do lote + 1 da reposicao engolidas: sobram 20 de 30 esperados.
@@ -371,18 +371,17 @@ mod tests {
             chips_per_cover: vec![(10, 3)],
         };
 
-        let err = place(&pool, &actuator, &plan, &cal, &kill_switch, 1_730_000_040_000)
-            .expect_err("duas fichas perdidas devem abortar");
-        assert!(
-            matches!(err, ExecError::PreviewMismatch { .. }),
-            "esperava divergencia, veio {err:?}"
-        );
-        assert_eq!(actuator.cleared_count(), 1, "divergencia limpa a mesa");
-        assert_eq!(actuator.confirmed_count(), 0, "nunca confirma com total errado");
+        // ADR 0007: o bot nunca tira ficha. Faltou ficha dele: segue com o que entrou, registra
+        // `partial_entry`, e a conferência de extrato mostra o valor real.
+        let fills = place(&pool, &actuator, &plan, &cal, &kill_switch, 1_730_000_040_000)
+            .expect("segue com o que entrou");
+        assert!(fills.preview_cents < 30, "faltou ficha do bot e isso fica registrado");
+        assert_eq!(actuator.cleared_count(), 0, "nenhum UNDO");
+        assert_eq!(actuator.confirmed_count(), 1, "a entrada segue com o que entrou");
     }
 
     #[test]
-    fn preview_mismatch_clears_bets_and_aborts_before_confirm() {
+    fn ficha_a_mais_do_operador_nao_desfaz_a_entrada() {
         let pool = init_pool(":memory:").expect("init in-memory sqlite");
         let actuator = DryRunActuator::new();
         actuator.set_forced_preview_delta(10); // +10 centavos de divergência (> 1 centavo)
@@ -401,23 +400,13 @@ mod tests {
             chips_per_cover: vec![(10, 1)],
         };
 
-        let err = place(&pool, &actuator, &plan, &cal, &kill_switch, 1_730_000_010_000)
-            .expect_err("preview mismatch must abort");
-        // A divergência é detectada já na primeira cobertura (10¢ esperados, 20¢ na mesa),
-        // antes de empilhar a segunda cobertura.
-        assert!(matches!(
-            err,
-            ExecError::PreviewMismatch {
-                preview: 20,
-                expected: 10
-            }
-        ));
-        assert_eq!(actuator.confirmed_count(), 0, "nunca deve chamar confirm() se preview divergir");
-        assert_eq!(actuator.cleared_count(), 1, "deve chamar clear_bets() na divergência");
-
-        // E não deve deixar órfão porque a intent foi marcada como aborted
-        let orphans = orphan_sweep(&pool).expect("orphan_sweep");
-        assert_eq!(orphans, 0);
+        // ADR 0007: ficha a mais no bilhete é do operador (ele aposta junto). O bot coloca as
+        // duas colunas dele, não tira nada e confirma.
+        let fills = place(&pool, &actuator, &plan, &cal, &kill_switch, 1_730_000_010_000)
+            .expect("ficha a mais não desfaz a entrada");
+        assert!(fills.preview_cents >= 20);
+        assert_eq!(actuator.cleared_count(), 0, "nunca tira ficha do operador");
+        assert_eq!(actuator.confirmed_count(), 1);
     }
 
     #[test]
@@ -526,8 +515,8 @@ mod ladder_isolation_tests {
         let plan = out.plan.expect("gale sai");
         assert_eq!(plan.strategy_id, "script_espelhos_gemeos");
         assert_eq!(plan.ladder_step, 2);
-        assert_eq!(plan.covers.len(), 22);
-        assert_eq!(plan.stake_per_cover_cents, 20);
+        assert_eq!(plan.covers.len(), 24);
+        assert_eq!(plan.stake_per_cover_cents, 30, "24 números: 0,10 -> 0,30 -> 0,90");
 
         // No degrau 3 perdido, o script estoura: não existe degrau 4.
         steps.insert("script_espelhos_gemeos".to_string(), 3);
