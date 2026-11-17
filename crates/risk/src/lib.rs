@@ -30,6 +30,68 @@ pub fn stake_cents(step: u8, base_cents: u64) -> u64 {
     d + base_cents
 }
 
+/// Ficha do 0 que acompanha uma aposta 1:1 de `x` centavos: `ceil(x/36)` em fichas de 10¢.
+pub const fn even_money_zero_chip(x: u64) -> u64 {
+    x.div_ceil(36).div_ceil(10) * 10
+}
+
+/// Escada das apostas 1:1 (cor, alto/baixo, par/ímpar) com o 0 coberto em todo degrau.
+///
+/// Paga 1:1, então o gale DOBRA (não ×3): cada degrau `x` recupera toda a perda acumulada `D`
+/// (apostas + fichas do 0) e ainda entrega o mesmo lucro do degrau 1 (`base − ficha do 0`):
+/// `x − z(x) = D + lucro`. Regra do operador (17/11/2026): começa em 0,40.
+pub fn even_money_stake_cents(step: u8, base_cents: u64) -> u64 {
+    let lucro = base_cents.saturating_sub(even_money_zero_chip(base_cents)).max(10);
+    let mut perda = 0u64;
+    let mut x = base_cents;
+    for _ in 1..step.max(1) {
+        perda = perda.saturating_add(x).saturating_add(even_money_zero_chip(x));
+        x = perda + lucro;
+        for _ in 0..4 {
+            let nx = (perda + lucro + even_money_zero_chip(x)).div_ceil(10) * 10;
+            if nx == x {
+                break;
+            }
+            x = nx;
+        }
+    }
+    x
+}
+
+/// Gate das apostas 1:1: mesma ordem do `authorize`, com a exposição real de UMA cobertura
+/// (aposta + ficha do 0). O `authorize` genérico mede 2 coberturas na escada ×3 e bloqueava
+/// o 1:1 degraus antes do necessário.
+pub fn authorize_even_money(cfg: &Cfg, st: &State) -> Verdict {
+    if st.session_pnl_cents <= -cfg.stop_loss_cents {
+        warn!(pnl = st.session_pnl_cents, stop_loss = cfg.stop_loss_cents, "gate abort: StopLoss (1:1)");
+        return Verdict::Abort(Abort::StopLoss);
+    }
+    let next = st.step.saturating_add(1);
+    if next > cfg.max_steps {
+        return Verdict::Abort(Abort::LadderBlown);
+    }
+    let stake = even_money_stake_cents(next, cfg.base_cents);
+    if stake > cfg.max_bet_per_cover_cents {
+        return Verdict::Abort(Abort::TableLimit);
+    }
+    let total = st
+        .exposure_cents
+        .saturating_add(stake)
+        .saturating_add(even_money_zero_chip(stake));
+    let max_allowed = (st.bankroll_cents.max(0) as f64) * cfg.max_exposure_pct;
+    if st.bankroll_cents <= 0 || (total as f64) > max_allowed {
+        warn!(total, bankroll_cents = st.bankroll_cents, "gate abort: Exposure (1:1)");
+        return Verdict::Abort(Abort::Exposure);
+    }
+    if st.spins_since_blow < cfg.cooldown_spins {
+        return Verdict::Skip(Skip::Cooldown);
+    }
+    if st.remaining_window_ms < cfg.min_window_ms {
+        return Verdict::Skip(Skip::WindowTooShort);
+    }
+    Verdict::Place
+}
+
 /// Perda acumulada em centavos após perder até o degrau `step` (inclusivo).
 pub fn cum_loss_cents(step: u8, base_cents: u64) -> u64 {
     (1..=step).fold(0u64, |d, _| d + 2 * (d + base_cents))
@@ -385,6 +447,31 @@ pub fn decompose(total_cents: u64, denoms: &[u64]) -> Vec<(u64, u8)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn escada_1_para_1_dobra_desde_40_e_todo_green_rende_30() {
+        let esperado = [40u64, 90, 190, 400, 830, 1710, 3520];
+        for (k, &x) in esperado.iter().enumerate() {
+            assert_eq!(even_money_stake_cents(k as u8 + 1, 40), x, "degrau {}", k + 1);
+        }
+        // green em qualquer degrau devolve a perda inteira + 0,30 (aposta − ficha do 0)
+        let mut perda = 0u64;
+        for k in 1..=11u8 {
+            let x = even_money_stake_cents(k, 40);
+            assert_eq!(x as i64 - even_money_zero_chip(x) as i64 - perda as i64, 30, "degrau {k}");
+            perda += x + even_money_zero_chip(x);
+        }
+    }
+
+    #[test]
+    fn gate_1_para_1_mede_uma_cobertura() {
+        let cfg = Cfg { base_cents: 40, max_steps: 11, max_exposure_pct: 0.55, ..Cfg::default() };
+        let st = State { bankroll_cents: 10_000, exposure_cents: 0, session_pnl_cents: 0,
+            remaining_window_ms: 9_000, spins_since_blow: 10, step: 5 };
+        // degrau 6 = 17,10 + 0,50 do 0 cabe em 55% de R$ 100; na escada ×3 de 2 coberturas seria 2 x 32,40
+        assert_eq!(authorize_even_money(&cfg, &st), Verdict::Place);
+        assert_eq!(authorize(&cfg, &st), Verdict::Abort(Abort::Exposure));
+    }
+
     use super::*;
 
     #[test]

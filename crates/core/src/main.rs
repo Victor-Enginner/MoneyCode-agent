@@ -28,7 +28,7 @@ use monster_store::{
     all_ladder_steps, init_pool, insert_error, upsert_ladder_state, insert_intent, insert_spin, IntentDecision, NewIntent, NewSpin,
     SpinSource, SqlitePool,
 };
-use monster_strategy_native::{operator_script, Matcher, MatcherTuning, ScriptGale, MATCHER_IDS};
+use monster_strategy_native::{gale_cover, matcher_id_static, ForcedGale, Matcher, MatcherTuning, MATCHER_IDS};
 use monster_ui::{DivergenceDto, FuiController, SettlementDto, ShadowDto};
 use std::env;
 use std::io::{Read, Write};
@@ -858,14 +858,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Inicio padrao R$ 40: coluna 20¢ e 5 degraus ×3 (20/60/180/540/1620 por coluna); numeros com lucro alvo 10¢.
     // Perda máxima de um estouro = 2420¢. Exposição do degrau 5 = 1620¢, que é ~51% da banca
     // depois de 4 perdas (3200¢) — por isso o teto de exposição sobe para 0,55.
-    // Stop loss desligado a pedido do operador: o limite é a própria banca (4000¢).
+    // Stop loss fixo DESLIGADO: o stop é o piso móvel do vigia (money_guard), que só liga a partir
+    // de R$ 100 e protege 80% do melhor valor. O antigo 4000¢ cortava gale 1:1 longo no meio
+    // assim que a banca passava de R$ 40 (achado da varredura de 17/11/2026).
     let mut cfg = Cfg {
         base_cents: 20,
         number_base_cents: 10,
         max_steps: 5,
         max_bet_per_cover_cents: 100_000,
         max_exposure_pct: 0.55,
-        stop_loss_cents: 4000,
+        stop_loss_cents: i64::MAX / 4,
         stop_win_pct: 0.08,
         min_window_ms: 2000,
         cooldown_spins: 2,
@@ -1185,6 +1187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut caution = Caution::default();
     // Banca zerada = alerta geral e executor parado. Sem stop win. Nunca move dinheiro.
     let mut money_guard = MoneyGuard::default();
+    let mut first_table_base: Option<i64> = None;
     // Trava do caderno por script: 2 ciclos perdidos seguidos -> script parado por 30 giros.
     let mut script_lost_streak: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
     let mut script_paused_until: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
@@ -1204,6 +1207,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pending_entry: Option<(Plan, Vec<CoverAck>)> = None;
     // `ts` do giro em que a entrada pendente foi feita: mede se algum giro se perdeu até o resultado.
     let mut pending_trigger_ts: i64 = 0;
+    // Coberturas da última entrada: o gale obrigatório repete exatamente a mesma aposta.
+    let mut last_entry_cover: Option<(String, Vec<monster_strategy_native::Cover>)> = None;
     let mut last_entry_round = String::new();
     let mut last_entry_at_ms: i64 = 0;
 
@@ -1461,8 +1466,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report_caution(&fui, &caution, change);
         if mode == ExecutionMode::Live {
             let bank = shared_bankroll_cents.load(Ordering::Relaxed);
-            match money_guard.check(bank) {
+            // Saques/depósitos da sessão = quanto a base de P&L andou desde a primeira leitura.
+            let base_now = initial_table_balance.load(Ordering::Relaxed);
+            if first_table_base.is_none() && base_now > 0 {
+                first_table_base = Some(base_now);
+            }
+            let external = first_table_base.map_or(0, |b| base_now - b);
+            let floor_still_on = fui
+                .get_session()
+                .ok()
+                .and_then(|s| s.banner_detail)
+                .is_some_and(|b| b.starts_with("STOP LOSS"));
+            match money_guard.check(bank, external, floor_still_on) {
                 GuardEvent::None => {}
+                GuardEvent::FloorArmed { message } => println!("[VIGIA] {message}"),
+                GuardEvent::FloorBreached { message } => {
+                    fui.halt(&message);
+                    println!("[VIGIA] {message}");
+                }
                 GuardEvent::Halt { message, .. } => {
                     kill_switch.trip();
                     fui.halt(&message);
@@ -1518,19 +1539,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Ajuste de sequências pode mudar a qualquer momento pela dashboard: os matchers
         // são reconstruídos a cada giro para o gatilho novo valer no próximo sinal.
         // Modo cautela tira números e apostas 1:1 da disputa: coluna/dúzia seguem concorrendo.
-        // Script do operador que acabou de perder: o giro é do gale dele, com ou sem gatilho novo
-        // (regra do caderno). Ele concorre sozinho; os gates de risco continuam valendo.
+        // Estratégia que acabou de perder: o giro é do gale dela, com as MESMAS coberturas, com ou
+        // sem gatilho novo e sem disputar com outra (regra do operador: vai até o green).
+        // Ela concorre sozinha; os gates de risco (degraus, exposição, stop loss) continuam valendo.
+        // Ciclo que já começou vai até o green mesmo com o modo cautela ligado: a cautela segura
+        // ENTRADAS novas, não abandona um gale no meio (que transformava a perda em definitiva).
         let forced_gale = gale_alive
             .as_deref()
-            .filter(|id| caution.allows(id))
-            .and_then(operator_script);
+            .and_then(matcher_id_static)
+            .and_then(|id| {
+                last_entry_cover
+                    .as_ref()
+                    .filter(|(sid, _)| sid == id)
+                    .map(|(_, cover)| ForcedGale { id, cover: cover.clone() })
+            });
         let matchers: Vec<Arc<dyn Matcher>> = match forced_gale {
-            Some(script) => {
+            Some(gale) => {
                 println!(
-                    "[GALE] {} perdeu no giro anterior — próximo degrau sai agora, sem esperar gatilho novo",
-                    script.id
+                    "[GALE] {} perdeu no giro anterior — próximo degrau sai agora, mesmas coberturas, sem esperar gatilho",
+                    gale.id
                 );
-                vec![Arc::new(ScriptGale(script))]
+                vec![Arc::new(gale)]
+            }
+            None if money_guard.floor_hit() => {
+                println!("[VIGIA] stop loss ativo — sem entradas novas até /resume");
+                Vec::new()
             }
             None => matchers_now(&tuning)
                 .into_iter()
@@ -1631,6 +1664,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     covered.sort_unstable();
                     covered.dedup();
                     fui.set_cover_numbers(covered);
+                    let played: Vec<_> = plan.covers.iter().map(|(c, _)| *c).collect();
+                    last_entry_cover = Some((plan.strategy_id.clone(), gale_cover(&played)));
                     pending_entry = Some((plan, fills.items));
                     pending_trigger_ts = ev.ts;
                 }

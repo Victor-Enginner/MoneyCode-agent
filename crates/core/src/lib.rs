@@ -468,6 +468,41 @@ mod ladder_isolation_tests {
     /// O degrau pertence à estratégia: a perda de um padrão não pode aumentar a primeira
     /// entrada de outro (foi assim que a escada entrou em degrau 2 sem nenhuma perda dele).
     #[test]
+    fn gale_da_coluna_vai_ate_o_green_mesmo_sem_gatilho() {
+        // 17/11: 21 de 166 ciclos de coluna/dúzia abandonados. Coluna perdeu no degrau 1 e saiu
+        // o 0: o gatilho "sumiu" e o gale não saía. Agora repete as mesmas colunas no degrau 2.
+        use monster_strategy_native::{gale_cover, Cover, ForcedGale, Matcher};
+        let cfg = Cfg { base_cents: 20, ..Cfg::default() };
+        let state = estado_neutro();
+        let jogada = [Cover::Col(1), Cover::Col(3)];
+        let gale = ForcedGale { id: "quebra_permanencia_coluna", cover: gale_cover(&jogada) };
+        let window = [0u8, 5, 8, 11, 2, 9, 30, 14, 17, 21, 36, 4];
+        let matchers: Vec<std::sync::Arc<dyn Matcher>> = vec![std::sync::Arc::new(gale)];
+        let mut steps = LadderSteps::new();
+        for (degrau_perdido, ficha) in [(1u8, 60u64), (3, 540), (4, 1620)] {
+            steps.insert("quebra_permanencia_coluna".to_string(), degrau_perdido);
+            let (out, _) = evaluate_dag_with_history(
+                "gale-col",
+                &window,
+                &[],
+                &matchers,
+                &cfg,
+                &GateCtx { state: &State { bankroll_cents: 1_000_000, ..state }, ladder_steps: &steps },
+                0.55,
+            );
+            let plan = out.plan.expect("gale sai");
+            assert_eq!(plan.ladder_step, degrau_perdido + 1);
+            assert_eq!(plan.stake_per_cover_cents, ficha);
+            assert!(plan.covers.iter().any(|(c, _)| *c == Cover::Col(1)));
+            assert!(plan.covers.iter().any(|(c, _)| *c == Cover::Col(3)));
+        }
+        // ficha do 0 da jogada anterior não vira cobertura do gale (o slip recoloca pelo degrau)
+        assert_eq!(gale_cover(&[Cover::Col(1), Cover::Col(3), Cover::Straight(0)]), vec![Cover::Col(1), Cover::Col(3)]);
+        // número repete tudo, inclusive o 0
+        assert_eq!(gale_cover(&[Cover::Straight(0), Cover::Straight(7)]).len(), 2);
+    }
+
+    #[test]
     fn gale_do_script_sai_no_giro_seguinte_sem_gatilho_novo() {
         // 13/11: Espelhos perderam no 19 e o gale não saiu porque 19 não é espelho.
         let cfg = Cfg::default();

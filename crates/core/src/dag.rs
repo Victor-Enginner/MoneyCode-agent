@@ -6,7 +6,8 @@
 use crate::backtest::{evaluate_matcher_walk_forward, PatternHistoryStats};
 use crate::bocpd::{analyze_chronological, BocpdCfg, BocpdReport};
 use monster_risk::{
-    authorize, authorize_numbers, decompose, stake_cents, Cfg, NumberLadder, State, Verdict,
+    authorize, authorize_even_money, authorize_numbers, decompose, even_money_stake_cents, stake_cents,
+    Cfg, NumberLadder, State, Verdict,
 };
 use monster_strategy_native::{number_coverage, BetIntent, Cover, Matcher};
 use serde::{Deserialize, Serialize};
@@ -198,6 +199,9 @@ fn gate_for(winner: &Aggregate, cfg: &Cfg, state: &State) -> Verdict {
             let nl = NumberLadder::new(numbers.len() as u8, cfg.number_base_cents);
             authorize_numbers(cfg, &nl, state)
         }
+        None if EVEN_MONEY_STRATEGIES.contains(&winner.strategy_id.as_str()) => {
+            authorize_even_money(cfg, state)
+        }
         None => authorize(cfg, state),
     }
 }
@@ -215,6 +219,8 @@ pub fn cfg_for_strategy(cfg: &Cfg, strategy_id: &str) -> Cfg {
     }
     if EVEN_MONEY_STRATEGIES.contains(&strategy_id) {
         c.base_cents = c.base_cents.max(EVEN_MONEY_BASE_CENTS);
+        // A sequência de 1:1 pode ir a 12 repetições: até 10 gales. Banca e exposição cortam antes.
+        c.max_steps = EVEN_MONEY_MAX_STEPS;
     }
     c
 }
@@ -222,6 +228,8 @@ pub fn cfg_for_strategy(cfg: &Cfg, strategy_id: &str) -> Cfg {
 /// Quebras 1:1 (cor, alto/baixo, par/ímpar): com a ficha do 0 junto, 0,20 sobra pouco.
 /// Decisão do operador em 14/11/2026: entram com 0,40 por aposta.
 pub const EVEN_MONEY_BASE_CENTS: u64 = 40;
+/// Degraus máximos das apostas 1:1 (entrada + 10 gales). Decisão do operador em 17/11/2026.
+pub const EVEN_MONEY_MAX_STEPS: u8 = 11;
 pub const EVEN_MONEY_STRATEGIES: [&str; 3] = ["quebra_cor_6x", "quebra_alto_baixo_6x", "quebra_par_impar_6x"];
 
 /// Compila o `slip.compiler` para o vencedor do fan-in.
@@ -243,7 +251,12 @@ fn compile_plan(spin_id: &str, winner: &Aggregate, ladder_step: u8, cfg: &Cfg) -
             let ev = compute_ev_cents_numbers(numbers.len() as u64, stake);
             (covers, stake, ev)
         } else {
-            let stake = stake_cents(ladder_step, cfg.base_cents);
+            // 1:1 dobra; coluna/dúzia seguem a escada ×3 do §6.
+            let stake = if EVEN_MONEY_STRATEGIES.contains(&winner.strategy_id.as_str()) {
+                even_money_stake_cents(ladder_step, cfg.base_cents)
+            } else {
+                stake_cents(ladder_step, cfg.base_cents)
+            };
             let mut covers: Vec<(Cover, u64)> =
                 winner.cover.iter().copied().map(|c| (c, stake)).collect();
             // Proteção do zero a partir do degrau 3: toda aposta por fora perde no 0, e no degrau
@@ -297,6 +310,12 @@ pub const fn zero_insurance_from(from_step: u8, ladder_step: u8, outside_total_c
 }
 
 /// Família dos matchers "de fora" (quebra de permanência), dona da prioridade de entrada.
+/// Gale obrigatório: passa pelos filtros de sinal (concentração, veto de regime, walk-forward).
+/// Os gates de risco (degraus, exposição, stop loss) continuam valendo.
+fn is_forced_gale(a: &Aggregate) -> bool {
+    a.confidence >= monster_strategy_native::FORCED_GALE_CONFIDENCE
+}
+
 /// Confiança do pré-alerta de permanência (OBSERVANDO): a partir dela a quebra está se formando.
 pub const PERMANENCE_PRE_ALERT: f64 = 0.40;
 
@@ -398,7 +417,9 @@ fn apply_terminal_concentration(aggregates: &mut Vec<Aggregate>, window: &[u8]) 
     let before = aggregates.len();
     // Scripts do operador têm gatilho próprio (caderno): saiu espelho/gêmeo ou final da família,
     // entra. Decisão do operador em 14/11/2026 após o 31 ficar sem entrada.
-    aggregates.retain(|a| number_coverage(&a.cover).is_none() || a.strategy_id.starts_with("script_"));
+    aggregates.retain(|a| {
+        number_coverage(&a.cover).is_none() || a.strategy_id.starts_with("script_") || is_forced_gale(a)
+    });
     before - aggregates.len()
 }
 
@@ -420,7 +441,7 @@ fn cover_family(cover: &[Cover]) -> Option<usize> {
 /// matcher legítimo. Nenhum outro tipo de cobertura é afetado.
 fn apply_regime_veto(aggregates: &mut [Aggregate], report: &BocpdReport, cfg: &BocpdCfg) {
     for agg in aggregates.iter_mut() {
-        if !agg.strategy_id.contains("cluster") {
+        if !agg.strategy_id.contains("cluster") || is_forced_gale(agg) {
             continue;
         }
         let Some(family) = cover_family(&agg.cover) else {
@@ -528,7 +549,7 @@ pub fn evaluate_dag_with_history(
     let mut best_history: Option<PatternHistoryStats> = None;
 
     for mut agg in raw_aggregates {
-        if chronological_history.len() >= 25 {
+        if chronological_history.len() >= 25 && !is_forced_gale(&agg) {
             if let Some(m) = matchers.iter().find(|m| m.id() == agg.strategy_id) {
                 let stats = evaluate_matcher_walk_forward(m.as_ref(), chronological_history, cfg);
                 // Para os gatilhos de repetição (quebra de coluna/dúzia 4x e cor/alto-baixo/par-ímpar 6x),
@@ -752,7 +773,7 @@ mod tests {
         assert_eq!(p1.covers, vec![(Cover::Red, 40), (Cover::Straight(0), 10)]);
         assert_eq!(p1.total_cents, 50);
         let p4 = compile_plan("s", &w, 4, &cfg).expect("plano");
-        assert_eq!(p4.covers[1], (Cover::Straight(0), 30), "1080/36 = 30");
+        assert_eq!(p4.covers, vec![(Cover::Red, 400), (Cover::Straight(0), 20)], "1:1 dobra: degrau 4 = 4,00 + 0,20 do 0");
         // Coluna com 40c: sem zero no degrau 1 (so do 3 em diante).
         let col = Aggregate { strategy_id: "quebra_permanencia_coluna".into(), cover: vec![Cover::Col(1), Cover::Col(3)], ..w };
         let c1 = compile_plan("s", &col, 1, &cfg).expect("plano");
@@ -904,6 +925,9 @@ mod tests {
         };
         let p = compile_plan("s", &cor, 1, &cfg).expect("plano");
         assert_eq!(p.stake_per_cover_cents, 40);
+        let g2 = compile_plan("s", &cor, 2, &cfg).expect("plano");
+        assert_eq!(g2.stake_per_cover_cents, 90, "1:1 dobra recuperando o 0, não ×3");
+        assert!(g2.covers.contains(&(Cover::Straight(0), 10)));
         assert!(p.covers.contains(&(Cover::Straight(0), 10)), "0 coberto desde o degrau 1");
         let col = Aggregate {
             strategy_id: "quebra_permanencia_coluna".to_string(),

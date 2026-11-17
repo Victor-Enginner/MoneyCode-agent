@@ -5,12 +5,13 @@
 # perda acumulada maxima de um estouro = 2420c (R$ 24,20).
 # Medicao (--mc-only, 10.000 sessoes de 1 h, banca 4000c): colunas P(ruina)=0,02% DD p95=260c;
 # numeros k=15 P(ruina)=1,20% DD p95=1950c -> gate PASS.
-# Stop loss desligado a pedido do operador: igual a banca (4000c).
+# Stop loss fixo DESLIGADO (17/11/2026): o stop e o piso movel do vigia (crates/core/src/money_guard.rs),
+# ligado a partir de R$ 100 e protegendo 80% do melhor valor da sessao.
 base_cents = 10
 max_steps = 5
 max_bet_per_cover_cents = 100000
 max_exposure_pct = 0.55
-stop_loss_cents = 4000
+stop_loss_cents = 2305843009213693951
 stop_win_pct = 0.08
 min_window_ms = 2000
 cooldown_spins = 2

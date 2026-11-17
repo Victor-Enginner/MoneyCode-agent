@@ -1085,6 +1085,50 @@ impl Matcher for ScriptGale {
     }
 }
 
+/// Confiança do gale obrigatório: os filtros de sinal do DAG não se aplicam a ele.
+pub const FORCED_GALE_CONFIDENCE: f64 = 0.99;
+
+/// Gale obrigatório de QUALQUER estratégia: no giro seguinte à perda, repete as mesmas
+/// coberturas no próximo degrau, com ou sem gatilho novo e sem disputar com outra estratégia.
+/// Regra do operador: "começou o ciclo, vai até o green" (17/11/2026: 21 de 166 ciclos de
+/// coluna/dúzia eram abandonados porque outra estratégia tomava o giro ou o padrão "sumia").
+#[derive(Debug, Clone)]
+pub struct ForcedGale {
+    pub id: &'static str,
+    pub cover: Vec<Cover>,
+}
+
+impl Matcher for ForcedGale {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    fn evaluate(&self, _w: &[u8]) -> Option<BetIntent> {
+        Some(BetIntent {
+            v: 1,
+            strategy_id: self.id.to_string(),
+            cover: self.cover.clone(),
+            confidence: FORCED_GALE_CONFIDENCE,
+        })
+    }
+}
+
+/// Id estático de um matcher conhecido.
+pub fn matcher_id_static(id: &str) -> Option<&'static str> {
+    MATCHER_IDS.iter().copied().find(|x| *x == id)
+}
+
+/// Coberturas a repetir no gale a partir do plano jogado: tira a ficha de proteção do 0 das
+/// apostas por fora (o slip a recoloca conforme o degrau); entrada de número repete tudo.
+pub fn gale_cover(played: &[Cover]) -> Vec<Cover> {
+    let outside = played.iter().any(|c| !matches!(c, Cover::Straight(_) | Cover::Terminal(_)));
+    played
+        .iter()
+        .copied()
+        .filter(|c| !(outside && *c == Cover::Straight(0)))
+        .collect()
+}
+
 /// Script do operador pelo id (`None` = não é script).
 pub fn operator_script(id: &str) -> Option<OperatorScript> {
     OPERATOR_SCRIPTS.iter().copied().find(|s| s.id == id)
