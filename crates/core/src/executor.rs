@@ -708,6 +708,41 @@ fn parse_preview(body: &str) -> Result<u64, ExecError> {
         .ok_or_else(|| ExecError::CdpTransport("preview sem preview_cents".to_string()))?;
     Ok(cents.max(0) as u64)
 }
+/// Ordem de cliques agrupada por denominação (maior primeiro): `(ficha, coberturas)`, com a
+/// cobertura repetida uma vez por ficha, na ordem do plano. Cada ficha é selecionada uma vez.
+pub fn click_groups(covers: &[(Cover, u64)], denoms: &[u64]) -> Vec<(u64, Vec<Cover>)> {
+    let mut groups: Vec<(u64, Vec<Cover>)> = Vec::new();
+    for (cover, cents) in covers {
+        for (denom, n) in decompose(*cents, denoms) {
+            let idx = match groups.iter().position(|(d, _)| *d == denom) {
+                Some(i) => i,
+                None => {
+                    groups.push((denom, Vec::new()));
+                    groups.len() - 1
+                }
+            };
+            groups[idx].1.extend(std::iter::repeat_n(*cover, usize::from(n)));
+        }
+    }
+    groups.sort_by(|a, b| b.0.cmp(&a.0));
+    groups
+}
+
+/// Clica as fichas de um grupo (ficha já selecionada), juntando repetições seguidas da mesma
+/// cobertura num único pedido ao sidecar.
+fn click_units(cdp: &dyn CdpActuator, cal: &Calibration, units: &[Cover]) -> Result<(), ExecError> {
+    let mut i = 0;
+    while i < units.len() {
+        let mut j = i + 1;
+        while j < units.len() && units[j] == units[i] {
+            j += 1;
+        }
+        cdp.click_cover_repeat(&units[i], cal, (j - i) as u32)?;
+        i = j;
+    }
+    Ok(())
+}
+
 const SETTLE_POLL_MS: u64 = 70;
 const SETTLE_DEADLINE_MS: u64 = 1_200;
 /// Espera do saldo da mesa refletir as fichas postas.
@@ -756,7 +791,11 @@ fn read_settled_for(cdp: &dyn CdpActuator, expected: u64, deadline_ms: u64) -> R
         match cdp.read_bet_total() {
             Ok(seen) => {
                 last = Some(seen);
-                if seen == expected {
+                // Acima do esperado o bilhete não desce (o bot nunca tira ficha, ADR 0007):
+                // é ficha do operador e esperar o prazo inteiro só queimava a janela (P1).
+                // Com `expected == 0` (mesa da rodada anterior sumindo) o pano ainda pode
+                // descer sozinho, então ali continua esperando o zero.
+                if seen == expected || (expected > 0 && seen > expected) {
                     return Ok(seen);
                 }
             }
@@ -849,113 +888,66 @@ pub fn place(
         Err(e) => return Err(ExecError::Store(e)),
     };
 
-    // 2. Aplica as denominações de fichas em cada cobertura via coordenadas calibradas / resolução DOM.
-    // Seleciona a ficha no chip-rack apenas quando a denominação muda, evitando cliques redundantes entre as coberturas.
-    let mut last_denom: Option<u64> = None;
-    let mut cumulative_expected: u64 = 0;
-    // Acumulados legítimos intermediários: o slip anima ficha por ficha, então ver 80¢ enquanto
-    // o esperado já é 90¢ (a cobertura anterior inteira) não é divergência — é o pano desenhando.
-    let mut legit_prefixes: Vec<u64> = vec![0];
+    // 2. Aplica as fichas AGRUPADAS POR DENOMINAÇÃO (P6, auditoria de 18/11): seleciona cada
+    // ficha uma vez só e põe todas as fichas dela em todas as coberturas antes de trocar.
+    // 180¢ em col:1 + col:2 caiu de 8 para 4 trocas de ficha. A conferência passa a ser feita
+    // após cada grupo de denominação, sobre o acumulado da mesa.
+    let groups = click_groups(&plan.covers, &cal.denoms);
     let verify_each = plan.covers.len() <= PER_COVER_VERIFY_MAX;
     let balance_before = cdp.read_balance();
     info!(intent_id, balance_before = ?balance_before, total = plan.total_cents, "[EXECUTOR] saldo antes dos cliques");
     eprintln!("[EXEC-DIAG] {} degrau {} | aposta {}¢ | saldo antes {:?}¢", plan.strategy_id, plan.ladder_step, plan.total_cents, balance_before);
     let apply_started = std::time::Instant::now();
     let applied = (|| -> Result<(), ExecError> {
-    for (cover, cents) in &plan.covers {
+    for (cover, _) in &plan.covers {
         let _ = cal.coords(cover)?;
-        let chips_desc = decompose(*cents, &cal.denoms)
-            .iter()
-            .map(|(d, n)| format!("{d}x{n}"))
-            .collect::<Vec<_>>()
-            .join("+");
-        for (denom, n) in decompose(*cents, &cal.denoms) {
-            if last_denom != Some(denom) {
-                cdp.click_chip(denom, cal)?;
-                last_denom = Some(denom);
-            }
-            cdp.click_cover_repeat(cover, cal, u32::from(n))?;
-        }
-
-        // 2.1 Confere o acumulado APÓS CADA cobertura: é assim que uma dúzia de 40¢ ao lado de uma de 20¢
-        // é detectada antes de confirmar, em vez de escondida atrás de um total que fecha por coincidência.
-        cumulative_expected += *cents;
-        legit_prefixes.push(cumulative_expected);
+    }
+    let mut placed: u64 = 0;
+    for (denom, units) in &groups {
+        cdp.click_chip(*denom, cal)?;
+        click_units(cdp, cal, units)?;
+        let group_start = placed;
+        placed += denom * units.len() as u64;
         if !verify_each {
             continue;
         }
-        let mut seen = read_settled(cdp, cumulative_expected)?;
-        info!(cover = %cover.canonical_key(), slip = seen, expected = cumulative_expected, "[EXECUTOR] leitura após cobertura");
-        eprintln!("[EXEC-DIAG] após {}: bilhete {}¢ (esperado {}¢) | saldo {:?}¢", cover.canonical_key(), seen, cumulative_expected, cdp.read_balance());
-        // Slip discorda, mas o saldo caiu exatamente o esperado: as fichas estão no pano e quem
-        // errou foi a leitura do slip. Nada a completar nem a desfazer.
-        if seen != cumulative_expected && balance_confirms(cdp, balance_before, cumulative_expected) {
-            info!(cover = %cover.canonical_key(), slip = seen, expected = cumulative_expected, "[EXECUTOR] slip divergente, saldo confirma a aposta");
-            eprintln!("[EXEC-DIAG] bilhete {}¢ diverge, mas o saldo confirma {}¢ no pano — segue", seen, cumulative_expected);
+        let mut seen = read_settled(cdp, placed)?;
+        eprintln!("[EXEC-DIAG] após ficha {}¢ x{}: bilhete {}¢ (esperado {}¢)", denom, units.len(), seen, placed);
+        if seen >= placed {
+            // Igual: tudo certo. Acima: ficha do operador — o bot nunca tira ficha (ADR 0007),
+            // então o bilhete não vai descer; esperar mais não muda nada (P1).
             continue;
         }
-        // Slip parado no acumulado ANTERIOR: ou está atrasado, ou o clique desta cobertura não
-        // pegou na mesa (14/11: 16 de 24 aborts por fora eram a última cobertura faltando, e o
-        // bot desfazia a entrada inteira). Espera mais; se continuar sem ela, clica de novo SÓ
-        // esta cobertura. Se o slip só estava lento, o total passa do esperado e o §1.4 desfaz.
-        if seen < cumulative_expected && legit_prefixes.contains(&seen) {
-            let before = cumulative_expected - *cents;
-            seen = read_settled_for(cdp, cumulative_expected, COVER_RECHECK_MS)?;
-            if seen == before {
-                warn!(cover = %cover.canonical_key(), seen, expected = cumulative_expected, "cobertura não pegou na mesa: clicando de novo só ela");
-                eprintln!("[EXEC-DIAG] {} não pegou na mesa (bilhete {}¢) — clicando de novo só ela", cover.canonical_key(), seen);
-                for (denom, n) in decompose(*cents, &cal.denoms) {
-                    if last_denom != Some(denom) {
-                        cdp.click_chip(denom, cal)?;
-                        last_denom = Some(denom);
-                    }
-                    cdp.click_cover_repeat(cover, cal, u32::from(n))?;
-                }
-                seen = read_settled(cdp, cumulative_expected)?;
-            }
-            if seen == cumulative_expected || legit_prefixes.contains(&seen) {
-                continue;
-            }
-        }
-        // Ficha engolida pela animação do pano: o lote de 3 entrou como 2 ao vivo
-        // (`cover=high lido=20 esperado=30 fichas=10x3`). Se o total FICOU ABAIXO do esperado,
-        // repete só a diferença uma vez, na mesma cobertura. Acima do esperado nunca repete:
-        // excesso é divergência e vai para o clear+abort do §1.4.
-        if seen < cumulative_expected {
-            let missing = cumulative_expected - seen;
-            for (denom, n) in decompose(missing, &cal.denoms) {
-                if last_denom != Some(denom) {
-                    cdp.click_chip(denom, cal)?;
-                    last_denom = Some(denom);
-                }
-                cdp.click_cover_repeat(cover, cal, u32::from(n))?;
-            }
-            seen = read_settled(cdp, cumulative_expected)?;
-        }
-        if seen == cumulative_expected {
+        // Slip abaixo, mas o saldo caiu exatamente o esperado: quem errou foi a leitura do slip.
+        if balance_confirms(cdp, balance_before, placed) {
+            eprintln!("[EXEC-DIAG] bilhete {}¢ diverge, mas o saldo confirma {}¢ no pano — segue", seen, placed);
             continue;
         }
-        // Preview ainda não reagiu a esta cobertura (mesa lenta) ou mostra o acumulado de uma
-        // cobertura anterior: validação fica para o total final, não é divergência.
-        if legit_prefixes.contains(&seen) {
+        // Faltam fichas DESTE grupo (múltiplo exato da ficha): pode ser slip lento ou clique
+        // engolido pela animação. Olha de novo; se continuar faltando, clica só as que faltam.
+        if seen >= group_start && (seen - group_start) % denom == 0 {
+            seen = read_settled_for(cdp, placed, COVER_RECHECK_MS)?;
+            if seen < placed && seen >= group_start && (seen - group_start) % denom == 0 {
+                let done = ((seen - group_start) / denom) as usize;
+                warn!(denom, seen, expected = placed, "fichas não pegaram na mesa: clicando de novo só elas");
+                eprintln!("[EXEC-DIAG] {} ficha(s) de {}¢ não pegaram (bilhete {}¢) — clicando de novo só elas", units.len() - done, denom, seen);
+                click_units(cdp, cal, &units[done..])?;
+                seen = read_settled(cdp, placed)?;
+            }
+        }
+        if seen >= placed {
             continue;
         }
-        // Qualquer outra divergência: registra e segue. Ficha a mais é do operador; ficha a
-        // menos aparece na leitura final e na conferência de extrato. Nada é desfeito (ADR 0007).
+        // Qualquer outra falta: registra e segue. Nada é desfeito (ADR 0007); a leitura final
+        // e a conferência de extrato mostram o valor real.
         let elapsed_ms = apply_started.elapsed().as_millis();
-        eprintln!(
-            "[EXEC-DIAG] {}: bilhete {}¢ x esperado {}¢ ({}) — segue sem tirar ficha",
-            cover.canonical_key(),
-            seen,
-            cumulative_expected,
-            if seen > cumulative_expected { "ficha a mais: do operador" } else { "faltou ficha" }
-        );
+        eprintln!("[EXEC-DIAG] ficha {}¢: bilhete {}¢ x esperado {}¢ (faltou ficha) — segue sem tirar ficha", denom, seen, placed);
         let _ = insert_error(
             pool,
             "cover_mismatch",
             &format!(
-                "intent={intent_id} cover={} lido={seen} esperado={cumulative_expected} fichas={chips_desc} ms={elapsed_ms}",
-                cover.canonical_key()
+                "intent={intent_id} ficha={denom}x{} lido={seen} esperado={placed} ms={elapsed_ms}",
+                units.len()
             ),
             now_ms,
         );
@@ -978,7 +970,9 @@ pub fn place(
     let mut preview = read_settled_for(cdp, plan.total_cents, final_settle_ms(plan.covers.len()))?;
     info!(intent_id, slip = preview, expected = plan.total_cents, "[EXECUTOR] leitura final do slip");
     eprintln!("[EXEC-DIAG] final: bilhete {}¢ (esperado {}¢) | saldo {:?}¢", preview, plan.total_cents, cdp.read_balance());
-    if (preview as i64 - plan.total_cents as i64).abs() > 1
+    // Só faz sentido pedir o saldo quando o bilhete ficou ABAIXO: acima é ficha do operador e o
+    // saldo também mexeu com ela, então a espera de 1,5 s nunca confirmaria nada (P1).
+    if preview + 1 < plan.total_cents
         && balance_confirms(cdp, balance_before, plan.total_cents)
     {
         warn!(intent_id, slip = preview, expected = plan.total_cents, "slip divergente, mas o saldo caiu exatamente a aposta: vale o saldo");
@@ -1470,5 +1464,98 @@ mod slip_settle_tests {
             (SETTLE_DEADLINE_MS..=SETTLE_DEADLINE_MS + 400).contains(&waited),
             "mesa zerada com esperado 90¢ deve esperar o teto e desistir, sem laco infinito (esperou {waited} ms)"
         );
+    }
+}
+
+#[cfg(test)]
+mod auditoria_18_11_tests {
+    use super::*;
+    use monster_store::init_pool;
+    use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+
+    /// Conta quantas vezes a ficha é trocada no rack.
+    struct ContaFichas {
+        inner: DryRunActuator,
+        trocas: AtomicU32,
+    }
+    impl CdpActuator for ContaFichas {
+        fn click(&self, x: i32, y: i32) -> Result<(), ExecError> {
+            self.inner.click(x, y)
+        }
+        fn click_chip(&self, d: u64, cal: &Calibration) -> Result<(), ExecError> {
+            self.trocas.fetch_add(1, SeqCst);
+            self.inner.click_chip(d, cal)
+        }
+        fn read_bet_total(&self) -> Result<u64, ExecError> {
+            self.inner.read_bet_total()
+        }
+        fn clear_bets(&self, cal: &Calibration) -> Result<(), ExecError> {
+            self.inner.clear_bets(cal)
+        }
+        fn confirm(&self, cal: &Calibration) -> Result<(), ExecError> {
+            self.inner.confirm(cal)
+        }
+        fn collect_acks(&self, plan: &Plan) -> Result<Vec<CoverAck>, ExecError> {
+            self.inner.collect_acks(plan)
+        }
+    }
+
+    fn plano_colunas(por_coluna: u64) -> Plan {
+        Plan {
+            spin_id: "aud".to_string(),
+            strategy_id: "quebra_permanencia_coluna".to_string(),
+            ladder_step: 3,
+            stake_per_cover_cents: por_coluna,
+            total_cents: por_coluna * 2,
+            ev_cents: 0,
+            confidence: 0.7,
+            covers: vec![(Cover::Col(1), por_coluna), (Cover::Col(2), por_coluna)],
+            chips_per_cover: vec![(por_coluna, 1)],
+        }
+    }
+
+    /// P6: 180¢ por coluna (100+50+20+10) em duas colunas — 4 trocas de ficha, não 8.
+    #[test]
+    fn fichas_agrupadas_por_denominacao() {
+        let groups = click_groups(&plano_colunas(180).covers, &[10, 20, 50, 100]);
+        let denoms: Vec<u64> = groups.iter().map(|g| g.0).collect();
+        assert_eq!(denoms, vec![100, 50, 20, 10]);
+        assert!(groups.iter().all(|g| g.1 == vec![Cover::Col(1), Cover::Col(2)]));
+
+        let pool = init_pool(":memory:").expect("pool");
+        let cdp = ContaFichas { inner: DryRunActuator::new(), trocas: AtomicU32::new(0) };
+        let cal = Calibration { denoms: vec![10, 20, 50, 100], ..Calibration::default() };
+        let fills = place(&pool, &cdp, &plano_colunas(180), &cal, &KillSwitch::new(), 1)
+            .expect("entrada confirmada");
+        assert_eq!(fills.preview_cents, 360);
+        assert_eq!(cdp.trocas.load(SeqCst), 4);
+    }
+
+    /// P6: ficha engolida no meio do grupo é recolocada só ela, sem passar do total.
+    #[test]
+    fn ficha_engolida_no_grupo_e_recolocada() {
+        let pool = init_pool(":memory:").expect("pool");
+        let cdp = DryRunActuator::new();
+        cdp.set_swallow_chips(1);
+        let cal = Calibration { denoms: vec![10, 20, 50, 100], ..Calibration::default() };
+        let fills = place(&pool, &cdp, &plano_colunas(60), &cal, &KillSwitch::new(), 2)
+            .expect("entrada confirmada");
+        assert_eq!(fills.preview_cents, 120);
+        assert_eq!(cdp.cleared_count(), 0);
+    }
+
+    /// P1: operador com fichas a mais no pano — o bot não queima a janela esperando o bilhete
+    /// "descer" (antes: ~2,7 s por cobertura).
+    #[test]
+    fn ficha_do_operador_nao_atrasa_a_entrada() {
+        let pool = init_pool(":memory:").expect("pool");
+        let cdp = DryRunActuator::new();
+        cdp.set_forced_preview_delta(200);
+        let cal = Calibration { denoms: vec![10, 20, 50, 100], ..Calibration::default() };
+        let t = std::time::Instant::now();
+        let _ = place(&pool, &cdp, &plano_colunas(60), &cal, &KillSwitch::new(), 3);
+        let ms = t.elapsed().as_millis();
+        assert!(ms < 1_000, "entrada com ficha do operador levou {ms} ms");
+        assert_eq!(cdp.cleared_count(), 0, "bot nunca tira ficha");
     }
 }
